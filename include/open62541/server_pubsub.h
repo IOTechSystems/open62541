@@ -125,6 +125,10 @@ typedef struct {
     UA_Boolean configurationFrozen;
 } UA_PubSubConnectionConfig;
 
+/* Register channel for given connectionIdentifier */
+UA_StatusCode UA_EXPORT
+UA_PubSubConnection_regist(UA_Server *server, UA_NodeId *connectionIdentifier);
+
 UA_StatusCode UA_EXPORT
 UA_Server_addPubSubConnection(UA_Server *server,
                               const UA_PubSubConnectionConfig *connectionConfig,
@@ -475,7 +479,7 @@ UA_Server_DataSetReader_getConfig(UA_Server *server, UA_NodeId dataSetReaderIden
 /* Return Status Code after creating TargetVariables in Subscriber AddressSpace
  * TargetVariables define a list of variable mappings between received DataSet fields
  * and the TargetVariables in the Subscriber AddressSpace */
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_DataSetReader_createTargetVariables(UA_Server *server, UA_NodeId dataSetReaderIdentifier,
                                              UA_TargetVariablesDataType* targetVariables);
 
@@ -497,7 +501,7 @@ typedef struct {
 } UA_ReaderGroupConfig;
 
 /* Add DataSetReader to the ReaderGroup */
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_addDataSetReader(UA_Server *server, UA_NodeId readerGroupIdentifier,
                                       const UA_DataSetReaderConfig *dataSetReaderConfig,
                                       UA_NodeId *readerIdentifier);
@@ -518,7 +522,7 @@ UA_Server_ReaderGroup_getConfig(UA_Server *server, UA_NodeId readerGroupIdentifi
                                UA_ReaderGroupConfig *config);
 
 /* Add ReaderGroup to the created connection */
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_addReaderGroup(UA_Server *server, UA_NodeId connectionIdentifier,
                                    const UA_ReaderGroupConfig *readerGroupConfig,
                                    UA_NodeId *readerGroupIdentifier);
