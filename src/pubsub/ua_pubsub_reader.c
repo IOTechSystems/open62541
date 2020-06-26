@@ -607,9 +607,20 @@ UA_Server_DataSetReader_process(UA_Server *server, UA_DataSetReader *dataSetRead
     if(dataSetMsg->header.dataSetMessageType == UA_DATASETMESSAGE_DATAKEYFRAME) {
         if(dataSetMsg->header.fieldEncoding != UA_FIELDENCODING_RAWDATA) {
             size_t anzFields = dataSetMsg->data.keyFrameData.fieldCount;
+#if 0
+  /*
+   * Currently this library does not support dynamic update of the
+   * dataSetMetaData.fieldsSize.  Due to the way we attempt to dynamically
+   * add deviceResources to the dataSetMetaData when parsing a profile, this
+   * means that fieldsSize will always be 1, thus limiting us to 1
+   * subscribed variable and ignoring any extras.
+   * Removing this check for now (this is the only time this array size is
+   * checked).
+   */
             if(dataSetReader->config.dataSetMetaData.fieldsSize < anzFields) {
                 anzFields = dataSetReader->config.dataSetMetaData.fieldsSize;
             }
+#endif
 
             if(dataSetReader->subscribedDataSetTarget.targetVariablesSize < anzFields) {
                 anzFields = dataSetReader->subscribedDataSetTarget.targetVariablesSize;
