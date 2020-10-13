@@ -1114,8 +1114,10 @@ target_link_libraries(open62541 ${open62541_LIBRARIES})
 # Build Selected Targets #
 ##########################
 
-# always include, builds with make doc
-add_subdirectory(doc)
+# builds with make doc
+if(UA_BUILD_DOC)
+    add_subdirectory(doc)
+endif()
 
 if(UA_BUILD_EXAMPLES)
     if(UA_ENABLE_AMALGAMATION)
