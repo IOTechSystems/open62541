@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0...3.12)
-project(open62541)
+project(open62541 C)
 # set(CMAKE_VERBOSE_MAKEFILE ON)
 if(${CMAKE_VERSION} VERSION_LESS 3.12)
     cmake_policy(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION})
@@ -393,6 +393,7 @@ option(UA_COMPILE_AS_CXX "Force compilation with a C++ compiler" OFF)
 mark_as_advanced(UA_COMPILE_AS_CXX)
 if (UA_COMPILE_AS_CXX)
     # We need the UINT32_C define
+    enable_language (CXX)
     add_definitions(-D__STDC_CONSTANT_MACROS)
 endif()
 
