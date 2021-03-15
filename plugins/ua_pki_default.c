@@ -65,7 +65,7 @@ typedef struct {
 
 #ifdef __linux__ /* Linux only so far */
 
-#include <dirent.h>
+//#include <dirent.h>
 #include <limits.h>
 
 static UA_StatusCode
