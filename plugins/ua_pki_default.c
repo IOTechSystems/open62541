@@ -63,7 +63,7 @@ typedef struct {
     mbedtls_x509_crl certificateRevocationList;
 } CertInfo;
 
-#ifdef __linux__ /* Linux only so far */
+#if defined (Linux) && ! defined (_AZURESPHERE_) /* Linux only so far */
 
 #include <dirent.h>
 #include <limits.h>
@@ -196,7 +196,7 @@ certificateVerification_verify(void *verificationContext,
     if(!ci)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-#ifdef __linux__ /* Reload certificates if folder paths are specified */
+#if defined (Linux) && ! defined (_AZURESPHERE_) /* Reload certificates if folder paths are specified */
     reloadCertificates(ci);
 #endif
 
@@ -553,7 +553,7 @@ error:
     return UA_STATUSCODE_BADINTERNALERROR;
 }
 
-#ifdef __linux__ /* Linux only so far */
+#if defined (Linux) && ! defined (_AZURESPHERE_) /* Linux only so far */
 
 UA_StatusCode
 UA_CertificateVerification_CertFolders(UA_CertificateVerification *cv,
