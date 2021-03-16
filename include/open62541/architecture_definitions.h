@@ -179,7 +179,7 @@
 #elif (defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
       (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__))
 # define UA_LITTLE_ENDIAN 1
-#elif defined (Linux) && ! defined (_AZURESPHERE_) /* Linux (including Android) */
+#elif defined (__linux__) && ! defined (_AZURESPHERE_) /* Linux (including Android) */
 # include <endian.h>
 # if __BYTE_ORDER == __LITTLE_ENDIAN
 #  define UA_LITTLE_ENDIAN 1

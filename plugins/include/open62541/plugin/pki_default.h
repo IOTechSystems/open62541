@@ -29,7 +29,7 @@ UA_CertificateVerification_Trustlist(UA_CertificateVerification *cv,
                                      const UA_ByteString *certificateRevocationList,
                                      size_t certificateRevocationListSize);
 
-#if defined (Linux) && ! defined (_AZURESPHERE_) /* Linux only so far */
+#if defined (__linux__) && ! defined (_AZURESPHERE_) /* Linux only so far */
 UA_EXPORT UA_StatusCode
 UA_CertificateVerification_CertFolders(UA_CertificateVerification *cv,
                                        const char *trustListFolder,
