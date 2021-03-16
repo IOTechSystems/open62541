@@ -80,6 +80,10 @@ message(STATUS "The selected architecture is: ${UA_ARCHITECTURE}")
 string(TOUPPER ${UA_ARCHITECTURE} UA_ARCHITECTURE_UPPER)
 add_definitions(-DUA_ARCHITECTURE_${UA_ARCHITECTURE_UPPER})
 
+if ("${LINUX_SYS}" STREQUAL "AzureSphere")
+  add_definitions (-D_AZURESPHERE_)
+endif ()
+
 add_subdirectory(arch)
 
 GET_PROPERTY(architectures GLOBAL PROPERTY UA_ARCHITECTURES)
