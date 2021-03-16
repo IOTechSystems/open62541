@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0...3.12)
-project(open62541)
+project(open62541 C)
 # set(CMAKE_VERBOSE_MAKEFILE ON)
 if(${CMAKE_VERSION} VERSION_LESS 3.12)
     cmake_policy(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION})
@@ -79,6 +79,10 @@ endif()
 message(STATUS "The selected architecture is: ${UA_ARCHITECTURE}")
 string(TOUPPER ${UA_ARCHITECTURE} UA_ARCHITECTURE_UPPER)
 add_definitions(-DUA_ARCHITECTURE_${UA_ARCHITECTURE_UPPER})
+
+if ("${LINUX_SYS}" STREQUAL "AzureSphere")
+  add_definitions (-D_AZURESPHERE_)
+endif ()
 
 add_subdirectory(arch)
 
@@ -393,6 +397,7 @@ option(UA_COMPILE_AS_CXX "Force compilation with a C++ compiler" OFF)
 mark_as_advanced(UA_COMPILE_AS_CXX)
 if (UA_COMPILE_AS_CXX)
     # We need the UINT32_C define
+    enable_language (CXX)
     add_definitions(-D__STDC_CONSTANT_MACROS)
 endif()
 
