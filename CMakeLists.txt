@@ -82,6 +82,8 @@ add_definitions(-DUA_ARCHITECTURE_${UA_ARCHITECTURE_UPPER})
 
 if ("${LINUX_SYS}" STREQUAL "AzureSphere")
   add_definitions (-D_AZURESPHERE_)
+else ()
+  add_definitions (-DLinux)
 endif ()
 
 add_subdirectory(arch)
