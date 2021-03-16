@@ -103,10 +103,8 @@
 #define UA_getsockopt getsockopt
 #define UA_setsockopt setsockopt
 #define UA_freeaddrinfo freeaddrinfo
-#if defined (_AZURESPHERE_)
-    #define UA_gethostname(n,l) (0)
-#else
-    #define UA_gethostname gethostname
+#if defined (Linux) && ! defined (_AZURESPHERE_)
+  #define UA_gethostname gethostname
 #endif
 #define UA_getsockname getsockname
 #define UA_inet_pton inet_pton
