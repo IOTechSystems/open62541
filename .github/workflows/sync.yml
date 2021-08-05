@@ -1,0 +1,21 @@
+name: Merge upstream branches
+on:
+  schedule:
+    - cron:  '0 0 * * *'
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Merge upstream
+        run: |
+          git config --global user.name 'iotech-jenkins'
+          git config --global user.email 'bot@iotechsys.com'
+          git pull --unshallow
+
+          git remote add upstream https://github.com/open62541/open62541.git
+          git fetch upstream
+
+          git checkout master
+          git merge --no-edit upstream/master
+          git push origin master
