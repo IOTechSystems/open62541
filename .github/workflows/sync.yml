@@ -16,6 +16,6 @@ jobs:
           git remote add upstream https://github.com/open62541/open62541.git
           git fetch upstream
 
-          git checkout master
-          git merge --no-edit upstream/master
-          git push origin master
+          git checkout -b 1.2 origin/1.2
+          git merge --no-edit upstream/1.2
+          git push origin 1.2
