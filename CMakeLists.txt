@@ -526,7 +526,7 @@ if(NOT UA_FORCE_CPP AND (CMAKE_COMPILER_IS_GNUCC OR "x${CMAKE_C_COMPILER_ID}" ST
     check_add_cc_flag("-Wall")      # Warnings
     check_add_cc_flag("-Wextra")    # More warnings
     check_add_cc_flag("-Wpedantic") # Standard compliance
-    check_add_cc_flag("-Werror")    # All warnings are errors
+    #check_add_cc_flag("-Werror")    # All warnings are errors
 
     check_add_cc_flag("-Wno-static-in-inline") # Clang doesn't like the use of static inline methods inside static inline methods
     check_add_cc_flag("-Wno-overlength-strings") # May happen in the nodeset compiler when complex values are directly encoded
@@ -1319,8 +1319,10 @@ target_link_libraries(open62541 ${open62541_LIBRARIES})
 # Build Selected Targets #
 ##########################
 
-# always include, builds with make doc
-add_subdirectory(doc)
+# builds with make doc
+if(UA_BUILD_DOC)
+    add_subdirectory(doc)
+endif()
 
 if(UA_BUILD_EXAMPLES)
     if(UA_ENABLE_AMALGAMATION)
