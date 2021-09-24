@@ -28,9 +28,6 @@ _UA_BEGIN_DECLS
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS
 
-struct UA_MonitoredItem;
-typedef struct UA_MonitoredItem UA_MonitoredItem;
-
 /* MonitoredItems create Notifications. Subscriptions collect Notifications from
  * (several) MonitoredItems and publish them to the client.
  *
@@ -104,10 +101,8 @@ typedef TAILQ_HEAD(NotificationMessageQueue, UA_NotificationMessageEntry)
 struct UA_MonitoredItem {
     UA_TimerEntry delayedFreePointers;
     LIST_ENTRY(UA_MonitoredItem) listEntry; /* Linked list in the Subscription */
-#ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
     UA_MonitoredItem *next; /* Linked list of MonitoredItems directly attached
                              * to a Node */
-#endif
     UA_Subscription *subscription; /* If NULL, then this is a Local MonitoredItem */
     UA_UInt32 monitoredItemId;
 
@@ -134,7 +129,6 @@ struct UA_MonitoredItem {
 
     /* Sampling Callback */
     UA_UInt64 sampleCallbackId;
-    UA_ByteString lastSampledValue;
     UA_DataValue lastValue;
 
     /* Triggering Links */
@@ -154,12 +148,17 @@ void UA_MonitoredItem_init(UA_MonitoredItem *mon);
 void
 UA_MonitoredItem_delete(UA_Server *server, UA_MonitoredItem *monitoredItem);
 
-UA_StatusCode
+void
 UA_Server_registerMonitoredItem(UA_Server *server, UA_MonitoredItem *mon);
 
+/* Register sampling. Either by adding a repeated callback or by adding the
+ * MonitoredItem to a linked list in the node. */
+UA_StatusCode
+UA_MonitoredItem_registerSampling(UA_Server *server, UA_MonitoredItem *mon);
+
 void
-UA_MonitoredItem_unregisterSampleCallback(UA_Server *server,
-                                          UA_MonitoredItem *mon);
+UA_MonitoredItem_unregisterSampling(UA_Server *server,
+                                    UA_MonitoredItem *mon);
 
 UA_StatusCode
 UA_MonitoredItem_setMonitoringMode(UA_Server *server, UA_MonitoredItem *mon,
@@ -170,8 +169,8 @@ UA_MonitoredItem_sampleCallback(UA_Server *server,
                                 UA_MonitoredItem *monitoredItem);
 
 UA_StatusCode
-UA_MonitoredItem_registerSampleCallback(UA_Server *server,
-                                        UA_MonitoredItem *mon);
+sampleCallbackWithValue(UA_Server *server, UA_Subscription *sub,
+                        UA_MonitoredItem *mon, UA_DataValue *value);
 
 UA_StatusCode
 UA_MonitoredItem_removeLink(UA_Subscription *sub, UA_MonitoredItem *mon,
