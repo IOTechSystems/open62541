@@ -42,7 +42,7 @@ setAbsoluteFromPercentageDeadband(UA_Server *server, UA_Session *session,
         browseSimplifiedBrowsePath(server, mon->itemToMonitor.nodeId, 1, &qn);
     if(bpr.statusCode != UA_STATUSCODE_GOOD || bpr.targetsSize < 1) {
         UA_BrowsePathResult_clear(&bpr);
-        return UA_STATUSCODE_BADFILTERNOTALLOWED;
+        return UA_STATUSCODE_BADMONITOREDITEMFILTERUNSUPPORTED;
     }
 
     /* Read the range */
@@ -56,7 +56,7 @@ setAbsoluteFromPercentageDeadband(UA_Server *server, UA_Session *session,
     if(!UA_Variant_isScalar(&rangeVal.value) ||
        rangeVal.value.type != &UA_TYPES[UA_TYPES_RANGE]) {
         UA_DataValue_clear(&rangeVal);
-        return UA_STATUSCODE_BADFILTERNOTALLOWED;
+        return UA_STATUSCODE_BADMONITOREDITEMFILTERUNSUPPORTED;
     }
 
     /* Compute the abs deadband */
@@ -66,7 +66,7 @@ setAbsoluteFromPercentageDeadband(UA_Server *server, UA_Session *session,
     /* EURange invalid or NaN? */
     if(absDeadband < 0.0 || absDeadband != absDeadband) {
         UA_DataValue_clear(&rangeVal);
-        return UA_STATUSCODE_BADFILTERNOTALLOWED;
+        return UA_STATUSCODE_BADMONITOREDITEMFILTERUNSUPPORTED;
     }
 
     /* Adjust the original filter */
@@ -179,12 +179,14 @@ checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
             case UA_DEADBANDTYPE_NONE:
                 break;
             case UA_DEADBANDTYPE_ABSOLUTE:
-                if(!valueType || !UA_DataType_isNumeric(valueType))
+                if(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_VALUE ||
+                   !valueType || !UA_DataType_isNumeric(valueType))
                     return UA_STATUSCODE_BADFILTERNOTALLOWED;
                 break;
 #ifdef UA_ENABLE_DA
             case UA_DEADBANDTYPE_PERCENT: {
-                if(!valueType || !UA_DataType_isNumeric(valueType))
+                if(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_VALUE ||
+                   !valueType || !UA_DataType_isNumeric(valueType))
                     return UA_STATUSCODE_BADFILTERNOTALLOWED;
                 /* If percentage deadband is supported, look up the range values
                  * and precompute as if it was an absolute deadband. */
