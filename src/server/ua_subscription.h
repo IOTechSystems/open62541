@@ -48,7 +48,7 @@ _UA_BEGIN_DECLS
 #define UA_SUBSCRIPTION_QUEUE_SENTINEL ((UA_Notification*)0x01)
 
 typedef struct UA_Notification {
-    TAILQ_ENTRY(UA_Notification) listEntry;   /* Notification list for the MonitoredItem */
+    TAILQ_ENTRY(UA_Notification) localEntry;   /* Notification list for the MonitoredItem */
     TAILQ_ENTRY(UA_Notification) globalEntry; /* Notification list for the Subscription */
     UA_MonitoredItem *mon; /* Always set */
 
@@ -82,7 +82,7 @@ void UA_Notification_enqueueAndTrigger(UA_Server *server,
                                        UA_Notification *n);
 
 /* Dequeue and delete the notification */
-void UA_Notification_delete(UA_Server *server, UA_Notification *n);
+void UA_Notification_delete(UA_Notification *n);
 
 /* A NotificationMessage contains an array of notifications.
  * Sent NotificationMessages are stored for the republish service. */
@@ -115,6 +115,12 @@ struct UA_MonitoredItem {
     UA_TimestampsToReturn timestampsToReturn;
     UA_Boolean sampleCallbackIsRegistered;
     UA_Boolean registered; /* Registered in the server / Subscription */
+    UA_DateTime triggeredUntil;  /* If the MonitoringMode is SAMPLING, a
+                                  * triggered MonitoredItem puts the next
+                                  * Notification into the global queue (of the
+                                  * Subscription) for publishing. But triggering
+                                  * is only active for the duration of one
+                                  * publishin cycle. */
 
     /* If the filter is a UA_DataChangeFilter: The DataChangeFilter always
      * contains an absolute deadband definition. Part 8, §6.2 gives the
