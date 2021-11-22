@@ -588,12 +588,29 @@ UA_StatusCode writeNs0VariableArray(UA_Server *server, UA_UInt32 id, void *v,
 #define UA_NODESTORE_DELETE(server, node)                               \
     server->config.nodestore.deleteNode(server->config.nodestore.context, node)
 
-#define UA_NODESTORE_GET(server, nodeid)                                \
-    server->config.nodestore.getNode(server->config.nodestore.context, nodeid)
+/* Get the node with all attributes and references */
+static UA_INLINE const UA_Node *
+UA_NODESTORE_GET(UA_Server *server, const UA_NodeId *nodeId) {
+    return server->config.nodestore.
+        getNode(server->config.nodestore.context, nodeId, UA_NODEATTRIBUTESMASK_ALL,
+                UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+}
 
-/* Returns NULL if the target is an external Reference (per the ExpandedNodeId) */
-const UA_Node *
-UA_NODESTORE_GETFROMREF(UA_Server *server, UA_NodePointer target);
+/* Get the node with all attributes and references */
+static UA_INLINE const UA_Node *
+UA_NODESTORE_GETFROMREF(UA_Server *server, UA_NodePointer target) {
+    return server->config.nodestore.
+        getNodeFromPtr(server->config.nodestore.context, target, UA_NODEATTRIBUTESMASK_ALL,
+                       UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+}
+
+#define UA_NODESTORE_GET_SELECTIVE(server, nodeid, attrMask, refs, refDirs) \
+    server->config.nodestore.getNode(server->config.nodestore.context,      \
+                                     nodeid, attrMask, refs, refDirs)
+
+#define UA_NODESTORE_GETFROMREF_SELECTIVE(server, target, attrMask, refs, refDirs) \
+    server->config.nodestore.getNodeFromPtr(server->config.nodestore.context,      \
+                                            target, attrMask, refs, refDirs)
 
 #define UA_NODESTORE_RELEASE(server, node)                              \
     server->config.nodestore.releaseNode(server->config.nodestore.context, node)
