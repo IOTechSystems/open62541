@@ -4,6 +4,8 @@
 
 #include <open62541/plugin/eventloop.h>
 #include <open62541/plugin/log_stdout.h>
+#include "open62541/types.h"
+#include "open62541/types_generated.h"
 
 #include "testing_clock.h"
 #include <time.h>
@@ -25,7 +27,9 @@ START_TEST(listenTCP) {
     UA_Variant_setScalar(&portVar, &port, &UA_TYPES[UA_TYPES_UINT16]);
     UA_ConnectionManager *cm = UA_ConnectionManager_TCP_new(UA_STRING("tcpCM"));
     cm->connectionCallback = noopCallback;
-    UA_ConfigParameter_setParameter(&cm->eventSource.parameters, "listen-port", &portVar);
+    UA_KeyValueMap_set(&cm->eventSource.params,
+                       &cm->eventSource.paramsSize,
+                       UA_QUALIFIEDNAME(0, "listen-port"), &portVar);
     UA_EventLoop_registerEventSource(el, &cm->eventSource);
 
     UA_EventLoop_start(el);
@@ -97,7 +101,9 @@ START_TEST(runEventloopFailsIfCalledFromCallback) {
     UA_Variant_setScalar(&portVar, &port, &UA_TYPES[UA_TYPES_UINT16]);
     UA_ConnectionManager *cm = UA_ConnectionManager_TCP_new(UA_STRING("tcpCM"));
     cm->connectionCallback = illegalConnectionCallback;
-    UA_ConfigParameter_setParameter(&cm->eventSource.parameters, "listen-port", &portVar);
+    UA_KeyValueMap_set(&cm->eventSource.params,
+                       &cm->eventSource.paramsSize,
+                       UA_QUALIFIEDNAME(0, "listen-port"), &portVar);
     UA_EventLoop_registerEventSource(el, &cm->eventSource);
 
     connCount = 0;
@@ -105,7 +111,15 @@ START_TEST(runEventloopFailsIfCalledFromCallback) {
 
     /* Open a client connection */
     clientId = 0;
-    UA_StatusCode retval = cm->openConnection(cm, UA_STRING("localhost:4840"), (void*)0x01);
+
+    UA_String targetHost = UA_STRING("localhost");
+    UA_KeyValuePair params[2];
+    params[0].key = UA_QUALIFIEDNAME(0, "target-port");
+    params[0].value = portVar;
+    params[1].key = UA_QUALIFIEDNAME(0, "target-hostname");
+    UA_Variant_setScalar(&params[1].value, &targetHost, &UA_TYPES[UA_TYPES_STRING]);
+
+    UA_StatusCode retval = cm->openConnection(cm, 2, params, (void*)0x01);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     for(size_t i = 0; i < 10; i++) {
         UA_DateTime next = UA_EventLoop_run(el, 1);
@@ -120,7 +134,7 @@ START_TEST(runEventloopFailsIfCalledFromCallback) {
     retval = cm->allocNetworkBuffer(cm, clientId, &snd, strlen(testMsg));
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     memcpy(snd.data, testMsg, strlen(testMsg));
-    retval = cm->sendWithConnection(cm, clientId, &snd);
+    retval = cm->sendWithConnection(cm, clientId, 0, NULL, &snd);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     for(size_t i = 0; i < 10; i++) {
         UA_DateTime next = UA_EventLoop_run(el, 1);
@@ -159,7 +173,9 @@ START_TEST(connectTCP) {
     UA_Variant_setScalar(&portVar, &port, &UA_TYPES[UA_TYPES_UINT16]);
     UA_ConnectionManager *cm = UA_ConnectionManager_TCP_new(UA_STRING("tcpCM"));
     cm->connectionCallback = connectionCallback;
-    UA_ConfigParameter_setParameter(&cm->eventSource.parameters, "listen-port", &portVar);
+    UA_KeyValueMap_set(&cm->eventSource.params,
+                       &cm->eventSource.paramsSize,
+                       UA_QUALIFIEDNAME(0, "listen-port"), &portVar);
     UA_EventLoop_registerEventSource(el, &cm->eventSource);
 
     connCount = 0;
@@ -167,7 +183,15 @@ START_TEST(connectTCP) {
 
     /* Open a client connection */
     clientId = 0;
-    UA_StatusCode retval = cm->openConnection(cm, UA_STRING("localhost:4840"), (void*)0x01);
+
+    UA_String targetHost = UA_STRING("localhost");
+    UA_KeyValuePair params[2];
+    params[0].key = UA_QUALIFIEDNAME(0, "target-port");
+    params[0].value = portVar;
+    params[1].key = UA_QUALIFIEDNAME(0, "target-hostname");
+    UA_Variant_setScalar(&params[1].value, &targetHost, &UA_TYPES[UA_TYPES_STRING]);
+
+    UA_StatusCode retval = cm->openConnection(cm, 2, params, (void*)0x01);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     for(size_t i = 0; i < 10; i++) {
         UA_DateTime next = UA_EventLoop_run(el, 1);
@@ -182,7 +206,7 @@ START_TEST(connectTCP) {
     retval = cm->allocNetworkBuffer(cm, clientId, &snd, strlen(testMsg));
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     memcpy(snd.data, testMsg, strlen(testMsg));
-    retval = cm->sendWithConnection(cm, clientId, &snd);
+    retval = cm->sendWithConnection(cm, clientId, 0, NULL, &snd);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     for(size_t i = 0; i < 10; i++) {
         UA_DateTime next = UA_EventLoop_run(el, 1);
