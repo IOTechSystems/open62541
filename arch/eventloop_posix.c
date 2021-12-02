@@ -265,17 +265,18 @@ static UA_StatusCode
 processFDs(UA_EventLoop *el, UA_DateTime usedTimeout) {
     fd_set readset, writeset, errset;
     UA_FD highestfd = setFDSets(el, &readset, &writeset, &errset);
-    if(highestfd == UA_INVALID_FD) {
-        UA_LOG_WARNING(el->logger, UA_LOGCATEGORY_EVENTLOOP,
-                       "No valid FDs for processing");
 
+    /* Nothing to do? */
+    if(highestfd == UA_INVALID_FD) {
+        UA_LOG_DEBUG(el->logger, UA_LOGCATEGORY_EVENTLOOP,
+                     "No valid FDs for processing");
         return UA_STATUSCODE_GOOD;
     }
 
     struct timeval tmptv = {
 #ifndef _WIN32
-        usedTimeout / UA_DATETIME_SEC,
-        (usedTimeout % UA_DATETIME_SEC) / UA_DATETIME_USEC
+        (time_t)(usedTimeout / UA_DATETIME_SEC),
+        (suseconds_t)((usedTimeout % UA_DATETIME_SEC) / UA_DATETIME_USEC)
 #else
         (long)(usedTimeout / UA_DATETIME_SEC),
         (long)((usedTimeout % UA_DATETIME_SEC) / UA_DATETIME_USEC)
