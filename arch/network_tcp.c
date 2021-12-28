@@ -153,7 +153,7 @@ connection_recv(UA_Connection *connection, UA_ByteString *response,
         if(internallyAllocated)
             UA_ByteString_clear(response);
         if(UA_ERRNO == UA_INTERRUPTED || (timeout > 0) ?
-           false : (UA_ERRNO == UA_EAGAIN || UA_ERRNO == UA_WOULDBLOCK))
+           false : (UA_ERRNO == UA_AGAIN || UA_ERRNO == UA_WOULDBLOCK))
             return UA_STATUSCODE_GOOD; /* statuscode_good but no data -> retry */
         connection->close(connection);
         return UA_STATUSCODE_BADCONNECTIONCLOSED;
@@ -764,7 +764,7 @@ UA_ClientConnectionTCP_poll(UA_Connection *connection, UA_UInt32 timeout,
         }
 
         /* The connection failed */
-        if((UA_ERRNO != UA_ERR_CONNECTION_PROGRESS)) {
+        if(UA_ERRNO != UA_WOULDBLOCK && UA_ERRNO != UA_INPROGRESS) {
             UA_LOG_WARNING(logger, UA_LOGCATEGORY_NETWORK,
                            "Connection to %.*s failed with error: %s",
                            (int)tcpConnection->endpointUrl.length,
@@ -795,7 +795,7 @@ UA_ClientConnectionTCP_poll(UA_Connection *connection, UA_UInt32 timeout,
                         tcpConnection->server->ai_addrlen);
         if((error == -1 && UA_ERRNO == EISCONN) || (error == 0))
             resultsize = 1;
-        if(error == -1 && UA_ERRNO != EALREADY && UA_ERRNO != EINPROGRESS)
+        if(error == -1 && UA_ERRNO != UA_ALREADY && UA_ERRNO != UA_INPROGRESS)
             break;
     } while(resultsize == 0);
 #else
