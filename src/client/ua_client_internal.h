@@ -22,6 +22,8 @@
 #include "ua_securechannel.h"
 #include "ua_timer.h"
 
+#include <stdatomic.h>
+
 _UA_BEGIN_DECLS
 
 /**************************/
@@ -155,6 +157,9 @@ struct UA_Client {
     UA_UInt32 monitoredItemHandles;
     UA_UInt16 currentlyOutStandingPublishRequests;
 #endif
+
+    atomic_bool receiveRunning;
+    atomic_bool interruptReceive;
 };
 
 void notifyClientState(UA_Client *client);

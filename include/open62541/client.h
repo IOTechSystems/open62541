@@ -588,6 +588,12 @@ UA_Client_sendAsyncRequest(UA_Client *client, const void *request,
         const UA_DataType *requestType, UA_ClientAsyncServiceCallback callback,
         const UA_DataType *responseType, void *userdata, UA_UInt32 *requestId);
 
+/* Thread Safe interrupt the blocking receiving of messages when a timeout is set on
+ * UA_Client_run_iterate to support multi-threaded client applications.
+ */
+void UA_EXPORT
+UA_Client_interruptIterateReceive(UA_Client *client);
+
 /* Listen on the network and process arriving asynchronous responses in the
  * background. Internal housekeeping, renewal of SecureChannels and subscription
  * management is done as well. */

@@ -34,6 +34,8 @@ UA_Client_init(UA_Client* client) {
     client->connectStatus = UA_STATUSCODE_GOOD;
     UA_Timer_init(&client->timer);
     notifyClientState(client);
+    client->receiveRunning = ATOMIC_VAR_INIT(false);
+    client->interruptReceive = ATOMIC_VAR_INIT(false);
 }
 
 UA_Client UA_EXPORT *
@@ -401,6 +403,7 @@ receiveResponse(UA_Client *client, void *response, const UA_DataType *responseTy
     /* Prepare the response and the structure we give into processServiceResponse */
     SyncResponseDescription rd = { client, false, 0, response, responseType };
 
+    atomic_store(&client->receiveRunning, true);
     /* Return upon receiving the synchronized response. All other responses are
      * processed with a callback "in the background". */
     if(synchronousRequestId)
@@ -427,9 +430,23 @@ receiveResponse(UA_Client *client, void *response, const UA_DataType *responseTy
         now = UA_DateTime_nowMonotonic();
         if(maxDate < now)
             break;
+
+        if (atomic_load(&client->interruptReceive))
+        {
+            atomic_store(&client->interruptReceive, false);
+            break;
+        }
     } while(!rd.received && responseType); /* Return if we don't wait for an async response */
 
+    atomic_store(&client->receiveRunning, false);
     return retval;
+}
+
+void UA_EXPORT
+UA_Client_interruptIterateReceive(UA_Client *client)
+{
+    client->connection.sockfd
+    atomic_store(&client->interruptReceive, true);
 }
 
 UA_StatusCode
