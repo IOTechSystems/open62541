@@ -445,7 +445,6 @@ receiveResponse(UA_Client *client, void *response, const UA_DataType *responseTy
 void UA_EXPORT
 UA_Client_interruptIterateReceive(UA_Client *client)
 {
-    client->connection.sockfd
     atomic_store(&client->interruptReceive, true);
 }
 
