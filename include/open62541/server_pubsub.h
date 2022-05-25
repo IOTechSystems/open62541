@@ -249,7 +249,7 @@ UA_Server_getPubSubConnectionConfig(UA_Server *server,
 
 /* Remove Connection, identified by the NodeId. Deletion of Connection
  * removes all contained WriterGroups and Writers. */
-UA_StatusCode UA_EXPORT
+UA_StatusCode UA_EXPORT UA_THREADSAFE
 UA_Server_removePubSubConnection(UA_Server *server, const UA_NodeId connection);
 
 /**
@@ -526,7 +526,7 @@ UA_StatusCode UA_EXPORT
 UA_Server_WriterGroup_getState(UA_Server *server, UA_NodeId writerGroupIdentifier,
                                UA_PubSubState *state);
 
-UA_StatusCode UA_EXPORT
+UA_StatusCode UA_EXPORT UA_THREADSAFE
 UA_Server_removeWriterGroup(UA_Server *server, const UA_NodeId writerGroup);
 
 UA_StatusCode UA_EXPORT
@@ -804,7 +804,7 @@ UA_Server_addReaderGroup(UA_Server *server, UA_NodeId connectionIdentifier,
                          UA_NodeId *readerGroupIdentifier);
 
 /* Remove ReaderGroup from connection */
-UA_StatusCode UA_EXPORT
+UA_StatusCode UA_EXPORT UA_THREADSAFE
 UA_Server_removeReaderGroup(UA_Server *server, UA_NodeId groupIdentifier);
 
 UA_StatusCode UA_EXPORT

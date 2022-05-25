@@ -91,6 +91,9 @@ UA_PubSubConnection_findConnectionbyId(UA_Server *server,
 void
 UA_PubSubConnectionConfig_clear(UA_PubSubConnectionConfig *connectionConfig);
 
+UA_StatusCode
+removePubSubConnection(UA_Server *server, const UA_NodeId connection);
+
 void
 UA_PubSubConnection_clear(UA_Server *server, UA_PubSubConnection *connection);
 
@@ -179,6 +182,9 @@ struct UA_WriterGroup {
     void *securityPolicyContext;
 #endif
 };
+
+UA_StatusCode
+removeWriterGroup(UA_Server *server, const UA_NodeId writerGroup);
 
 UA_StatusCode
 UA_WriterGroupConfig_copy(const UA_WriterGroupConfig *src,
@@ -315,6 +321,9 @@ struct UA_ReaderGroup {
     void *securityPolicyContext;
 #endif
 };
+
+UA_StatusCode
+removeReaderGroup(UA_Server *server, UA_NodeId groupIdentifier);
 
 UA_StatusCode
 UA_ReaderGroupConfig_copy(const UA_ReaderGroupConfig *src,

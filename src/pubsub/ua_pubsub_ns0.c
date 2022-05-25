@@ -687,7 +687,7 @@ addPubSubConnectionAction(UA_Server *server,
 UA_StatusCode
 removePubSubConnectionRepresentation(UA_Server *server,
                                      UA_PubSubConnection *connection) {
-    return UA_Server_deleteNode(server, connection->identifier, true);
+    return deleteNode(server, connection->identifier, true);
 }
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS
@@ -804,7 +804,7 @@ addDataSetReaderAction(UA_Server *server,
 UA_StatusCode
 removeDataSetReaderRepresentation(UA_Server *server,
                                   UA_DataSetReader* dataSetReader) {
-    return UA_Server_deleteNode(server, dataSetReader->identifier, true);
+    return deleteNode(server, dataSetReader->identifier, true);
 }
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS
@@ -1048,7 +1048,7 @@ removeVariablesAction(UA_Server *server,
 UA_StatusCode
 removePublishedDataSetRepresentation(UA_Server *server,
                                      UA_PublishedDataSet *publishedDataSet) {
-    return UA_Server_deleteNode(server, publishedDataSet->identifier, true);
+    return deleteNode(server, publishedDataSet->identifier, true);
 }
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS
@@ -1244,12 +1244,12 @@ addWriterGroupAction(UA_Server *server,
 
 UA_StatusCode
 removeGroupRepresentation(UA_Server *server, UA_WriterGroup *writerGroup) {
-    return UA_Server_deleteNode(server, writerGroup->identifier, true);
+    return deleteNode(server, writerGroup->identifier, true);
 }
 
 UA_StatusCode
 removeReaderGroupRepresentation(UA_Server *server, UA_ReaderGroup *readerGroup) {
-    return UA_Server_deleteNode(server, readerGroup->identifier, true);
+    return deleteNode(server, readerGroup->identifier, true);
 }
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS
@@ -1439,11 +1439,10 @@ addDataSetWriterAction(UA_Server *server,
 }
 #endif
 
-
 UA_StatusCode
 removeDataSetWriterRepresentation(UA_Server *server,
                                   UA_DataSetWriter *dataSetWriter) {
-    return UA_Server_deleteNode(server, dataSetWriter->identifier, true);
+    return deleteNode(server, dataSetWriter->identifier, true);
 }
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS
