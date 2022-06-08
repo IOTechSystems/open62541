@@ -81,10 +81,6 @@ message(STATUS "The selected architecture is: ${UA_ARCHITECTURE}")
 string(TOUPPER ${UA_ARCHITECTURE} UA_ARCHITECTURE_UPPER)
 add_definitions(-DUA_ARCHITECTURE_${UA_ARCHITECTURE_UPPER})
 
-if ("${LINUX_SYS}" STREQUAL "AzureSphere")
-  add_definitions (-D_AZURESPHERE_)
-endif ()
-
 add_subdirectory(arch)
 
 GET_PROPERTY(architectures GLOBAL PROPERTY UA_ARCHITECTURES)
@@ -530,7 +526,7 @@ if(NOT UA_FORCE_CPP AND (CMAKE_COMPILER_IS_GNUCC OR "x${CMAKE_C_COMPILER_ID}" ST
     check_add_cc_flag("-Wall")      # Warnings
     check_add_cc_flag("-Wextra")    # More warnings
     check_add_cc_flag("-Wpedantic") # Standard compliance
-    #check_add_cc_flag("-Werror")    # All warnings are errors
+    check_add_cc_flag("-Werror")    # All warnings are errors
 
     check_add_cc_flag("-Wno-static-in-inline") # Clang doesn't like the use of static inline methods inside static inline methods
     check_add_cc_flag("-Wno-overlength-strings") # May happen in the nodeset compiler when complex values are directly encoded
@@ -1323,10 +1319,8 @@ target_link_libraries(open62541 ${open62541_LIBRARIES})
 # Build Selected Targets #
 ##########################
 
-# builds with make doc
-if(UA_BUILD_DOC)
-    add_subdirectory(doc)
-endif()
+# always include, builds with make doc
+add_subdirectory(doc)
 
 if(UA_BUILD_EXAMPLES)
     if(UA_ENABLE_AMALGAMATION)
@@ -1536,14 +1530,15 @@ if(NOT UA_ENABLE_AMALGAMATION)
         string(REPLACE ${BASE_PATH_GENERATED} "" file ${file})
         string(REPLACE ${BASE_PATH_DEPS} "" file ${file})
 
-        get_filename_component( dir ${file} DIRECTORY )
-        if(${full_path} MATCHES ${BASE_PATH_DEPS})
-            install( FILES ${full_path} DESTINATION include${dir} )
+        get_filename_component(dir ${file} DIRECTORY)
+
+        string(FIND "${full_path}" "${BASE_PATH_DEPS}" has_base_path)
+        if("${has_base_path}" EQUAL 0)
+            install(FILES ${full_path} DESTINATION include${dir})
         else()
-            install( FILES ${full_path} DESTINATION include/open62541${dir} )
+            install(FILES ${full_path} DESTINATION include/open62541${dir})
         endif()
     endforeach()
-
 else()
     # Export amalgamated header open62541.h which is generated due to build of 
     # open62541-object

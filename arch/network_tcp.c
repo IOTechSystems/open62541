@@ -408,7 +408,11 @@ ServerNetworkLayerTCP_start(UA_ServerNetworkLayer *nl, const UA_Logger *logger,
     UA_snprintf(portno, 6, "%d", layer->port);
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
+#if UA_IPV6
+    hints.ai_family = AF_UNSPEC; /* allow IPv4 and IPv6 */
+#else
+    hints.ai_family = AF_INET;   /* enforce IPv4 only */
+#endif
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
     hints.ai_protocol = IPPROTO_TCP;
@@ -426,14 +430,13 @@ ServerNetworkLayerTCP_start(UA_ServerNetworkLayer *nl, const UA_Logger *logger,
     for(layer->serverSocketsSize = 0;
         layer->serverSocketsSize < FD_SETSIZE && ai != NULL;
         ai = ai->ai_next) {
-        UA_StatusCode statusCode = addServerSocket(layer, ai);
-        if(statusCode != UA_STATUSCODE_GOOD)
-        {
-            UA_freeaddrinfo(res);
-            return statusCode;
-        }
+        addServerSocket(layer, ai);
     }
     UA_freeaddrinfo(res);
+    
+    if(layer->serverSocketsSize == 0) {
+        return UA_STATUSCODE_BADCOMMUNICATIONERROR;
+    }    
 
     /* Get the discovery url from the hostname */
     UA_String du = UA_STRING_NULL;

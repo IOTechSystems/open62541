@@ -261,7 +261,7 @@ extern void * (*UA_reallocSingleton)(void *ptr, size_t size);
 #elif (defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
       (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__))
 # define UA_LITTLE_ENDIAN 1
-#elif defined (__linux__) && ! defined (_AZURESPHERE_) /* Linux (including Android) */
+#elif defined(__linux__) /* Linux (including Android) */
 # include <endian.h>
 # if __BYTE_ORDER == __LITTLE_ENDIAN
 #  define UA_LITTLE_ENDIAN 1

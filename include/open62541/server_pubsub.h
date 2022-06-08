@@ -245,10 +245,6 @@ UA_StatusCode UA_EXPORT
 UA_ServerConfig_addPubSubTransportLayer(UA_ServerConfig *config,
                                         UA_PubSubTransportLayer *pubsubTransportLayer);
 
-/* Register channel for given connectionIdentifier */
-UA_StatusCode UA_EXPORT
-UA_PubSubConnection_regist(UA_Server *server, UA_NodeId *connectionIdentifier);
-
 UA_StatusCode UA_EXPORT
 UA_Server_addPubSubConnection(UA_Server *server,
                               const UA_PubSubConnectionConfig *connectionConfig,
