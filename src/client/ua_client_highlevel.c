@@ -383,7 +383,7 @@ __UA_Client_readAttribute(UA_Client *client, const UA_NodeId *nodeId,
         retval = res->status;
 
     /* Return early of no value is given */
-    if(!res->hasValue) {
+    if(!res->hasValue || UA_Variant_isEmpty(&res->value)) {
         retval = UA_STATUSCODE_BADUNEXPECTEDERROR;
         UA_ReadResponse_clear(&response);
         return retval;
