@@ -101,13 +101,6 @@ UA_PubSubConnection_clear(UA_Server *server, UA_PubSubConnection *connection);
 UA_StatusCode
 UA_PubSubConnection_regist(UA_Server *server, UA_NodeId *connectionIdentifier);
 
-/* Process Network Message for a ReaderGroup. But we the ReaderGroup needs to be
- * identified first. */
-UA_StatusCode
-UA_Server_processNetworkMessage(UA_Server *server,
-                                UA_PubSubConnection *connection,
-                                UA_NetworkMessage *msg);
-
 /**********************************************/
 /*              DataSetWriter                 */
 /**********************************************/
@@ -158,6 +151,9 @@ UA_DataSetWriter_generateDataSetMessage(UA_Server *server,
 UA_StatusCode
 UA_DataSetWriter_remove(UA_Server *server, UA_WriterGroup *linkedWriterGroup,
                         UA_DataSetWriter *dataSetWriter);
+
+UA_StatusCode
+removeDataSetWriter(UA_Server *server, const UA_NodeId dsw);
 
 /**********************************************/
 /*               WriterGroup                  */

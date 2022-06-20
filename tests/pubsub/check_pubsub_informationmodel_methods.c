@@ -103,7 +103,7 @@ static UA_NodeId addPubSubConnection(void){
     UA_Variant_setScalar(&connectionOptions[0].value, &ttl, &UA_TYPES[UA_TYPES_UINT32]);
     connectionOptions[1].key = UA_QUALIFIEDNAME(0, "loopback");
     UA_Boolean loopback = UA_FALSE;
-    UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_UINT32]);
+    UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_BOOLEAN]);
     pubSubConnection.connectionProperties = connectionOptions;
 
     UA_Variant inputArguments;
@@ -150,9 +150,9 @@ static void addPublishedDataSets(void){
     UA_Variant_setArray(&inputArguments[2], dataSetFieldFlags, 2, &UA_TYPES[UA_TYPES_DATASETFIELDFLAGS]);
 
     UA_PublishedVariableDataType *variablesToAdd = (UA_PublishedVariableDataType *) UA_calloc(2, sizeof(UA_PublishedVariableDataType));
-    variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_LOCALTIME);
+    variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
     variablesToAdd[0].attributeId = UA_ATTRIBUTEID_VALUE;
-    variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_CURRENTSERVERID);
+    variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
     variablesToAdd[1].attributeId = UA_ATTRIBUTEID_VALUE;
     UA_Variant_setArray(&inputArguments[3], variablesToAdd, 2, &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
 
@@ -213,14 +213,14 @@ START_TEST(AddandRemoveNewPubSubConnectionWithWriterGroup){
         UA_Variant_setScalar(&connectionOptions[0].value, &ttl, &UA_TYPES[UA_TYPES_UINT32]);
         connectionOptions[1].key = UA_QUALIFIEDNAME(0, "loopback");
         UA_Boolean loopback = UA_FALSE;
-        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_UINT32]);
+        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_BOOLEAN]);
         pubSubConnection.connectionProperties = connectionOptions;
 
         pubSubConnection.writerGroupsSize = 1;
         pubSubConnection.writerGroups = (UA_WriterGroupDataType *)UA_calloc(pubSubConnection.writerGroupsSize, sizeof(UA_WriterGroupDataType));
         UA_UadpWriterGroupMessageDataType *writerGroupMessage = \
             (UA_UadpWriterGroupMessageDataType *)UA_calloc(pubSubConnection.writerGroupsSize, sizeof(UA_UadpWriterGroupMessageDataType));
-        UA_ExtensionObject extensionObjectWG; 
+        UA_ExtensionObject extensionObjectWG;
         pubSubConnection.writerGroups->name = UA_STRING("WriterGroup 1");
         pubSubConnection.writerGroups->publishingInterval = 5;
         pubSubConnection.writerGroups->enabled = UA_FALSE;
@@ -234,7 +234,7 @@ START_TEST(AddandRemoveNewPubSubConnectionWithWriterGroup){
                                                         (UA_UadpNetworkMessageContentMask)UA_UADPNETWORKMESSAGECONTENTMASK_PAYLOADHEADER);
         extensionObjectWG.encoding = UA_EXTENSIONOBJECT_DECODED;
         extensionObjectWG.content.decoded.type = &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE];
-        extensionObjectWG.content.decoded.data = &writerGroupMessage;
+        extensionObjectWG.content.decoded.data = writerGroupMessage;
         pubSubConnection.writerGroups->messageSettings = extensionObjectWG;
 
         UA_Variant inputArguments;
@@ -326,7 +326,7 @@ START_TEST(AddNewPubSubConnectionWithWriterGroupAndDataSetWriter){
         UA_Variant_setScalar(&connectionOptions[0].value, &ttl, &UA_TYPES[UA_TYPES_UINT32]);
         connectionOptions[1].key = UA_QUALIFIEDNAME(0, "loopback");
         UA_Boolean loopback = UA_FALSE;
-        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_UINT32]);
+        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_BOOLEAN]);
         pubSubConnection.connectionProperties = connectionOptions;
 
         pubSubConnection.writerGroupsSize = 1;
@@ -348,7 +348,7 @@ START_TEST(AddNewPubSubConnectionWithWriterGroupAndDataSetWriter){
                                                         (UA_UadpNetworkMessageContentMask)UA_UADPNETWORKMESSAGECONTENTMASK_PAYLOADHEADER);
         extensionObjectWG.encoding = UA_EXTENSIONOBJECT_DECODED;
         extensionObjectWG.content.decoded.type = &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE];
-        extensionObjectWG.content.decoded.data = &writerGroupMessage;
+        extensionObjectWG.content.decoded.data = writerGroupMessage;
         pubSubConnection.writerGroups->messageSettings = extensionObjectWG;
 
         pubSubConnection.writerGroups->dataSetWriters = \
@@ -645,9 +645,9 @@ START_TEST(AddAndRemovePublishedDataSetItemsUsingServer){
         UA_Variant_setArray(&inputArguments[2], dataSetFieldFlags, 2, &UA_TYPES[UA_TYPES_DATASETFIELDFLAGS]);
 
         UA_PublishedVariableDataType *variablesToAdd = (UA_PublishedVariableDataType *) UA_calloc(2, sizeof(UA_PublishedVariableDataType));
-        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_LOCALTIME);
+        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
         variablesToAdd[0].attributeId = UA_ATTRIBUTEID_VALUE;
-        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_CURRENTSERVERID);
+        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
         variablesToAdd[1].attributeId = UA_ATTRIBUTEID_VALUE;
         UA_Variant_setArray(&inputArguments[3], variablesToAdd, 2, &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
 
@@ -700,9 +700,9 @@ START_TEST(AddAndRemovePublishedDataSetItemsUsingClient){
         UA_Variant_setArray(&inputArguments[2], dataSetFieldFlags, 2, &UA_TYPES[UA_TYPES_DATASETFIELDFLAGS]);
 
         UA_PublishedVariableDataType *variablesToAdd = (UA_PublishedVariableDataType *) UA_calloc(2, sizeof(UA_PublishedVariableDataType));
-        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_LOCALTIME);
+        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
         variablesToAdd[0].attributeId = UA_ATTRIBUTEID_VALUE;
-        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_CURRENTSERVERID);
+        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
         variablesToAdd[1].attributeId = UA_ATTRIBUTEID_VALUE;
         UA_Variant_setArray(&inputArguments[3], variablesToAdd, 2, &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
 
@@ -910,7 +910,7 @@ START_TEST(AddNewPubSubConnectionWithReaderGroup){
         UA_Variant_setScalar(&connectionOptions[0].value, &ttl, &UA_TYPES[UA_TYPES_UINT32]);
         connectionOptions[1].key = UA_QUALIFIEDNAME(0, "loopback");
         UA_Boolean loopback = UA_FALSE;
-        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_UINT32]);
+        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_BOOLEAN]);
         pubSubConnection.connectionProperties = connectionOptions;
         pubSubConnection.readerGroupsSize = 1;
         pubSubConnection.readerGroups = \
@@ -983,7 +983,7 @@ START_TEST(AddNewPubSubConnectionWithReaderGroupandDataSetReader){
         UA_Variant_setScalar(&connectionOptions[0].value, &ttl, &UA_TYPES[UA_TYPES_UINT32]);
         connectionOptions[1].key = UA_QUALIFIEDNAME(0, "loopback");
         UA_Boolean loopback = UA_FALSE;
-        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_UINT32]);
+        UA_Variant_setScalar(&connectionOptions[1].value, &loopback, &UA_TYPES[UA_TYPES_BOOLEAN]);
         pubSubConnection.connectionProperties = connectionOptions;
         pubSubConnection.readerGroupsSize = 1;
         pubSubConnection.readerGroups = \
@@ -1005,9 +1005,9 @@ START_TEST(AddNewPubSubConnectionWithReaderGroupandDataSetReader){
         /* Static definition of number of fields size to 4 to create four different
         * targetVariables of distinct datatype
         * Currently the publisher sends only DateTime data type */
+        UA_FieldMetaData fields[4] = {0};
         pMetaData->fieldsSize = 4;
-        pMetaData->fields = (UA_FieldMetaData*)UA_Array_new (pMetaData->fieldsSize,
-                            &UA_TYPES[UA_TYPES_FIELDMETADATA]);
+        pMetaData->fields = fields;
 
         /* DateTime DataType */
         UA_FieldMetaData_init (&pMetaData->fields[0]);

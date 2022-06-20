@@ -813,9 +813,27 @@ compatibleValueDataType(UA_Server *server, const UA_DataType *dataType,
     if(compatibleDataTypes(server, &dataType->typeId, constraintDataType))
         return true;
 
+    /* The constraint is an enum -> allow writing Int32 */
+    if(UA_NodeId_equal(&dataType->typeId, &UA_TYPES[UA_TYPES_INT32].typeId) &&
+       isNodeInTree_singleRef(server, constraintDataType, &enumNodeId,
+                              UA_REFERENCETYPEINDEX_HASSUBTYPE))
+        return true;
+
     /* For actual values, the constraint DataType may be a subtype of the
-     * DataType of the value. E.g. UtcTime is subtype of DateTime. But it still
-     * is a DateTime value when transferred over the wire. */
+     * DataType of the value -- subtyping in the wrong direction. E.g. UtcTime
+     * is a subtype of DateTime. But we allow it to be encoded as a DateTime
+     * value when transferred over the wire.
+     *
+     * We do not allow "subtyping in the "wrong direction" if the received type
+     * is abstract. For example, ExtensionObjects (== "Structure" in the type
+     * hierarchy) is an abstract type. But ExtensionObject could still be
+     * transported over the network. */
+    UA_Boolean abstract = false;
+    UA_StatusCode res = readWithReadValue(server, &dataType->typeId,
+                                          UA_ATTRIBUTEID_ISABSTRACT, &abstract);
+    if(res != UA_STATUSCODE_GOOD || abstract)
+        return false;
+
     if(isNodeInTree_singleRef(server, constraintDataType, &dataType->typeId,
                               UA_REFERENCETYPEINDEX_HASSUBTYPE))
         return true;
@@ -841,12 +859,6 @@ compatibleDataTypes(UA_Server *server, const UA_NodeId *dataType,
 
     /* Is the DataType a subtype of the constraint type? */
     if(isNodeInTree_singleRef(server, dataType, constraintDataType,
-                              UA_REFERENCETYPEINDEX_HASSUBTYPE))
-        return true;
-
-    /* The constraint is an enum -> allow writing Int32 */
-    if(UA_NodeId_equal(dataType, &UA_TYPES[UA_TYPES_INT32].typeId) &&
-       isNodeInTree_singleRef(server, constraintDataType, &enumNodeId,
                               UA_REFERENCETYPEINDEX_HASSUBTYPE))
         return true;
 
@@ -1075,6 +1087,51 @@ compatibleValue(UA_Server *server, UA_Session *session, const UA_NodeId *targetD
 /* Write Service */
 /*****************/
 
+static void
+unwrapEOArray(UA_Server *server, UA_Variant *value) {
+    /* Only works on arrays of ExtensionObjects */
+    if(!UA_Variant_hasArrayType(value, &UA_TYPES[UA_TYPES_EXTENSIONOBJECT]) ||
+       value->arrayLength == 0)
+        return;
+
+    /* All eo need to be already decoded and have the same wrapped type */
+    UA_ExtensionObject *eo = (UA_ExtensionObject*)value->data;
+    const UA_DataType *innerType = eo[0].content.decoded.type;
+    for(size_t i = 0; i < value->arrayLength; i++) {
+        if(eo[i].encoding != UA_EXTENSIONOBJECT_DECODED &&
+           eo[i].encoding != UA_EXTENSIONOBJECT_DECODED_NODELETE)
+            return;
+        if(eo[i].content.decoded.type != innerType)
+            return;
+    }
+
+    /* Allocate the array for the unwrapped data. Since the adjusted value is
+     * not cleaned up (only the original value), this memory is being cleaned up
+     * by a delayed callback in the server after the method call has
+     * finished. */
+    UA_DelayedCallback *dc = (UA_DelayedCallback*)
+        UA_malloc(sizeof(UA_DelayedCallback) + (value->arrayLength * innerType->memSize));
+    if(!dc)
+        return;
+    dc->callback = NULL; /* No callback, just free the memory */
+
+    /* Move the content */
+    uintptr_t pos = ((uintptr_t)dc) + sizeof(UA_DelayedCallback);
+    void *unwrappedArray = (void*)pos;
+    for(size_t i = 0; i < value->arrayLength; i++) {
+        memcpy((void*)pos, eo[i].content.decoded.data, innerType->memSize);
+        pos += innerType->memSize;
+    }
+
+    /* Adjust the value */
+    value->type = innerType;
+    value->data = unwrappedArray;
+
+    /* Add the delayed callback to free the memory of the unwrapped array */
+    server->config.eventLoop->
+        addDelayedCallback(server->config.eventLoop, dc);
+}
+
 void
 adjustValueType(UA_Server *server, UA_Variant *value,
                 const UA_NodeId *targetDataTypeId) {
@@ -1085,6 +1142,9 @@ adjustValueType(UA_Server *server, UA_Variant *value,
     const UA_DataType *targetDataType = UA_findDataType(targetDataTypeId);
     if(!targetDataType)
         return;
+
+    /* Unwrap ExtensionObject arrays if they all contain the same DataType */
+    unwrapEOArray(server, value);
 
     /* A string is written to a byte array. the valuerank and array dimensions
      * are checked later */
@@ -1347,21 +1407,16 @@ writeNodeValueAttribute(UA_Server *server, UA_Session *session,
     UA_DataValue adjustedValue = *value;
 
     /* Type checking. May change the type of editableValue */
-    if(value->hasValue && value->value.type) {
+    const char *reason;
+    if(value->hasValue && value->value.type &&
+       !compatibleValue(server, session, &node->dataType, node->valueRank,
+                        node->arrayDimensionsSize, node->arrayDimensions,
+                        &adjustedValue.value, rangeptr, &reason)) {
+        /* Try to correct the type */
         adjustValueType(server, &adjustedValue.value, &node->dataType);
 
-        /* The value may be an extension object, especially the nodeset compiler
-         * uses extension objects to write variable values. If value is an
-         * extension object we check if the current node value is also an
-         * extension object. */
-        const UA_NodeId nodeDataType = UA_NODEID_NUMERIC(0, UA_NS0ID_STRUCTURE);
-        const UA_NodeId *nodeDataTypePtr = &node->dataType;
-        if(value->value.type->typeId.identifierType == UA_NODEIDTYPE_NUMERIC &&
-           value->value.type->typeId.identifier.numeric == UA_NS0ID_STRUCTURE)
-            nodeDataTypePtr = &nodeDataType;
-
-        const char *reason;
-        if(!compatibleValue(server, session, nodeDataTypePtr, node->valueRank,
+        /* Recheck the type */
+        if(!compatibleValue(server, session, &node->dataType, node->valueRank,
                             node->arrayDimensionsSize, node->arrayDimensions,
                             &adjustedValue.value, rangeptr, &reason)) {
             UA_LOG_NODEID_WARNING(&node->head.nodeId,

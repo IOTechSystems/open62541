@@ -427,21 +427,27 @@ UA_Server_unfreezeWriterGroupConfiguration(UA_Server *server,
 UA_StatusCode
 UA_Server_setWriterGroupOperational(UA_Server *server,
                                     const UA_NodeId writerGroup) {
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
     UA_WriterGroup *wg = UA_WriterGroup_findWGbyId(server, writerGroup);
-    if(!wg)
-        return UA_STATUSCODE_BADNOTFOUND;
-    return UA_WriterGroup_setPubSubState(server, wg, UA_PUBSUBSTATE_OPERATIONAL,
-                                         UA_STATUSCODE_GOOD);
+    if(wg)
+        res = UA_WriterGroup_setPubSubState(server, wg, UA_PUBSUBSTATE_OPERATIONAL,
+                                            UA_STATUSCODE_GOOD);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
 }
 
 UA_StatusCode
 UA_Server_setWriterGroupDisabled(UA_Server *server,
                                  const UA_NodeId writerGroup) {
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
     UA_WriterGroup *wg = UA_WriterGroup_findWGbyId(server, writerGroup);
-    if(!wg)
-        return UA_STATUSCODE_BADNOTFOUND;
-    return UA_WriterGroup_setPubSubState(server, wg, UA_PUBSUBSTATE_DISABLED,
-                                         UA_STATUSCODE_BADRESOURCEUNAVAILABLE);
+    if(wg)
+        res = UA_WriterGroup_setPubSubState(server, wg, UA_PUBSUBSTATE_DISABLED,
+                                            UA_STATUSCODE_BADRESOURCEUNAVAILABLE);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
 }
 
 UA_StatusCode
@@ -483,14 +489,18 @@ UA_Server_updateWriterGroupConfig(UA_Server *server, UA_NodeId writerGroupIdenti
     if(!config)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
 
+    UA_LOCK(&server->serviceMutex);
     UA_WriterGroup *currentWriterGroup =
         UA_WriterGroup_findWGbyId(server, writerGroupIdentifier);
-    if(!currentWriterGroup)
+    if(!currentWriterGroup) {
+        UA_UNLOCK(&server->serviceMutex);
         return UA_STATUSCODE_BADNOTFOUND;
+    }
 
     if(currentWriterGroup->configurationFrozen){
         UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
                        "Modify WriterGroup failed. WriterGroup is frozen.");
+        UA_UNLOCK(&server->serviceMutex);
         return UA_STATUSCODE_BADCONFIGURATIONERROR;
     }
 
@@ -526,6 +536,7 @@ UA_Server_updateWriterGroupConfig(UA_Server *server, UA_NodeId writerGroupIdenti
                        "No or unsupported WriterGroup update.");
     }
 
+    UA_UNLOCK(&server->serviceMutex);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -628,6 +639,7 @@ UA_WriterGroup_setPubSubState(UA_Server *server,
                               UA_WriterGroup *writerGroup,
                               UA_PubSubState state,
                               UA_StatusCode cause) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_StatusCode ret = UA_STATUSCODE_GOOD;
     UA_DataSetWriter *dataSetWriter;
     UA_PubSubState oldState = writerGroup->state;
@@ -1022,6 +1034,7 @@ sendBufferedNetworkMessage(UA_Server *server, UA_PubSubConnection *connection,
 
 static UA_INLINE void
 publishRT(UA_Server *server, UA_WriterGroup *writerGroup, UA_PubSubConnection *connection) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_StatusCode res = UA_STATUSCODE_GOOD;
     if(UA_NetworkMessage_updateBufferedMessage(&writerGroup->bufferedMessage) != UA_STATUSCODE_GOOD)
         UA_LOG_DEBUG(&server->config.logger, UA_LOGCATEGORY_SERVER,
@@ -1099,6 +1112,7 @@ sendNetworkMessage(UA_WriterGroup *writerGroup, UA_PubSubConnection *connection,
 
 static UA_INLINE void
 setErrorStateForDataSetWritersWithIds(UA_Server *server, UA_WriterGroup *writerGroup, UA_UInt16 *dsWriterIds, size_t idCount) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
                  "PubSub Publish: Sending a NetworkMessage failed");
 
@@ -1142,6 +1156,7 @@ static UA_INLINE size_t
 sendOrCollectDataSetMessage(UA_Server *server, UA_WriterGroup *writerGroup, UA_DataSetWriter *writer,
                             UA_PubSubConnection *connection, UA_Byte maxDSM, UA_UInt16 *dsWriterId,
                             UA_DataSetMessage *dataSetMessage) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
     if(writer->state != UA_PUBSUBSTATE_OPERATIONAL) {
         return 0;
     }
@@ -1182,7 +1197,10 @@ static UA_INLINE void
 sendCollectedDataSetMessagesInBatches(UA_Server *server, UA_WriterGroup *writerGroup, UA_PubSubConnection *connection,
                                       UA_UInt16 *dsWriterIds, UA_DataSetMessage *dataSetMessageBuffer,
                                       size_t collectedDatasetMessageCount,
-                                      UA_Byte maxDSMCount) {/* Send the NetworkMessages with batched DataSetMessages */
+                                      UA_Byte maxDSMCount) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
+    /* Send the NetworkMessages with batched DataSetMessages */
     size_t cursor, dsmCount;
     FOR_EACH_CHUNK(cursor, dsmCount, maxDSMCount, collectedDatasetMessageCount) {
         UA_StatusCode res = sendNetworkMessage(
@@ -1203,6 +1221,8 @@ sendCollectedDataSetMessagesInBatches(UA_Server *server, UA_WriterGroup *writerG
 static void
 publishRegular(UA_Server *server, UA_WriterGroup *writerGroup,
                UA_PubSubConnection *connection) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
     /* It is possible to put several DataSetMessages into one NetworkMessage.
      * But only if they do not contain promoted fields. NM with only DSM are
      * sent out right away. The others are kept in a buffer for "batching". */
@@ -1227,16 +1247,19 @@ publishRegular(UA_Server *server, UA_WriterGroup *writerGroup,
  * contained DataSetMessages. */
 void
 UA_WriterGroup_publishCallback(UA_Server *server, UA_WriterGroup *writerGroup) {
+    UA_LOCK(&server->serviceMutex);
     UA_LOG_DEBUG(&server->config.logger, UA_LOGCATEGORY_SERVER, "Publish Callback");
 
     // TODO: review if its okay to force correct value from caller side instead
     // UA_assert(writerGroup != NULL);
     // UA_assert(server != NULL);
-    UA_CHECK_MEM_WARN(writerGroup, return,
+    UA_CHECK_MEM_WARN(writerGroup,
+                      UA_UNLOCK(&server->serviceMutex); return,
                       &server->config.logger, UA_LOGCATEGORY_SERVER,
                       "Publish failed. WriterGroup not found");
     /* Nothing to do? */
     if(writerGroup->writersCount == 0) {
+        UA_UNLOCK(&server->serviceMutex);
         return;
     }
     /* Binary or Json encoding?  */
@@ -1258,17 +1281,20 @@ UA_WriterGroup_publishCallback(UA_Server *server, UA_WriterGroup *writerGroup) {
     } else {
         publishRegular(server, writerGroup, connection);
     }
+    UA_UNLOCK(&server->serviceMutex);
     return;
 
 error:
     UA_WriterGroup_setPubSubState(server, writerGroup, UA_PUBSUBSTATE_ERROR,
                                   UA_STATUSCODE_BADCONNECTIONCLOSED);
+    UA_UNLOCK(&server->serviceMutex);
 }
 
 /* Add new publishCallback. The first execution is triggered directly after
  * creation. */
 UA_StatusCode
 UA_WriterGroup_addPublishCallback(UA_Server *server, UA_WriterGroup *writerGroup) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     if(writerGroup->config.pubsubManagerCallback.addCustomCallback)
         retval |= writerGroup->config.pubsubManagerCallback.
@@ -1289,8 +1315,11 @@ UA_WriterGroup_addPublishCallback(UA_Server *server, UA_WriterGroup *writerGroup
     if(retval == UA_STATUSCODE_GOOD)
         writerGroup->publishCallbackIsRegistered = true;
 
-    /* Run once after creation */
+    /* Run once after creation. The Publish callback itself takes the server
+     * mutex. So we release it first. */
+    UA_UNLOCK(&server->serviceMutex);
     UA_WriterGroup_publishCallback(server, writerGroup);
+    UA_LOCK(&server->serviceMutex);
     return retval;
 }
 

@@ -390,14 +390,18 @@ addDataSetField(UA_Server *server, const UA_NodeId publishedDataSet,
         return result;
     }
 
-    UA_StatusCode retVal = UA_DataSetFieldConfig_copy(fieldConfig, &newField->config);
-    if(retVal != UA_STATUSCODE_GOOD) {
+    result.result = UA_DataSetFieldConfig_copy(fieldConfig, &newField->config);
+    if(result.result != UA_STATUSCODE_GOOD) {
         UA_free(newField);
-        result.result = retVal;
         return result;
     }
 
-    newField->publishedDataSet = currDS->identifier;
+    result.result = UA_NodeId_copy(&currDS->identifier, &newField->publishedDataSet);
+    if(result.result != UA_STATUSCODE_GOOD) {
+        UA_DataSetFieldConfig_clear(&newField->config);
+        UA_free(newField);
+        return result;
+    }
 
     /* Initialize the field metadata. Also generates a FieldId */
     UA_FieldMetaData fmd;
@@ -406,6 +410,7 @@ addDataSetField(UA_Server *server, const UA_NodeId publishedDataSet,
     if(result.result != UA_STATUSCODE_GOOD) {
         UA_FieldMetaData_clear(&fmd);
         UA_DataSetFieldConfig_clear(&newField->config);
+        UA_NodeId_clear(&newField->publishedDataSet);
         UA_free(newField);
         return result;
     }
@@ -417,6 +422,7 @@ addDataSetField(UA_Server *server, const UA_NodeId publishedDataSet,
     if(result.result != UA_STATUSCODE_GOOD) {
         UA_FieldMetaData_clear(&fmd);
         UA_DataSetFieldConfig_clear(&newField->config);
+        UA_NodeId_clear(&newField->publishedDataSet);
         UA_free(newField);
         return result;
     }
@@ -746,11 +752,12 @@ UA_DataSetWriter_setPubSubState(UA_Server *server,
     return ret;
 }
 
-UA_StatusCode
-UA_Server_addDataSetWriter(UA_Server *server,
-                           const UA_NodeId writerGroup, const UA_NodeId dataSet,
-                           const UA_DataSetWriterConfig *dataSetWriterConfig,
-                           UA_NodeId *writerIdentifier) {
+static UA_StatusCode
+addDataSetWriter(UA_Server *server,
+                 const UA_NodeId writerGroup, const UA_NodeId dataSet,
+                 const UA_DataSetWriterConfig *dataSetWriterConfig,
+                 UA_NodeId *writerIdentifier) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
     if(!dataSetWriterConfig)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
 
@@ -872,8 +879,23 @@ UA_Server_addDataSetWriter(UA_Server *server,
 }
 
 UA_StatusCode
+UA_Server_addDataSetWriter(UA_Server *server,
+                           const UA_NodeId writerGroup, const UA_NodeId dataSet,
+                           const UA_DataSetWriterConfig *dataSetWriterConfig,
+                           UA_NodeId *writerIdentifier) {
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res =
+        addDataSetWriter(server, writerGroup, dataSet,
+                         dataSetWriterConfig, writerIdentifier);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+UA_StatusCode
 UA_DataSetWriter_remove(UA_Server *server, UA_WriterGroup *linkedWriterGroup,
                         UA_DataSetWriter *dataSetWriter) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
     /* Frozen? */
     if(linkedWriterGroup->configurationFrozen) {
         UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
@@ -895,7 +917,9 @@ UA_DataSetWriter_remove(UA_Server *server, UA_WriterGroup *linkedWriterGroup,
 }
 
 UA_StatusCode
-UA_Server_removeDataSetWriter(UA_Server *server, const UA_NodeId dsw) {
+removeDataSetWriter(UA_Server *server, const UA_NodeId dsw) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
     UA_DataSetWriter *dataSetWriter = UA_DataSetWriter_findDSWbyId(server, dsw);
     if(!dataSetWriter)
         return UA_STATUSCODE_BADNOTFOUND;
@@ -912,6 +936,14 @@ UA_Server_removeDataSetWriter(UA_Server *server, const UA_NodeId dsw) {
         return UA_STATUSCODE_BADNOTFOUND;
 
     return UA_DataSetWriter_remove(server, linkedWriterGroup, dataSetWriter);
+}
+
+UA_StatusCode
+UA_Server_removeDataSetWriter(UA_Server *server, const UA_NodeId dsw) {
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res = removeDataSetWriter(server, dsw);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
 }
 
 /**********************************************/
