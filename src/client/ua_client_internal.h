@@ -102,12 +102,12 @@ typedef struct AsyncServiceCall {
     void *userdata;
     UA_DateTime start;
     UA_UInt32 timeout;
-    void *responsedata;
+    UA_Response *syncResponse; /* If non-null, then this is the synchronous
+                                * response to be filled. Set back to null to
+                                * indicate that the response was filled. */
 } AsyncServiceCall;
 
-void
-UA_Client_AsyncService_cancel(UA_Client *client, AsyncServiceCall *ac,
-                              UA_StatusCode statusCode);
+typedef LIST_HEAD(UA_AsyncServiceList, AsyncServiceCall) UA_AsyncServiceList;
 
 void
 UA_Client_AsyncService_removeAll(UA_Client *client, UA_StatusCode statusCode);
@@ -124,6 +124,9 @@ typedef struct CustomCallback {
 struct UA_Client {
     UA_ClientConfig config;
 
+    /* Callback ID to remove it from the EventLoop */
+    UA_UInt64 houseKeepingCallbackId;
+
     /* Overall connection status */
     UA_StatusCode connectStatus;
 
@@ -137,7 +140,7 @@ struct UA_Client {
 
     /* Connection */
     UA_Connection connection;
-    UA_String endpointUrl; /* Only for the async connect */
+    UA_String endpointUrl;
 
     /* SecureChannel */
     UA_SecureChannel channel;
@@ -156,7 +159,7 @@ struct UA_Client {
     UA_Boolean pendingConnectivityCheck;
 
     /* Async Service */
-    LIST_HEAD(, AsyncServiceCall) asyncServiceCalls;
+    UA_AsyncServiceList asyncServiceCalls;
 
     /* Subscriptions */
 #ifdef UA_ENABLE_SUBSCRIPTIONS
@@ -167,17 +170,17 @@ struct UA_Client {
 #endif
 };
 
+UA_StatusCode
+processServiceResponse(void *application, UA_SecureChannel *channel,
+                       UA_MessageType messageType, UA_UInt32 requestId,
+                       UA_ByteString *message);
+
+void connectSync(UA_Client *client);
 void notifyClientState(UA_Client *client);
 void processERRResponse(UA_Client *client, const UA_ByteString *chunk);
 void processACKResponse(UA_Client *client, const UA_ByteString *chunk);
 void processOPNResponse(UA_Client *client, const UA_ByteString *message);
 void closeSecureChannel(UA_Client *client);
-
-UA_StatusCode
-connectIterate(UA_Client *client, UA_UInt32 timeout);
-
-UA_StatusCode
-receiveResponseAsync(UA_Client *client, UA_UInt32 timeout);
 
 _UA_END_DECLS
 
