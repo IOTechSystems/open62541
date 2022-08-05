@@ -68,6 +68,8 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
     UA_Variant_init(&value);
     const UA_NodePropertyContext *nodeContext = (const UA_NodePropertyContext*)context;
     const UA_NodeId *myNodeId = &nodeContext->parentNodeId;
+    UA_PublishedVariableDataType *pvd = NULL;
+    UA_PublishedDataSet *publishedDataSet = NULL;
 
     switch(nodeContext->parentClassifier){
     case UA_NS0ID_PUBSUBCONNECTIONTYPE: {
@@ -155,12 +157,12 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
         break;
     }
     case UA_NS0ID_PUBLISHEDDATAITEMSTYPE: {
-        UA_PublishedDataSet *publishedDataSet = UA_PublishedDataSet_findPDSbyId(server, *myNodeId);
+        publishedDataSet = UA_PublishedDataSet_findPDSbyId(server, *myNodeId);
         if(!publishedDataSet)
             return;
         switch(nodeContext->elementClassiefier) {
         case UA_NS0ID_PUBLISHEDDATAITEMSTYPE_PUBLISHEDDATA: {
-            UA_PublishedVariableDataType *pvd = (UA_PublishedVariableDataType *)
+            pvd = (UA_PublishedVariableDataType *)
                 UA_calloc(publishedDataSet->fieldSize, sizeof(UA_PublishedVariableDataType));
             size_t counter = 0;
             UA_DataSetField *field;
@@ -175,11 +177,11 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
             break;
         }
         case UA_NS0ID_PUBLISHEDDATAITEMSTYPE_DATASETMETADATA: {
-            UA_Variant_setScalarCopy(&value, &publishedDataSet->dataSetMetaData, &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
+            UA_Variant_setScalar(&value, &publishedDataSet->dataSetMetaData, &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
             break;
         }
         case UA_NS0ID_PUBLISHEDDATAITEMSTYPE_CONFIGURATIONVERSION: {
-            UA_Variant_setScalarCopy(&value, &publishedDataSet->dataSetMetaData.configurationVersion,
+            UA_Variant_setScalar(&value, &publishedDataSet->dataSetMetaData.configurationVersion,
                                      &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]);
             break;
         }
@@ -191,7 +193,7 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
                     break;
                 }
                 case UA_NS0ID_STANDALONESUBSCRIBEDDATASETTYPE_DATASETMETADATA: {
-                    UA_Variant_setScalarCopy(&value, &sds->config.dataSetMetaData, &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
+                    UA_Variant_setScalar(&value, &sds->config.dataSetMetaData, &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
                     break;
                 }
                 default:
@@ -211,6 +213,9 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
                        "Read error! Unknown parent element.");
     }
     UA_Server_writeValue(server, *nodeid, value);
+    if(pvd && publishedDataSet) {
+        UA_Array_delete(pvd, publishedDataSet->fieldSize, &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
+    }
 }
 
 static void
@@ -848,41 +853,7 @@ addDataSetReaderAction(UA_Server *server,
 
 UA_StatusCode
 removeDataSetReaderRepresentation(UA_Server *server, UA_DataSetReader* dataSetReader) {
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
-    if(!UA_String_equal(&dataSetReader->config.linkedStandaloneSubscribedDataSetName, &UA_STRING_NULL)) {
-        UA_NodeId dataSetMetaDataOnDsrId = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetMetaData"),
-                                    UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY), dataSetReader->identifier);
-        UA_NodeId subscribedDataSetOnDsrId = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "SubscribedDataSet"),
-                                    UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT), dataSetReader->identifier);
-
-        if(UA_NodeId_isNull(&dataSetMetaDataOnDsrId) || UA_NodeId_isNull(&subscribedDataSetOnDsrId)) {
-            UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER, "removeDataSetReaderRepresentation failed."
-                                                                        "SubscribedDataSet or DataSetMetaData not found!");
-            return UA_STATUSCODE_BADNOTFOUND;
-        }
-
-        retVal |= UA_Server_deleteReference(server, dataSetReader->identifier,
-                                  UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
-                                  UA_TRUE,
-                                  UA_EXPANDEDNODEID_NUMERIC(dataSetMetaDataOnDsrId.namespaceIndex, dataSetMetaDataOnDsrId.identifier.numeric),
-                                  UA_TRUE);
-        if(retVal != UA_STATUSCODE_GOOD) {
-            /* todo error handling */
-        }
-
-        retVal |= UA_Server_deleteReference(server, dataSetReader->identifier,
-                                  UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
-                                  UA_TRUE,
-                                  UA_EXPANDEDNODEID_NUMERIC(subscribedDataSetOnDsrId.namespaceIndex, subscribedDataSetOnDsrId.identifier.numeric),
-                                  UA_TRUE);
-        if(retVal != UA_STATUSCODE_GOOD) {
-            /* todo error handling */
-        }
-    }
-    
-    retVal |= deleteNode(server, dataSetReader->identifier, true);
-
-    return retVal;
+    return deleteNode(server, dataSetReader->identifier, true);
 }
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS
@@ -1211,9 +1182,7 @@ addStandaloneSubscribedDataSetRepresentation(UA_Server *server, UA_StandaloneSub
 
 UA_StatusCode
 removeStandaloneSubscribedDataSetRepresentation(UA_Server *server, UA_StandaloneSubscribedDataSet *subscribedDataSet) {
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
-    retVal |= UA_Server_deleteNode(server, subscribedDataSet->identifier, true);
-    return retVal;
+    return UA_Server_deleteNode(server, subscribedDataSet->identifier, true);
 }
 
 /**********************************************/
@@ -1946,7 +1915,7 @@ connectDataSetReaderToDataSet(UA_Server *server, UA_NodeId dsrId, UA_NodeId stan
     retVal |= UA_Server_addReference(server, dsrId, UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
         UA_EXPANDEDNODEID_NUMERIC(dataSetMetaDataOnSdsId.namespaceIndex, dataSetMetaDataOnSdsId.identifier.numeric), UA_TRUE);
     retVal |= UA_Server_addReference(server, dsrId, UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY),
-        UA_EXPANDEDNODEID_NUMERIC(dataSetMetaDataOnSdsId.namespaceIndex, subscribedDataSetOnSdsId.identifier.numeric), UA_TRUE);
+        UA_EXPANDEDNODEID_NUMERIC(subscribedDataSetOnSdsId.namespaceIndex, subscribedDataSetOnSdsId.identifier.numeric), UA_TRUE);
 
     return retVal;
 }
