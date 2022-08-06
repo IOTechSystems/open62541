@@ -22,7 +22,6 @@
 #include <open62541/transport_generated.h>
 
 #include "ua_client_internal.h"
-#include "ua_connection_internal.h"
 #include "ua_types_encoding_binary.h"
 
 static void
@@ -42,7 +41,8 @@ UA_Client_newWithConfig(const UA_ClientConfig *config) {
     memset(client, 0, sizeof(UA_Client));
     client->config = *config;
 
-    UA_SecureChannel_init(&client->channel, &client->config.localConnectionConfig);
+    UA_SecureChannel_init(&client->channel);
+    client->channel.config = client->config.localConnectionConfig;
     client->connectStatus = UA_STATUSCODE_GOOD;
 
     /* Set up the regular callback for checking the internal state */
@@ -154,8 +154,8 @@ UA_Client_getConfig(UA_Client *client) {
 }
 
 #if UA_LOGLEVEL <= 300
-static const char *channelStateTexts[9] = {
-    "Fresh", "HELSent", "HELReceived", "ACKSent",
+static const char *channelStateTexts[11] = {
+    "Fresh", "Connecting", "Connected", "HELSent", "HELReceived", "ACKSent",
     "AckReceived", "OPNSent", "Open", "Closing", "Closed"};
 static const char *sessionStateTexts[6] =
     {"Closed", "CreateRequested", "Created",
@@ -269,9 +269,6 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
         return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
     }
 
-    UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                   "Processing request with RequestId %u", requestId);
-
     UA_Response asyncResponse;
     UA_Response *response = (ac->syncResponse) ? ac->syncResponse : &asyncResponse;
     const UA_DataType *responseType = ac->responseType;
@@ -347,17 +344,34 @@ processServiceResponse(void *application, UA_SecureChannel *channel,
                        UA_ByteString *message) {
     UA_Client *client = (UA_Client*)application;
 
+    if(!UA_SecureChannel_isConnected(channel)) {
+        if(messageType == UA_MESSAGETYPE_MSG) {
+            UA_LOG_DEBUG_CHANNEL(&client->config.logger, channel, "Discard MSG message "
+                                 "with RequestId %u as the SecureChannel is not connected",
+                                 requestId);
+        } else {
+            UA_LOG_DEBUG_CHANNEL(&client->config.logger, channel, "Discard message "
+                                 "as the SecureChannel is not connected");
+        }
+        return UA_STATUSCODE_BADCONNECTIONCLOSED;
+    }
+
     switch(messageType) {
     case UA_MESSAGETYPE_ACK:
+        UA_LOG_DEBUG_CHANNEL(&client->config.logger, channel, "Process ACK message");
         processACKResponse(client, message);
         return UA_STATUSCODE_GOOD;
     case UA_MESSAGETYPE_OPN:
+        UA_LOG_DEBUG_CHANNEL(&client->config.logger, channel, "Process OPN message");
         processOPNResponse(client, message);
         return UA_STATUSCODE_GOOD;
     case UA_MESSAGETYPE_ERR:
+        UA_LOG_DEBUG_CHANNEL(&client->config.logger, channel, "Process ERR message");
         processERRResponse(client, message);
         return UA_STATUSCODE_GOOD;
     case UA_MESSAGETYPE_MSG:
+        UA_LOG_DEBUG_CHANNEL(&client->config.logger, channel, "Process MSG message "
+                             "with RequestId %u", requestId);
         return processMSGResponse(client, requestId, message);
     default:
         UA_LOG_TRACE_CHANNEL(&client->config.logger, channel,
@@ -399,6 +413,12 @@ __UA_Client_Service(UA_Client *client, const void *request,
         }
     }
 
+    /* Store the channelId to detect if the channel was changed by a
+     * reconnection within the EventLoop run method. */
+    UA_UInt32 channelId = client->channel.securityToken.channelId;
+
+    /* Send the request. This adds the ac variable to the async call linked list
+     * even though it is stack-allocated. */
     AsyncServiceCall ac;
     ac.callback = NULL;
     ac.userdata = NULL;
@@ -406,10 +426,15 @@ __UA_Client_Service(UA_Client *client, const void *request,
     ac.timeout = client->config.timeout;
     ac.syncResponse = (UA_Response*)response;
 
-    /* Call the service and set the requestId */
     UA_StatusCode retval = sendRequest(client, request, requestType, &ac.requestId);
     if(retval != UA_STATUSCODE_GOOD) {
-        closeSecureChannel(client);
+        /* If sending failed, the status is set to closing. The SecureChannel is
+         * the actually closed in the next iteration of the EventLoop. */
+        UA_assert(client->channel.state == UA_SECURECHANNELSTATE_CLOSING ||
+                  client->channel.state == UA_SECURECHANNELSTATE_CLOSED);
+        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                       "Sending the request failed with status %s",
+                       UA_StatusCode_name(retval));
         notifyClientState(client);
         respHeader->serviceResult = retval;
         return;
@@ -443,9 +468,17 @@ __UA_Client_Service(UA_Client *client, const void *request,
          * request. */
         if(retval != UA_STATUSCODE_GOOD)
             break;
+
+        /* The connection was lost */
         retval = client->connectStatus;
         if(retval != UA_STATUSCODE_GOOD)
             break;
+
+        /* The channel is no longer the same or was closed */
+        if(channelId != client->channel.securityToken.channelId) {
+            retval = UA_STATUSCODE_BADSECURECHANNELCLOSED;
+            break;
+        }
     }
 
     /* Detach from the internal async service list */
@@ -524,8 +557,8 @@ __UA_Client_AsyncServiceEx(UA_Client *client, const void *request,
                            void *userdata, UA_UInt32 *requestId,
                            UA_UInt32 timeout) {
     if(client->channel.state != UA_SECURECHANNELSTATE_OPEN) {
-        UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                    "SecureChannel must be connected before sending requests");
+        UA_LOG_WARNING_CHANNEL(&client->config.logger, &client->channel,
+                               "SecureChannel must be connected before sending requests");
         return UA_STATUSCODE_BADSERVERNOTCONNECTED;
     }
 
@@ -542,8 +575,11 @@ __UA_Client_AsyncServiceEx(UA_Client *client, const void *request,
     /* Call the service and set the requestId */
     UA_StatusCode retval = sendRequest(client, request, requestType, &ac->requestId);
     if(retval != UA_STATUSCODE_GOOD) {
+        /* If sending failed, the status is set to closing. The SecureChannel is
+         * the actually closed in the next iteration of the EventLoop. */
+        UA_assert(client->channel.state == UA_SECURECHANNELSTATE_CLOSING ||
+                  client->channel.state == UA_SECURECHANNELSTATE_CLOSED);
         UA_free(ac);
-        closeSecureChannel(client);
         notifyClientState(client);
         return retval;
     }

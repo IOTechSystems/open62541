@@ -446,7 +446,12 @@ if(UA_ENABLE_PUBSUB_MQTT)
         set(UA_FILE_MQTT ${open62541_MQTT_DIR}/src/mqtt.c)
     endif()
     if(NOT EXISTS "${UA_FILE_MQTT}")
-        message(FATAL_ERROR "File ${UA_FILE_MQTT} not found.You probably need to initialize the git submodule for deps/mqtt-c.Therefore execute the following command \ngit submodule update --init --recursive")
+        message(STATUS "Submodule update")
+        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+                        RESULT_VARIABLE GIT_SUBMOD_RESULT)
+        if(NOT GIT_SUBMOD_RESULT EQUAL "0")
+            message(FATAL_ERROR "git submodule update --init --recursive failed with ${GIT_SUBMOD_RESULT}")
+        endif()
     else()
         # Warn if run in Windows
         if(WIN32)
@@ -526,10 +531,6 @@ mark_as_advanced(UA_ENABLE_DISCOVERY_SEMAPHORE)
 
 option(UA_ENABLE_UNIT_TESTS_MEMCHECK "Use Valgrind (Linux) or DrMemory (Windows) to detect memory leaks when running the unit tests" OFF)
 mark_as_advanced(UA_ENABLE_UNIT_TESTS_MEMCHECK)
-
-option(UA_ENABLE_UNIT_TEST_FAILURE_HOOKS
-       "Add hooks to force failure modes for additional unit tests. Not for production use!" OFF)
-mark_as_advanced(UA_ENABLE_UNIT_TEST_FAILURE_HOOKS)
 
 set(UA_VALGRIND_INTERACTIVE_INTERVAL 1000 CACHE STRING "The number of iterations to wait before creating the next dump")
 mark_as_advanced(UA_VALGRIND_INTERACTIVE_INTERVAL)
@@ -939,7 +940,6 @@ set(internal_headers ${PROJECT_SOURCE_DIR}/deps/open62541_queue.h
                      ${PROJECT_SOURCE_DIR}/src/ua_util_internal.h
                      ${PROJECT_BINARY_DIR}/src_generated/open62541/transport_generated.h
                      ${PROJECT_BINARY_DIR}/src_generated/open62541/transport_generated_handling.h
-                     ${PROJECT_SOURCE_DIR}/src/ua_connection_internal.h
                      ${PROJECT_SOURCE_DIR}/src/ua_securechannel.h
                      ${PROJECT_SOURCE_DIR}/arch/common/ua_timer.h
                      ${PROJECT_SOURCE_DIR}/src/server/ua_session.h
@@ -963,7 +963,6 @@ set(lib_sources ${PROJECT_SOURCE_DIR}/src/ua_types.c
                 ${PROJECT_BINARY_DIR}/src_generated/open62541/statuscodes.c
                 ${PROJECT_SOURCE_DIR}/src/ua_util.c
                 ${PROJECT_SOURCE_DIR}/arch/common/ua_timer.c
-                ${PROJECT_SOURCE_DIR}/src/ua_connection.c
                 ${PROJECT_SOURCE_DIR}/src/ua_securechannel.c
                 ${PROJECT_SOURCE_DIR}/src/ua_securechannel_crypto.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_session.c
@@ -1225,7 +1224,12 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
     set(UA_FILE_NODESETS "${UA_FILE_NS0}")
 
     if(NOT EXISTS "${UA_FILE_NS0}")
-        message(FATAL_ERROR "File ${UA_FILE_NS0} not found. You probably need to initialize the git submodule for deps/ua-nodeset or set UA_NODESET_DIR.")
+        message(STATUS "Submodule update")
+        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+                        RESULT_VARIABLE GIT_SUBMOD_RESULT)
+        if(NOT GIT_SUBMOD_RESULT EQUAL "0")
+            message(FATAL_ERROR "git submodule update --init --recursive failed with ${GIT_SUBMOD_RESULT}")
+        endif()
     endif()
 
 

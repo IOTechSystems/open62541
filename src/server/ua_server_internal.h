@@ -22,10 +22,8 @@
 #include <open62541/server.h>
 #include <open62541/plugin/nodestore.h>
 
-#include "ua_connection_internal.h"
 #include "ua_session.h"
 #include "ua_server_async.h"
-#include "common/ua_timer.h" /* arch-folder, TODO: Remove after the EventLoop is integrated */
 #include "ua_util_internal.h"
 #include "ziptree.h"
 
@@ -68,9 +66,9 @@ typedef enum {
 } UA_DiagnosticEvent;
 
 typedef struct channel_entry {
-    UA_DelayedCallback cleanupCallback;
     TAILQ_ENTRY(channel_entry) pointers;
     UA_SecureChannel channel;
+    UA_DiagnosticEvent closeEvent;
 } channel_entry;
 
 typedef struct session_list_entry {
@@ -197,20 +195,28 @@ UA_Server_deleteSecureChannels(UA_Server *server);
 void
 UA_Server_cleanupTimedOutSecureChannels(UA_Server *server, UA_DateTime nowMonotonic);
 
-UA_StatusCode
-UA_Server_createSecureChannel(UA_Server *server, UA_Connection *connection);
-
-UA_StatusCode
-UA_Server_configSecureChannel(void *application, UA_SecureChannel *channel,
-                              const UA_AsymmetricAlgorithmSecurityHeader *asymHeader);
 
 UA_StatusCode
 sendServiceFault(UA_SecureChannel *channel, UA_UInt32 requestId,
                  UA_UInt32 requestHandle, UA_StatusCode statusCode);
 
+/* Called only from within the network callback */
+UA_StatusCode
+createServerSecureChannel(UA_Server *server, UA_ConnectionManager *cm,
+                          uintptr_t connectionId, UA_SecureChannel **outChannel);
+
+UA_StatusCode
+configServerSecureChannel(void *application, UA_SecureChannel *channel,
+                          const UA_AsymmetricAlgorithmSecurityHeader *asymHeader);
+
+/* Can be called at any time */
 void
-UA_Server_closeSecureChannel(UA_Server *server, UA_SecureChannel *channel,
-                             UA_DiagnosticEvent event);
+shutdownServerSecureChannel(UA_Server *server, UA_SecureChannel *channel,
+                            UA_DiagnosticEvent event);
+
+/* Called only from within the network callback */
+void
+deleteServerSecureChannel(UA_Server *server, UA_SecureChannel *channel);
 
 /* Gets the a pointer to the context of a security policy supported by the
  * server matched by the security policy uri. */
@@ -358,6 +364,14 @@ UA_Server_processServiceOperations(UA_Server *server, UA_Session *session,
                                    const UA_DataType *responseOperationsType)
     UA_FUNC_ATTR_WARN_UNUSED_RESULT;
 
+/* Processing for the binary protocol (SecureChannel) */
+void
+UA_Server_networkCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
+                          void *application, void **connectionContext,
+                          UA_ConnectionState state,
+                          size_t paramsSize, const UA_KeyValuePair *params,
+                          UA_ByteString msg);
+
 /******************************************/
 /* Internal function calls, without locks */
 /******************************************/
@@ -366,7 +380,8 @@ deleteNode(UA_Server *server, const UA_NodeId nodeId,
            UA_Boolean deleteReferences);
 
 UA_StatusCode
-addNode(UA_Server *server, const UA_NodeClass nodeClass, const UA_NodeId *requestedNewNodeId,
+addNode(UA_Server *server, const UA_NodeClass nodeClass,
+        const UA_NodeId *requestedNewNodeId,
         const UA_NodeId *parentNodeId, const UA_NodeId *referenceTypeId,
         const UA_QualifiedName browseName, const UA_NodeId *typeDefinition,
         const UA_NodeAttributes *attr, const UA_DataType *attributeType,
@@ -455,7 +470,8 @@ void
 removeCallback(UA_Server *server, UA_UInt64 callbackId);
 
 UA_StatusCode
-changeRepeatedCallbackInterval(UA_Server *server, UA_UInt64 callbackId, UA_Double interval_ms);
+changeRepeatedCallbackInterval(UA_Server *server, UA_UInt64 callbackId,
+                               UA_Double interval_ms);
 
 UA_StatusCode
 addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
@@ -463,8 +479,7 @@ addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
 
 #ifdef UA_ENABLE_DISCOVERY
 UA_StatusCode
-register_server_with_discovery_server(UA_Server *server,
-                                      void *client,
+register_server_with_discovery_server(UA_Server *server, void *client,
                                       const UA_Boolean isUnregister,
                                       const char* semaphoreFilePath);
 #endif
