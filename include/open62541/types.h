@@ -1174,10 +1174,11 @@ UA_Order UA_EXPORT
 UA_order(const void *p1, const void *p2, const UA_DataType *type);
 
 /**
- * Encoding/Decoding
- * ^^^^^^^^^^^^^^^^^^
- * Encoding and decoding routines for the available formats. For all formats
- * the _calcSize, _encode and _decode methods are provided. */
+ * Binary Encoding/Decoding
+ * ------------------------
+ *
+ * Encoding and decoding routines for the binary format. For the binary decoding
+ * additional data types can be forwarded. */
 
 /* Returns the number of bytes the value p takes in binary encoding. Returns
  * zero if an error occurs. */
@@ -1207,6 +1208,29 @@ UA_EXPORT UA_StatusCode
 UA_decodeBinary(const UA_ByteString *inBuf,
                 void *p, const UA_DataType *type,
                 const UA_DecodeBinaryOptions *options);
+
+/**
+ * JSON En/Decoding
+ * ----------------
+ *
+ * The JSON encoding always produces an encoding that is compatible with the OPC
+ * UA specification.
+ *
+ * The JSON decoding can parse the official encoding from the OPC UA
+ * specification. It further allows the following extensions:
+ *
+ * - The strict JSON format is relaxed to also allow the JSON5 extensions
+ *   (https://json5.org/). This allows for more human-readable encoding and adds
+ *   convenience features such as trailing commas in arrays and comments within
+ *   JSON documents.
+ * - If `UA_ENABLE_PARSING` is set, NodeIds and ExpandedNodeIds can be given in
+ *   the string encoding (see `UA_NodeId_parse`). The standard encoding is to
+ *   express NodeIds as JSON objects.
+ *
+ * These extensions are not intended to be used for the OPC UA protocol on the
+ * network. They were rather added to allow more convenient configuration file
+ * formats that also include data in the OPC UA type system.
+ */
 
 #ifdef UA_ENABLE_JSON_ENCODING
 
