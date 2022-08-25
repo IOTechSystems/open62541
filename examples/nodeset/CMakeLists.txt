@@ -123,6 +123,42 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
                 ${UA_TYPES_DI_SOURCES}
                 ${UA_TYPES_POWERLINK_SOURCES})
     add_dependencies(server_nodeset_powerlink open62541-generator-ns-powerlink)
-    
+
+    #######################################################
+
+
+    # generate euromap83 namespace which is using DI
+    ua_generate_nodeset_and_datatypes(
+            NAME "euromap83"
+            FILE_CSV "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.csv"
+            FILE_BSD "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.bsd"
+            IMPORT_BSD "UA_TYPES#${FILE_NS_DIRPREFIX}/Schema/Opc.Ua.Types.bsd"
+            NAMESPACE_MAP "3:http://opcfoundation.org/UA/PlasticsRubber/GeneralTypes/"
+            FILE_NS "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.xml"
+            DEPENDS "di"
+            INTERNAL
+    )
+
+    # generate euromap77 namespace which is using euromap83
+    ua_generate_nodeset_and_datatypes(
+            NAME "euromap77"
+            FILE_CSV "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.IMM2MES.NodeSet2.csv"
+            FILE_BSD "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.IMM2MES.NodeSet2.bsd"
+            IMPORT_BSD "UA_TYPES#${FILE_NS_DIRPREFIX}/Schema/Opc.Ua.Types.bsd"
+            NAMESPACE_MAP "4:http://opcfoundation.org/UA/PlasticsRubber/IMM2MES/"
+            FILE_NS "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.IMM2MES.NodeSet2.xml"
+            DEPENDS "euromap83"
+            INTERNAL
+    )
+
+    add_example(server_nodeset_euromap euromap/server_nodeset_euromap.c
+            ${UA_NODESET_DI_SOURCES}
+            ${UA_NODESET_EUROMAP83_SOURCES}
+            ${UA_NODESET_EUROMAP77_SOURCES}
+            ${UA_TYPES_DI_SOURCES}
+            ${UA_TYPES_EUROMAP83_SOURCES}
+            ${UA_TYPES_EUROMAP77_SOURCES}
+            )
+    add_dependencies(server_nodeset_euromap open62541-generator-ns-euromap77)
 
 endif()
