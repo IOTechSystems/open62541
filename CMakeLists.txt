@@ -249,7 +249,7 @@ if(UA_ENABLE_TPM2_KEYSTORE)
 endif()
 
 # Namespace Zero
-set(UA_NAMESPACE_ZERO "REDUCED" CACHE STRING "Completeness of the generated namespace zero (minimal/reduced/full/latest_1_05)")
+set(UA_NAMESPACE_ZERO "FULL" CACHE STRING "Completeness of the generated namespace zero (minimal/reduced/full/latest_1_05)")
 SET_PROPERTY(CACHE UA_NAMESPACE_ZERO PROPERTY STRINGS "MINIMAL" "REDUCED" "FULL" "LATEST_1_05")
 if(UA_NAMESPACE_ZERO STREQUAL "MINIMAL")
     set(UA_GENERATED_NAMESPACE_ZERO OFF)
@@ -536,6 +536,7 @@ if(CMAKE_BUILD_TYPE MATCHES DEBUG)
 endif()
 
 # Build Targets
+option(UA_BUILD_NODESETS "Build extended nodesets" ON)
 option(UA_BUILD_EXAMPLES "Build example servers and clients" OFF)
 option(UA_BUILD_TOOLS "Build OPC UA shell tools" OFF)
 option(UA_BUILD_UNIT_TESTS "Build the unit tests" OFF)
@@ -1526,6 +1527,14 @@ target_link_libraries(open62541 ${open62541_LIBRARIES})
 
 # always include, builds with make doc
 add_subdirectory(doc)
+
+if(UA_BUILD_NODESETS)
+    if(UA_ENABLE_AMALGAMATION)
+        # Cannot compile tests with amalgamation. Not prepared for single header include
+        message(FATAL_ERROR "Nodeset generation cannot be built with source amalgamation enabled")
+    endif()
+    add_subdirectory(extensions)
+endif()
 
 if(UA_BUILD_EXAMPLES)
     if(UA_ENABLE_AMALGAMATION)
