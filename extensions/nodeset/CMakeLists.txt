@@ -1,13 +1,8 @@
 ####################
-# Nodeset Examples #
+# Nodeset Generation #
 ####################
 
-###################
-# Custom XML      #
-###################
-
 set(FILE_CSV_DIRPREFIX ${PROJECT_SOURCE_DIR}/nodeset)
-set(FILE_BSD_DIRPREFIX ${PROJECT_SOURCE_DIR}/nodeset)
 set(FILE_NS_DIRPREFIX ${PROJECT_SOURCE_DIR}/nodeset)
 
 if(NOT CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
@@ -15,19 +10,13 @@ if(NOT CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(PROJECT_BINARY_DIR ${CMAKE_BINARY_DIR})
 endif()
 
-###################
-# PLCopen Nodeset #
-###################
-
 if(NOT CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(FILE_CSV_DIRPREFIX ${open62541_NODESET_DIR})
     set(FILE_BSD_PLCOPEN_DIRPREFIX ${open62541_NODESET_DIR})
-    set(FILE_BSD_POWERLINK_DIRPREFIX ${PROJECT_SOURCE_DIR}/nodeset)
     set(FILE_NS_DIRPREFIX ${open62541_NODESET_DIR})
 else()
     set(FILE_CSV_DIRPREFIX ${UA_NODESET_DIR})
     set(FILE_BSD_PLCOPEN_DIRPREFIX ${UA_NODESET_DIR})
-    set(FILE_BSD_POWERLINK_DIRPREFIX ${PROJECT_SOURCE_DIR}/nodeset)
     set(FILE_NS_DIRPREFIX ${UA_NODESET_DIR})
 endif()
 
@@ -43,8 +32,6 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
         FILE_NS "${FILE_NS_DIRPREFIX}/DI/Opc.Ua.Di.NodeSet2.xml"
         INTERNAL
     )
-
-    #######################################################
 
     # generate euromap83 namespace which is using DI
     ua_generate_nodeset_and_datatypes(
