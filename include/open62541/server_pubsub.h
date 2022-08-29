@@ -231,7 +231,7 @@ UA_ServerConfig_addPubSubTransportLayer(UA_ServerConfig *config,
 UA_StatusCode UA_EXPORT
 UA_Server_addPubSubConnection(UA_Server *server,
                               const UA_PubSubConnectionConfig *connectionConfig,
-                              UA_NodeId *connectionIdentifier)
+                              UA_NodeId *connectionIdentifier);
 
 /* Returns a deep copy of the config */
 UA_StatusCode UA_EXPORT
