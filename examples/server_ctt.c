@@ -993,7 +993,7 @@ usage(void) {
                    "server_ctt [<server-certificate.der>]\n"
 #else
                    "server_ctt <server-certificate.der> <private-key.der>\n"
-#ifndef __linux__
+#if ! defined (__linux__) && ! defined (_AZURESPHERE_)
                    "\t[--trustlist <tl1.ctl> <tl2.ctl> ... ]\n"
                    "\t[--issuerlist <il1.der> <il2.der> ... ]\n"
                    "\t[--revocationlist <rv1.crl> <rv2.crl> ...]\n"
@@ -1060,7 +1060,7 @@ int main(int argc, char **argv) {
     UA_Boolean disableBasic256 = false;
     UA_Boolean disableBasic256Sha256 = false;
 
-#ifndef __linux__
+#if ! defined (__linux__) && ! defined (_AZURESPHERE_)
     UA_ByteString trustList[100];
     size_t trustListSize = 0;
     UA_ByteString issuerList[100];
@@ -1132,7 +1132,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
-#ifndef __linux__
+#if ! defined (__linux__) && ! defined (_AZURESPHERE_)
         if(strcmp(argv[pos], "--trustlist") == 0) {
             filetype = 't';
             continue;
@@ -1236,7 +1236,7 @@ int main(int argc, char **argv) {
     UA_Server *server = NULL;
 
 #ifdef UA_ENABLE_ENCRYPTION
-#ifndef __linux__
+#if ! defined (__linux__) && ! defined (_AZURESPHERE_)
     UA_StatusCode res =
         UA_ServerConfig_setDefaultWithSecurityPolicies(&config, 4840,
                                                        &certificate, &privateKey,
@@ -1337,7 +1337,7 @@ int main(int argc, char **argv) {
     UA_ByteString_clear(&certificate);
 #if defined(UA_ENABLE_ENCRYPTION)
     UA_ByteString_clear(&privateKey);
-#ifndef __linux__
+#if ! defined (__linux__) && ! defined (_AZURESPHERE_)
     for(size_t i = 0; i < trustListSize; i++)
         UA_ByteString_clear(&trustList[i]);
     for(size_t i = 0; i < issuerListSize; i++)
