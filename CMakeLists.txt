@@ -540,7 +540,7 @@ if(CMAKE_BUILD_TYPE MATCHES DEBUG)
 endif()
 
 # Build Targets
-option(UA_BUILD_NODESETS "Build extended nodesets" ON)
+option(UA_BUILD_NODESETS "Build extended nodesets" OFF)
 option(UA_BUILD_EXAMPLES "Build example servers and clients" OFF)
 option(UA_BUILD_TOOLS "Build OPC UA shell tools" OFF)
 option(UA_BUILD_UNIT_TESTS "Build the unit tests" OFF)
