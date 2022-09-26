@@ -145,6 +145,8 @@ typedef double UA_Double;
  *   reasons indicated by the SubCode. */
 typedef uint32_t UA_StatusCode;
 
+#define DA_STATUSCODE_GOOD 0x000000c0
+
 /* Returns the human-readable name of the StatusCode. If no matching StatusCode
  * is found, a default string for "Unknown" is returned. This feature might be
  * disabled to create a smaller binary with the

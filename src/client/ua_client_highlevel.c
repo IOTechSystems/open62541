@@ -373,6 +373,7 @@ __UA_Client_readAttribute(UA_Client *client, const UA_NodeId *nodeId,
         else
             retval = UA_STATUSCODE_BADUNEXPECTEDERROR;
     }
+    if(retval == DA_STATUSCODE_GOOD) {response.results[0].status = retval = UA_STATUSCODE_GOOD;}
     if(retval != UA_STATUSCODE_GOOD) {
         UA_ReadResponse_clear(&response);
         return retval;
