@@ -137,8 +137,6 @@ typedef double UA_Double;
  * specific code. */
 typedef uint32_t UA_StatusCode;
 
-#define DA_STATUSCODE_GOOD 0x000000c0
-
 /* Returns the human-readable name of the StatusCode. If no matching StatusCode
  * is found, a default string for "Unknown" is returned. This feature might be
  * disabled to create a smaller binary with the
@@ -146,6 +144,12 @@ typedef uint32_t UA_StatusCode;
  * empty string for every StatusCode. */
 UA_EXPORT const char *
 UA_StatusCode_name(UA_StatusCode code);
+
+/* Compares the top 16 bits of two StatusCodes for equality. */
+static UA_INLINE UA_Boolean
+UA_StatusCode_equal (UA_StatusCode s1, UA_StatusCode s2) {
+  return ((s1 & 0xFFFF0000) == (s2 & 0xFFFF0000));
+}
 
 /**
  * String
