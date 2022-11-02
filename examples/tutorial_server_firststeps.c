@@ -33,12 +33,56 @@ static void stopHandler(int sig) {
     running = false;
 }
 
+
+#define XRT_DEVICE_SERVICE_OBJECT_TYPE_NAME "XRTDeviceServiceType"
+#define XRT_DEVICE_SERVICE_OBJECT_COMPONENT_DEVICES "Devices"
+
 int main(void) {
     signal(SIGINT, stopHandler);
     signal(SIGTERM, stopHandler);
 
     UA_Server *server = UA_Server_new();
     UA_ServerConfig_setDefault(UA_Server_getConfig(server));
+
+    UA_StatusCode status;
+    UA_ObjectTypeAttributes attr = UA_ObjectTypeAttributes_default;
+    attr.displayName = UA_LOCALIZEDTEXT ("en-US", XRT_DEVICE_SERVICE_OBJECT_TYPE_NAME);
+    UA_NodeId device_service_type_id;
+    status = UA_Server_addObjectTypeNode (
+        server,
+        UA_NODEID_STRING (1, XRT_DEVICE_SERVICE_OBJECT_TYPE_NAME),
+        UA_NODEID_NUMERIC (0, UA_NS0ID_BASEOBJECTTYPE),
+        UA_NODEID_NUMERIC (0, UA_NS0ID_HASSUBTYPE),
+        UA_QUALIFIEDNAME (1, XRT_DEVICE_SERVICE_OBJECT_TYPE_NAME),
+        attr,
+        NULL,
+        &device_service_type_id
+    );
+    assert (status == UA_STATUSCODE_GOOD);
+
+    UA_ObjectAttributes devices_folder_attr = UA_ObjectAttributes_default;
+    devices_folder_attr.displayName = UA_LOCALIZEDTEXT ("en-US", XRT_DEVICE_SERVICE_OBJECT_COMPONENT_DEVICES);
+    UA_NodeId devices;
+    status = UA_Server_addObjectNode (
+        server,
+        UA_NODEID_STRING (1, XRT_DEVICE_SERVICE_OBJECT_COMPONENT_DEVICES),
+        device_service_type_id,
+        UA_NODEID_NUMERIC (0, UA_NS0ID_HASCOMPONENT),
+        UA_QUALIFIEDNAME (1, XRT_DEVICE_SERVICE_OBJECT_COMPONENT_DEVICES),
+        UA_NODEID_NUMERIC (0, UA_NS0ID_FOLDERTYPE),
+        devices_folder_attr,
+        NULL,
+        &devices
+    );
+    assert (status == UA_STATUSCODE_GOOD);
+    status = UA_Server_addReference (
+        server,
+        devices,
+        UA_NODEID_NUMERIC (0, UA_NS0ID_HASMODELLINGRULE),
+        UA_EXPANDEDNODEID_NUMERIC (0, UA_NS0ID_MODELLINGRULE_MANDATORY),
+        true
+    );
+    assert (status == UA_STATUSCODE_GOOD);
 
     UA_StatusCode retval = UA_Server_run(server, &running);
 
