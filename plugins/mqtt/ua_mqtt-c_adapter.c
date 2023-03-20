@@ -8,7 +8,6 @@
  */
 
 #include "ua_mqtt-c_adapter.h"
-#include "ua_pubsub_manager.h"
 #include "server/ua_server_internal.h"
 #include <mqtt.h>
 #include <open62541/plugin/log_stdout.h>
@@ -153,7 +152,7 @@ connectMqtt(UA_PubSubChannelDataMQTT* channelData){
 #endif
 #if defined(UA_ENABLE_MQTT_TLS_OPENSSL) // Extend condition when mbedTLS support is added
         /* open the non-blocking TCP socket (connecting to the broker) */
-        UA_StatusCode rv = open_nb_socket(&sockfd, &ctx, addr, port, mqttCaFilePath, NULL, NULL, NULL);;
+        UA_StatusCode rv = open_nb_socket(&sockfd, &ctx, addr, port, mqttCaFilePath, NULL, mqttClientCertPath, mqttClientKeyPath);
         if(rv != UA_STATUSCODE_GOOD){
             UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "PubSub MQTT: Connection creation failed.");
             UA_free(mqttCaFilePath);
@@ -310,7 +309,7 @@ disconnectMqtt(UA_PubSubChannelDataMQTT* channelData){
         mqtt_disconnect(client);
         yieldMqtt(channelData, 10);
 #ifdef UA_ENABLE_MQTT_TLS_OPENSSL //mbedTLS condition is missing
-        BIO_free_all(client->socketfd);
+        client->socketfd = NULL;
 #endif
     }
 
@@ -335,7 +334,7 @@ publish_callback(void** ptrServer, struct mqtt_response_publish *published)
 
     UA_PubSubConnection *pubSubConnection;
     TAILQ_FOREACH(pubSubConnection, &server->pubSubManager.connections, listEntry){
-        if(!UA_String_equal(&pubSubConnection->config->transportProfileUri, &transport_uri))
+        if(!UA_String_equal(&pubSubConnection->config.transportProfileUri, &transport_uri))
             break;
         UA_ReaderGroup* readerGroup = NULL;
         LIST_FOREACH(readerGroup, &pubSubConnection->readerGroups, listEntry) {
@@ -375,10 +374,9 @@ publish_callback(void** ptrServer, struct mqtt_response_publish *published)
 
     UA_TopicAssign *topicAssign1;
     TAILQ_FOREACH(topicAssign1, &pubSubManager.topicAssign, listEntry){
-        if(UA_String_equal(&topicAssign1->topic, topic)){
-            UA_PubSubConnection* pConn =
-                UA_PubSubConnection_findConnectionbyId(server, topicAssign1->rgIdentifier->linkedConnection);
-            processMqttSubscriberCallback(server, topicAssign1->rgIdentifier,pConn, msg, topic);
+        if(UA_String_equal(&topicAssign1->topic, topic)) {
+            UA_PubSubConnection* pConn = topicAssign1->rgIdentifier->linkedConnection;
+            processMqttSubscriberCallback(server, pConn, msg);
         }
     }
 }

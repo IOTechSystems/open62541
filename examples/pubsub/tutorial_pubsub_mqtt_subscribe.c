@@ -6,12 +6,8 @@
 
 #include <open62541/plugin/log_stdout.h>
 #include <open62541/server.h>
-#include <open62541/server_config_default.h>
-
-#include <signal.h>
-
+#include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/plugin/pubsub_mqtt.h>
-#include "ua_pubsub_manager.h"
 
 #define CONNECTION_NAME               "MQTT Subscriber Connection"
 #define TRANSPORT_PROFILE_URI         "http://opcfoundation.org/UA-Profile/Transport/pubsub-mqtt"
@@ -42,6 +38,16 @@
 #define USE_TLS_OPTION_NAME             "mqttUseTLS"
 #define MQTT_CA_FILE_PATH_OPTION_NAME   "mqttCaFilePath"
 #define CA_FILE_PATH                    "/path/to/server.cert"
+#endif
+
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION) && !defined(UA_ENABLE_JSON_ENCODING)
+#define UA_AES128CTR_SIGNING_KEY_LENGTH 32
+#define UA_AES128CTR_KEY_LENGTH 16
+#define UA_AES128CTR_KEYNONCE_LENGTH 4
+
+UA_Byte signingKey[UA_AES128CTR_SIGNING_KEY_LENGTH] = {0};
+UA_Byte encryptingKey[UA_AES128CTR_KEY_LENGTH] = {0};
+UA_Byte keyNonce[UA_AES128CTR_KEYNONCE_LENGTH] = {0};
 #endif
 
 #ifdef UA_ENABLE_JSON_ENCODING
@@ -115,8 +121,8 @@ addPubSubConnection(UA_Server *server, char *addressUrl) {
     UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttCaFile, &UA_TYPES[UA_TYPES_STRING]);
 #endif
 
-    connectionConfig.connectionProperties = connectionOptions;
-    connectionConfig.connectionPropertiesSize = connectionOptionIndex;
+    connectionConfig.connectionProperties.map = connectionOptions;
+    connectionConfig.connectionProperties.mapSize = connectionOptionIndex;
 
     retval |= UA_Server_addPubSubConnection(server, &connectionConfig, &connectionIdent);
 
@@ -165,8 +171,24 @@ addReaderGroup(UA_Server *server,  int interval) {
 
     readerGroupConfig.transportSettings = transportSettings;
 
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION) && !defined(UA_ENABLE_JSON_ENCODING)
+    /* Encryption settings */
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    readerGroupConfig.securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+    readerGroupConfig.securityPolicy = &config->pubSubConfig.securityPolicies[0];
+#endif
+
     retval |= UA_Server_addReaderGroup(server, connectionIdent, &readerGroupConfig,
                                        &readerGroupIdent);
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION) && !defined(UA_ENABLE_JSON_ENCODING)
+    /* Add the encryption key informaton */
+    UA_ByteString sk = {UA_AES128CTR_SIGNING_KEY_LENGTH, signingKey};
+    UA_ByteString ek = {UA_AES128CTR_KEY_LENGTH, encryptingKey};
+    UA_ByteString kn = {UA_AES128CTR_KEYNONCE_LENGTH, keyNonce};
+
+    // TODO security token not necessary for readergroup (extracted from security-header)
+    retval |= UA_Server_setReaderGroupEncryptionKeys(server, readerGroupIdent, 1, sk, ek, kn);
+#endif
     retval |= UA_Server_setReaderGroupOperational(server, readerGroupIdent);
 
     return retval;
@@ -200,6 +222,9 @@ addDataSetReader(UA_Server *server) {
     readerConfig.publisherId.data = &publisherIdentifier;
     readerConfig.writerGroupId    = 100;
     readerConfig.dataSetWriterId  = 62541;
+#ifdef UA_ENABLE_PUBSUB_MONITORING
+    readerConfig.messageReceiveTimeout = 10;
+#endif
 
     /* Setting up Meta data configuration in DataSetReader */
     fillTestDataSetMetaData(&readerConfig.dataSetMetaData);
@@ -341,17 +366,8 @@ static void fillTestDataSetMetaData(UA_DataSetMetaDataType *pMetaData) {
 
 /**
  * Followed by the main server code, making use of the above definitions */
-UA_Boolean running = true;
-static void stopHandler(int sign) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "received ctrl-c");
-    running = false;
-}
-
 
 int main(int argc, char **argv) {
-    signal(SIGINT, stopHandler);
-    signal(SIGTERM, stopHandler);
-
     char *addressUrl = BROKER_ADDRESS_URL;
     //char *topic = SUBSCRIBER_TOPIC;
     int interval = SUBSCRIBE_INTERVAL;
@@ -360,7 +376,16 @@ int main(int argc, char **argv) {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     UA_Server *server = UA_Server_new();
     UA_ServerConfig *config = UA_Server_getConfig(server);
-    UA_ServerConfig_setDefault(config);
+
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION) && !defined(UA_ENABLE_JSON_ENCODING)
+    /* Instantiate the PubSub SecurityPolicy */
+    config->pubSubConfig.securityPolicies = (UA_PubSubSecurityPolicy*)
+        UA_malloc(sizeof(UA_PubSubSecurityPolicy));
+    config->pubSubConfig.securityPoliciesSize = 1;
+    UA_PubSubSecurityPolicy_Aes128Ctr(config->pubSubConfig.securityPolicies,
+                                      &config->logger);
+#endif
+
     UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerMQTT());
 
     /* API calls */
@@ -384,7 +409,7 @@ int main(int argc, char **argv) {
     if (retval != UA_STATUSCODE_GOOD)
         return EXIT_FAILURE;
 
-    retval = UA_Server_run(server, &running);
+    retval = UA_Server_runUntilInterrupt(server);
     UA_Server_delete(server);
     return retval == UA_STATUSCODE_GOOD ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -83,9 +83,11 @@ add_example(tutorial_server_variabletype tutorial_server_variabletype.c)
 
 add_example(tutorial_server_object tutorial_server_object.c)
 
+add_example(tutorial_server_reverseconnect tutorial_server_reverseconnect.c)
+
 if(UA_ENABLE_METHODCALLS)
     add_example(tutorial_server_method tutorial_server_method.c)
-    if (UA_MULTITHREADING EQUAL 100)
+    if (UA_MULTITHREADING GREATER_EQUAL 100)
         add_example(tutorial_server_method_async tutorial_server_method_async.c)
     endif()
 endif()
@@ -131,7 +133,7 @@ install(PROGRAMS $<TARGET_FILE:client>
 add_example(client_async client_async.c)
 
 if(UA_ENABLE_METHODCALLS)
-    if (UA_MULTITHREADING EQUAL 100)
+    if (UA_MULTITHREADING GREATER_EQUAL 100)
         add_example(client_method_async client_method_async.c)
     endif()
 endif()
@@ -207,6 +209,7 @@ add_subdirectory(nodeset)
 if(UA_ENABLE_PUBSUB)
     add_example(tutorial_pubsub_connection pubsub/tutorial_pubsub_connection.c)
     add_example(tutorial_pubsub_publish pubsub/tutorial_pubsub_publish.c)
+    add_example(server_pubsub_publish_on_demand pubsub/server_pubsub_publisher_on_demand.c)
     add_example(tutorial_pubsub_publish_raw pubsub/tutorial_pubsub_publish_raw.c)
     add_example(tutorial_pubsub_subscribe_raw pubsub/tutorial_pubsub_subscribe_raw.c)
     add_example(server_pubsub_publisher_iop pubsub/server_pubsub_publisher_iop.c)
@@ -253,6 +256,9 @@ if(UA_ENABLE_PUBSUB)
             target_link_libraries(pubsub_publish_encrypted_tpm_keystore tpm2_pkcs11 ssl crypto)
             target_link_libraries(pubsub_subscribe_encrypted_tpm_keystore tpm2_pkcs11 ssl crypto)
         endif()
+        if(UA_ENABLE_PUBSUB_SKS)
+        add_subdirectory(pubsub/sks)
+        endif()
     endif()
 
 
@@ -273,4 +279,11 @@ if(UA_ENABLE_PUBSUB)
             message(WARNING "PubSub subscriber monitoring example build needs LINUX OS. Skip build.")
         endif()
     endif()
+endif()
+
+###########################
+# Nodeser Loader Examples #
+###########################
+if(UA_ENABLE_NODESETLOADER)
+    add_subdirectory(nodeset_loader)
 endif()

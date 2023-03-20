@@ -43,6 +43,7 @@ UA_PubSubConnection *connection; /* setup() is to create an environment for test
 static void setup(void) {
     /*Add setup by creating new server with valid configuration */
     server = UA_Server_new();
+    ck_assert(server != NULL);
     config = UA_Server_getConfig(server);
     UA_ServerConfig_setMinimal(config, UA_SUBSCRIBER_PORT, NULL);
     UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerEthernet());
@@ -81,8 +82,8 @@ START_TEST(EthernetSendWithoutVLANTag) {
     connectionOptions[1].key = UA_QUALIFIEDNAME(0, "enablesotxtime");
     UA_Boolean enableTxTime  = UA_TRUE;
     UA_Variant_setScalar(&connectionOptions[1].value, &enableTxTime, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    connectionConfig.connectionProperties     = connectionOptions;
-    connectionConfig.connectionPropertiesSize = 2;
+    connectionConfig.connectionProperties.map = connectionOptions;
+    connectionConfig.connectionProperties.mapSize = 2;
     UA_Server_addPubSubConnection(server, &connectionConfig, &connection_test);
     connection = UA_PubSubConnection_findConnectionbyId(server, connection_test);
     if(!connection) {
@@ -134,8 +135,8 @@ START_TEST(EthernetSendWithVLANTag) {
     connectionOptions[1].key = UA_QUALIFIEDNAME(0, "enablesotxtime");
     UA_Boolean enableTxTime  = UA_TRUE;
     UA_Variant_setScalar(&connectionOptions[1].value, &enableTxTime, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    connectionConfig.connectionProperties     = connectionOptions;
-    connectionConfig.connectionPropertiesSize = 2;
+    connectionConfig.connectionProperties.map = connectionOptions;
+    connectionConfig.connectionProperties.mapSize = 2;
     UA_Server_addPubSubConnection(server, &connectionConfig, &connection_test);
     connection = UA_PubSubConnection_findConnectionbyId(server, connection_test);
     if(!connection) {

@@ -17,23 +17,18 @@
 #ifndef UA_SERVER_H_
 #define UA_SERVER_H_
 
-#include <open62541/util.h>
 #include <open62541/types.h>
 #include <open62541/common.h>
-#include <open62541/nodeids.h>
-#include <open62541/types_generated.h>
-#include <open62541/types_generated_handling.h>
 
-#include <open62541/plugin/eventloop.h>
-#include <open62541/plugin/securitypolicy.h>
-#include <open62541/plugin/accesscontrol.h>
-#include <open62541/plugin/nodestore.h>
-#include <open62541/plugin/network.h>
 #include <open62541/plugin/log.h>
 #include <open62541/plugin/pki.h>
+#include <open62541/plugin/network.h>
+#include <open62541/plugin/nodestore.h>
+#include <open62541/plugin/eventloop.h>
+#include <open62541/plugin/accesscontrol.h>
+#include <open62541/plugin/securitypolicy.h>
 
 #ifdef UA_ENABLE_PUBSUB
-#include <open62541/plugin/pubsub.h>
 #include <open62541/server_pubsub.h>
 #endif
 
@@ -86,7 +81,9 @@ typedef struct {
  * The :ref:`tutorials` provide a good starting point for this. */
 
 struct UA_ServerConfig {
-    UA_Logger logger;
+    UA_Logger logger;   /* logger is deprecated but still supported at this time.
+                           Use logging pointer instead. */
+    UA_Logger *logging; /* If NULL and "logger" is set, make this point to "logger" */
     void *context; /* Used to attach custom data to a server config. This can
                     * then be retrieved e.g. in a callback that forwards a
                     * pointer to the server. */
@@ -363,6 +360,11 @@ struct UA_ServerConfig {
     UA_Boolean deleteEventCapability;
     UA_Boolean deleteAtTimeDataCapability;
 #endif
+
+    /**
+     * Reverse Connect
+     * ^^^^^^^^^^^^^^^ */
+    UA_UInt32 reverseReconnectInterval; /* Default is 15000 ms */
 };
 
 void UA_EXPORT
@@ -374,36 +376,66 @@ UA_ServerConfig_clean(UA_ServerConfig *config);
  * Server Lifecycle
  * ---------------- */
 
-/* The method UA_Server_new is defined in server_config_default.h. So default
- * plugins outside of the core library (for logging, etc) are already available
- * during the initialization.
+/* Create a new server with a default configuration that adds plugins for
+ * networking, security, logging and so on. See `server_config_default.h` for
+ * more detailed options.
  *
- * UA_Server UA_EXPORT * UA_Server_new(void);
- */
+ * The default configuration can be used as the starting point to adjust the
+ * server configuration to individual needs. UA_Server_new is implemented in the
+ * /plugins folder under the CC0 license. Furthermore the server confiugration
+ * only uses the public server API.
+ *
+ * @return Returns the configured server or NULL if an error occurs. */
+UA_EXPORT UA_Server * UA_Server_new(void);
 
 /* Creates a new server. Moves the config into the server with a shallow copy.
  * The config content is cleared together with the server. */
-UA_Server UA_EXPORT *
+UA_EXPORT UA_Server *
 UA_Server_newWithConfig(UA_ServerConfig *config);
 
-void UA_EXPORT UA_Server_delete(UA_Server *server);
+/* Delete the server. */
+UA_EXPORT void UA_Server_delete(UA_Server *server);
 
-UA_ServerConfig UA_EXPORT *
+/* Get the configuration. Always succeeds as this simplfy resolves a pointer.
+ * Attention! Do not adjust the configuration while the server is running! */
+UA_EXPORT UA_ServerConfig *
 UA_Server_getConfig(UA_Server *server);
 
-/* Runs the main loop of the server. In each iteration, this calls into the
- * networklayers to see if messages have arrived.
+/* Runs the server until interrupted. On Unix/Windows this registers an
+ * interrupt for SIGINT (ctrl-c). The method only returns after having received
+ * the interrupt. The logical sequence is as follows:
+ *
+ * - UA_Server_run_startup
+ * - Loop until interrupt: UA_Server_run_iterate
+ * - UA_Server_run_shutdown
  *
  * @param server The server object.
- * @param running The loop is run as long as *running is true.
- *        Otherwise, the server shuts down.
- * @return Returns the statuscode of the UA_Server_run_shutdown method */
-UA_StatusCode UA_EXPORT
+ * @return Returns a bad statuscode if an error occurred internally. */
+UA_EXPORT UA_StatusCode
 UA_Server_run(UA_Server *server, const volatile UA_Boolean *running);
 
+/* Runs the server until interrupted. On Unix/Windows this registers an
+ * interrupt for SIGINT (ctrl-c). The method only returns after having received
+ * the interrupt or upon an error condition. The logical sequence is as follows:
+ *
+ * - Register the interrupt
+ * - UA_Server_run_startup
+ * - Loop until interrupt: UA_Server_run_iterate
+ * - UA_Server_run_shutdown
+ * - Deregister the interrupt
+ *
+ * Attention! This method is implemented individually for the different
+ * platforms (POSIX/Win32/etc.). The default implementation is in
+ * /plugins/ua_config_default.c under the CC0 license. Adjust as needed.
+ *
+ * @param server The server object.
+ * @return Returns a bad statuscode if an error occurred internally. */
+UA_EXPORT UA_StatusCode
+UA_Server_runUntilInterrupt(UA_Server *server);
+
 /* The prologue part of UA_Server_run (no need to use if you call
- * UA_Server_run) */
-UA_StatusCode UA_EXPORT
+ * UA_Server_run or UA_Server_runUntilInterrupt) */
+UA_EXPORT UA_StatusCode
 UA_Server_run_startup(UA_Server *server);
 
 /* Executes a single iteration of the server's main loop.
@@ -411,15 +443,15 @@ UA_Server_run_startup(UA_Server *server);
  * @param server The server object.
  * @param waitInternal Should we wait for messages in the networklayer?
  *        Otherwise, the timouts for the networklayers are set to zero.
- *        The default max wait time is 50millisec.
+ *        The default max wait time is 200ms.
  * @return Returns how long we can wait until the next scheduled
  *         callback (in ms) */
-UA_UInt16 UA_EXPORT
+UA_EXPORT UA_UInt16
 UA_Server_run_iterate(UA_Server *server, UA_Boolean waitInternal);
 
 /* The epilogue part of UA_Server_run (no need to use if you call
- * UA_Server_run) */
-UA_StatusCode UA_EXPORT
+ * UA_Server_run or UA_Server_runUntilInterrupt) */
+UA_EXPORT UA_StatusCode
 UA_Server_run_shutdown(UA_Server *server);
 
 /**
@@ -1738,6 +1770,28 @@ UA_Server_deleteCondition(UA_Server *server,
                           const UA_NodeId condition,
                           const UA_NodeId conditionSource);
 
+/*
+ * Set the LimitState of the LimitAlarmType
+ *
+ * @param server The server object
+ * @param conditionId The NodeId of the node representation of the Condition Instance
+ * @param limitValue The value from the trigger node
+ */
+UA_StatusCode UA_EXPORT
+UA_Server_setLimitState(UA_Server *server, const UA_NodeId conditionId,
+                        UA_Double limitValue);
+
+/*
+ * Parse the certifcate and set Expiration date
+ *
+ * @param server The server object
+ * @param conditionId The NodeId of the node representation of the Condition Instance
+ * @param cert The certificate for parsing
+ */
+UA_StatusCode UA_EXPORT
+UA_Server_setExpirationDate(UA_Server *server, const UA_NodeId conditionId,
+                            UA_ByteString  cert);
+
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 /**
@@ -1850,20 +1904,69 @@ UA_Server_setAsyncOperationResult(UA_Server *server,
 #endif /* !UA_MULTITHREADING >= 100 */
 
 /**
-* Statistics
-* ----------
-*
-* Statistic counters keeping track of the current state of the stack. Counters
-* are structured per OPC UA communication layer. */
+ * Statistics
+ * ----------
+ *
+ * Statistic counters keeping track of the current state of the stack. Counters
+ * are structured per OPC UA communication layer. */
 
 typedef struct {
-   UA_NetworkStatistics ns;
    UA_SecureChannelStatistics scs;
    UA_SessionStatistics ss;
 } UA_ServerStatistics;
 
 UA_ServerStatistics UA_EXPORT
 UA_Server_getStatistics(UA_Server *server);
+
+/**
+  * Reverse Connect
+  * ---------------
+  *
+  * The reverse connect feature of OPC UA permits the server instead of the client to
+  * establish the connection.
+  * The client must expose the listening port so the server is able to reach it.
+  */
+
+/**
+ * The reverse connect state change callback is called whenever the state of a reverse
+ * connect is changed by a connection attempt, a successful connection or a connection
+ * loss.
+ *
+ * The reverse connect states reflect the state of the secure channel currently associated
+ * with a reverse connect. The state will remain UA_SECURECHANNELSTATE_CONNECTING while
+ * the server attempts repeatedly to establish a connection.
+ */
+typedef void (*UA_Server_ReverseConnectStateCallback)(UA_Server *server, UA_UInt64 handle,
+                                                      UA_SecureChannelState state,
+                                                      void *context);
+
+/**
+ * Registers a reverse connect in the server.
+ * The server periodically attempts to establish a connection if the initial connect fails
+ * or if the connection breaks.
+ *
+ * @param server The server object
+ * @param url The URL of the remote client
+ * @param stateCallback The callback which will be called on state changes
+ * @param callbackContext The context for the state callback
+ * @param handle Is set to the handle of the reverse connect if not NULL
+ * @return Returns UA_STATUSCODE_GOOD if the reverse connect has been registered
+ */
+UA_StatusCode UA_EXPORT
+UA_Server_addReverseConnect(UA_Server *server, UA_String url,
+                                          UA_Server_ReverseConnectStateCallback stateCallback,
+                                          void *callbackContext, UA_UInt64 *handle);
+
+/**
+ * Removes a reverse connect from the server and closes the connection if it is currently
+ * open.
+ *
+ * @param server The server object
+ * @param handle The handle of the reverse connect to remove
+ * @return Returns UA_STATUSCODE_GOOD if the reverse connect has been successfully removed
+ */
+UA_StatusCode UA_EXPORT
+UA_Server_removeReverseConnect(UA_Server *server, UA_UInt64 handle);
 
 _UA_END_DECLS
 

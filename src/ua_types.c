@@ -23,7 +23,6 @@
 #include "../deps/itoa.h"
 #include "../deps/base64.h"
 #include "libc_time.h"
-#include "pcg_basic.h"
 
 #define UA_MAX_ARRAY_DIMS 100 /* Max dimensions of an array */
 
@@ -36,11 +35,11 @@
 
 /* Global definition of NULL type instances. These are always zeroed out, as
  * mandated by the C/C++ standard for global values with no initializer. */
-const UA_String UA_STRING_NULL = {0};
-const UA_ByteString UA_BYTESTRING_NULL = {0};
-const UA_Guid UA_GUID_NULL = {0};
-const UA_NodeId UA_NODEID_NULL = {0};
-const UA_ExpandedNodeId UA_EXPANDEDNODEID_NULL = { {0}, {0}, 0 };
+const UA_String UA_STRING_NULL = {0, NULL};
+const UA_ByteString UA_BYTESTRING_NULL = {0, NULL};
+const UA_Guid UA_GUID_NULL = {0, 0, 0, {0,0,0,0,0,0,0,0}};
+const UA_NodeId UA_NODEID_NULL = {0, UA_NODEIDTYPE_NUMERIC, {0}};
+const UA_ExpandedNodeId UA_EXPANDEDNODEID_NULL = {{0, UA_NODEIDTYPE_NUMERIC, {0}}, {0, NULL}, 0};
 
 typedef UA_StatusCode
 (*UA_copySignature)(const void *src, void *dst, const UA_DataType *type);
@@ -83,21 +82,25 @@ UA_findDataType(const UA_NodeId *typeId) {
     return UA_findDataTypeWithCustom(typeId, NULL);
 }
 
-/***************************/
-/* Random Number Generator */
-/***************************/
-
-//TODO is this safe for multithreading?
-static pcg32_random_t UA_rng = PCG32_INITIALIZER;
-
 void
-UA_random_seed(u64 seed) {
-    pcg32_srandom_r(&UA_rng, seed, (u64)UA_DateTime_now());
-}
-
-u32
-UA_UInt32_random(void) {
-    return (u32)pcg32_random_r(&UA_rng);
+UA_cleanupDataTypeWithCustom(const UA_DataTypeArray *customTypes) {
+    while (customTypes) {
+        const UA_DataTypeArray *next = customTypes->next;
+        if (customTypes->cleanup) {
+            for(size_t i = 0; i < customTypes->typesSize; ++i) {
+                const UA_DataType *type = &customTypes->types[i];
+                UA_free((void*)(uintptr_t)type->typeName);
+                for(size_t j = 0; j < type->membersSize; ++j) {
+                    const UA_DataTypeMember *m = &type->members[j];
+                    UA_free((void*)(uintptr_t)m->memberName);
+                }
+                UA_free((void*)type->members);
+            }
+            UA_free((void*)(uintptr_t)customTypes->types);
+            UA_free((void*)(uintptr_t)customTypes);
+        }
+        customTypes = next;
+    }
 }
 
 /*****************/
@@ -254,26 +257,6 @@ UA_DateTime_fromStruct(UA_DateTimeStruct ts) {
 UA_Boolean
 UA_Guid_equal(const UA_Guid *g1, const UA_Guid *g2) {
     return (guidOrder(g1, g2, NULL) == UA_ORDER_EQ);
-}
-
-UA_Guid
-UA_Guid_random(void) {
-    UA_Guid result;
-    result.data1 = (u32)pcg32_random_r(&UA_rng);
-    u32 r = (u32)pcg32_random_r(&UA_rng);
-    result.data2 = (u16) r;
-    result.data3 = (u16) (r >> 16);
-    r = (u32)pcg32_random_r(&UA_rng);
-    result.data4[0] = (u8)r;
-    result.data4[1] = (u8)(r >> 4);
-    result.data4[2] = (u8)(r >> 8);
-    result.data4[3] = (u8)(r >> 12);
-    r = (u32)pcg32_random_r(&UA_rng);
-    result.data4[4] = (u8)r;
-    result.data4[5] = (u8)(r >> 4);
-    result.data4[6] = (u8)(r >> 8);
-    result.data4[7] = (u8)(r >> 12);
-    return result;
 }
 
 static const u8 hexmapLower[16] =
@@ -2165,51 +2148,6 @@ UA_DataType_isNumeric(const UA_DataType *type) {
         return true;
     default:
         return false;
-    }
-}
-
-UA_Int16
-UA_DataType_getPrecedence(const UA_DataType *type){
-    //Defined in Part 4 Table 123 "Data Precedence Rules"
-    switch(type->typeKind) {
-        case UA_DATATYPEKIND_DOUBLE:
-            return 1;
-        case UA_DATATYPEKIND_FLOAT:
-            return 2;
-        case UA_DATATYPEKIND_INT64:
-            return 3;
-        case UA_DATATYPEKIND_UINT64:
-            return 4;
-        case UA_DATATYPEKIND_INT32:
-            return 5;
-        case UA_DATATYPEKIND_UINT32:
-            return 6;
-        case UA_DATATYPEKIND_STATUSCODE:
-            return 7;
-        case UA_DATATYPEKIND_INT16:
-            return 8;
-        case UA_DATATYPEKIND_UINT16:
-            return 9;
-        case UA_DATATYPEKIND_SBYTE:
-            return 10;
-        case UA_DATATYPEKIND_BYTE:
-            return 11;
-        case UA_DATATYPEKIND_BOOLEAN:
-            return 12;
-        case UA_DATATYPEKIND_GUID:
-            return 13;
-        case UA_DATATYPEKIND_STRING:
-            return 14;
-        case UA_DATATYPEKIND_EXPANDEDNODEID:
-            return 15;
-        case UA_DATATYPEKIND_NODEID:
-            return 16;
-        case UA_DATATYPEKIND_LOCALIZEDTEXT:
-            return 17;
-        case UA_DATATYPEKIND_QUALIFIEDNAME:
-            return 18;
-        default:
-            return -1;
     }
 }
 

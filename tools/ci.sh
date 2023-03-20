@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Exit immediately if a command exits with a non-zero status
-set -e 
+set -e
 
 # Use the error status of the first failure in a pipeline
 set -o pipefail
@@ -93,6 +93,8 @@ function build_amalgamation {
           -DUA_ENABLE_DISCOVERY=ON \
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_ETH_UADP=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
@@ -109,6 +111,8 @@ function build_amalgamation_mt {
           -DUA_ENABLE_DISCOVERY=ON \
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_ETH_UADP=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
@@ -127,7 +131,7 @@ function set_capabilities {
     for filename in bin/tests/*; do
         sudo setcap cap_sys_ptrace,cap_net_raw,cap_net_admin=eip $filename
     done
-} 
+}
 
 function unit_tests {
     mkdir -p build; cd build; rm -rf *
@@ -139,12 +143,15 @@ function unit_tests {
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_HISTORIZING=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_ETH_UADP=ON \
           -DUA_ENABLE_PUBSUB_MQTT=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS=ON \
+          -DUA_ENABLE_REDUCED_ITERATIONS_FOR_TESTING=ON \
           -DUA_ENABLE_PUBSUB_MONITORING=ON \
           -DUA_ENABLE_PUBSUB_MQTT=ON \
           ..
@@ -163,6 +170,8 @@ function unit_tests_32 {
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_HISTORIZING=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
@@ -198,11 +207,14 @@ function unit_tests_diag {
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_HISTORIZING=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_ETH_UADP=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS=ON \
+          -DUA_ENABLE_REDUCED_ITERATIONS_FOR_TESTING=ON \
           -DUA_ENABLE_PUBSUB_MONITORING=ON \
           ..
     make ${MAKEOPTS}
@@ -222,6 +234,7 @@ function unit_tests_mt {
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           ..
     make ${MAKEOPTS}
+    set_capabilities
     make test ARGS="-V"
 }
 
@@ -231,11 +244,14 @@ function unit_tests_alarms {
           -DUA_BUILD_EXAMPLES=ON \
           -DUA_BUILD_UNIT_TESTS=ON \
           -DUA_ENABLE_DA=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
 	      -DUA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS=ON \
           -DUA_NAMESPACE_ZERO=FULL \
           ..
     make ${MAKEOPTS}
+    set_capabilities
     make test ARGS="-V"
 }
 
@@ -249,6 +265,7 @@ function unit_tests_encryption {
           -DUA_ENABLE_ENCRYPTION=$1 \
           ..
     make ${MAKEOPTS}
+    set_capabilities
     make test ARGS="-V"
 }
 
@@ -260,6 +277,7 @@ function unit_tests_encryption_mbedtls_pubsub {
           -DUA_ENABLE_DISCOVERY=ON \
           -DUA_ENABLE_DISCOVERY_MULTICAST=ON \
           -DUA_ENABLE_ENCRYPTION=MBEDTLS \
+          -DUA_ENABLE_CERT_REJECTED_DIR=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
@@ -267,7 +285,32 @@ function unit_tests_encryption_mbedtls_pubsub {
           -DUA_ENABLE_PUBSUB_ENCRYPTION=ON \
           ..
     make ${MAKEOPTS}
+    set_capabilities
     make test ARGS="-V"
+}
+
+function unit_tests_pubsub_sks {
+    mkdir -p build; cd build; rm -rf *
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_NAMESPACE_ZERO=FULL \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_DISCOVERY=ON \
+          -DUA_ENABLE_DISCOVERY_MULTICAST=ON \
+          -DUA_ENABLE_ENCRYPTION=MBEDTLS \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS=ON \
+          -DUA_ENABLE_REDUCED_ITERATIONS_FOR_TESTING=ON \
+          -DUA_ENABLE_PUBSUB_MONITORING=ON \
+          -DUA_ENABLE_PUBSUB_ENCRYPTION=ON \
+          -DUA_ENABLE_PUBSUB_SKS=ON \
+          -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
+          ..
+    make ${MAKEOPTS}
+    # set_capabilities not possible with valgrind
+    make test ARGS="-V -R sks"
 }
 
 ##########################################
@@ -285,12 +328,15 @@ function unit_tests_with_coverage {
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_HISTORIZING=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_ETH_UADP=ON \
           -DUA_ENABLE_PUBSUB_MQTT=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS=ON \
+          -DUA_ENABLE_REDUCED_ITERATIONS_FOR_TESTING=ON \
           -DUA_ENABLE_PUBSUB_MONITORING=ON \
           -DUA_ENABLE_ENCRYPTION=MBEDTLS \
           ..
@@ -315,15 +361,19 @@ function unit_tests_valgrind {
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_HISTORIZING=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_MQTT=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS=ON \
+          -DUA_ENABLE_REDUCED_ITERATIONS_FOR_TESTING=ON \
           -DUA_ENABLE_PUBSUB_MONITORING=ON \
           -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
           ..
     make ${MAKEOPTS}
+    # set_capabilities not possible with valgrind
     make test ARGS="-V"
 }
 
@@ -341,6 +391,8 @@ function build_clang_analyzer {
           -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
           -DUA_ENABLE_HISTORIZING=ON \
           -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_NODESETLOADER=ON \
           -DUA_ENABLE_PUBSUB=ON \
           -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
           -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \

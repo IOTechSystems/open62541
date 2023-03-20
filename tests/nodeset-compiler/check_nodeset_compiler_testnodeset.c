@@ -14,11 +14,12 @@
 #include "unistd.h"
 
 UA_Server *server = NULL;
-UA_DataTypeArray customTypesArray = { NULL, UA_TYPES_TESTS_TESTNODESET_COUNT, UA_TYPES_TESTS_TESTNODESET};
+UA_DataTypeArray customTypesArray = { NULL, UA_TYPES_TESTS_TESTNODESET_COUNT, UA_TYPES_TESTS_TESTNODESET, UA_FALSE};
 UA_UInt16 testNamespaceIndex = (UA_UInt16) -1;
 
 static void setup(void) {
     server = UA_Server_new();
+    ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
     config->customDataTypes = &customTypesArray;

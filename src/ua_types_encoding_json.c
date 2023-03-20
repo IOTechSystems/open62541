@@ -1354,7 +1354,8 @@ UA_print(const void *p, const UA_DataType *type, UA_String *output) {
     if(!p || !type || !output)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    UA_EncodeJsonOptions options = {0};
+    UA_EncodeJsonOptions options;
+    memset(&options, 0, sizeof(UA_EncodeJsonOptions));
     options.useReversible = true;
     options.prettyPrint = true;
     options.unquotedKeys = true;
@@ -1573,7 +1574,6 @@ DECODE_JSON(UInt32) {
 
 DECODE_JSON(UInt64) {
     CHECK_TOKEN_BOUNDS;
-    CHECK_STRING;
     GET_TOKEN;
 
     UA_StatusCode s = parseUnsignedInteger(tokenData, tokenSize, dst);
@@ -1627,7 +1627,6 @@ DECODE_JSON(Int32) {
 
 DECODE_JSON(Int64) {
     CHECK_TOKEN_BOUNDS;
-    CHECK_STRING;
     GET_TOKEN;
 
     UA_StatusCode s = parseSignedInteger(tokenData, tokenSize, dst);
@@ -2737,7 +2736,7 @@ status
 tokenize(ParseCtx *ctx, const UA_ByteString *src, size_t tokensSize) {
     /* Tokenize */
     cj5_result r = cj5_parse((char*)src->data, (unsigned int)src->length,
-                             ctx->tokens, (unsigned int)tokensSize);
+                             ctx->tokens, (unsigned int)tokensSize, NULL);
 
     /* Handle overflow error by allocating the number of tokens the parser would
      * have needed */

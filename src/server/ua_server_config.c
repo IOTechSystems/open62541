@@ -8,6 +8,8 @@
 
 #include <open62541/server.h>
 
+#include "ua_server_internal.h"
+
 void
 UA_ServerConfig_clean(UA_ServerConfig *config) {
     if(!config)
@@ -83,6 +85,13 @@ UA_ServerConfig_clean(UA_ServerConfig *config) {
 #endif
 
     /* Logger */
+    if(config->logging != NULL) {
+        if((config->logging != &config->logger) &&
+           (config->logging->clear != NULL)) {
+            config->logging->clear(config->logging->context);
+        }
+        config->logging = NULL;
+    }
     if(config->logger.clear)
         config->logger.clear(config->logger.context);
     config->logger.log = NULL;
@@ -100,6 +109,9 @@ UA_ServerConfig_clean(UA_ServerConfig *config) {
     }
 #endif
 #endif /* UA_ENABLE_PUBSUB */
+
+    /* Custom Data Types */
+    UA_cleanupDataTypeWithCustom(config->customDataTypes);
 }
 
 #ifdef UA_ENABLE_PUBSUB

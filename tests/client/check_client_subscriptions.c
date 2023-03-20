@@ -34,6 +34,7 @@ static void setup(void) {
     noNewSubscription = false;
     running = true;
     server = UA_Server_new();
+    ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
     config->maxPublishReqPerSession = 5;
@@ -962,8 +963,7 @@ START_TEST(Client_subscription_statusChange) {
     THREAD_JOIN(server_thread);
 
     /* Manually set the StatusChange */
-    UA_Subscription *sub =
-        UA_Server_getSubscriptionById(server, response.subscriptionId);
+    UA_Subscription *sub = getSubscriptionById(server, response.subscriptionId);
     sub->statusChange = 1234; /* some statuscode */
 
     /* Send publish requests and receive them on the server side */

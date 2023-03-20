@@ -357,7 +357,7 @@ getStructureDefinition(const UA_DataType *type, UA_StructureDefinition *def) {
 
     for(size_t cnt = 0; cnt < def->fieldsSize; cnt++) {
         const UA_DataTypeMember *m = &type->members[cnt];
-        def->fields[cnt].valueRank = UA_TRUE == m->isArray ? 1 : -1;
+        def->fields[cnt].valueRank = (m->isArray) ? 1 : -1;
         def->fields[cnt].arrayDimensions = NULL;
         def->fields[cnt].arrayDimensionsSize = 0;
         def->fields[cnt].name = UA_STRING((char *)(uintptr_t)m->memberName);
@@ -378,8 +378,8 @@ void
 ReadWithNode(const UA_Node *node, UA_Server *server, UA_Session *session,
              UA_TimestampsToReturn timestampsToReturn,
              const UA_ReadValueId *id, UA_DataValue *v) {
-    UA_LOG_NODEID_DEBUG(&node->head.nodeId,
-                        UA_LOG_DEBUG_SESSION(&server->config.logger, session,
+    UA_LOG_NODEID_TRACE(&node->head.nodeId,
+                        UA_LOG_TRACE_SESSION(&server->config.logger, session,
                                              "Read attribute %"PRIi32 " of Node %.*s",
                                              id->attributeId, (int)nodeIdStr.length,
                                              nodeIdStr.data));
@@ -809,18 +809,10 @@ typeEquivalence(const UA_DataType *t) {
     return k;
 }
 
-static const UA_NodeId enumNodeId = {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ENUMERATION}};
-
 UA_Boolean
 compatibleValueDataType(UA_Server *server, const UA_DataType *dataType,
                         const UA_NodeId *constraintDataType) {
     if(compatibleDataTypes(server, &dataType->typeId, constraintDataType))
-        return true;
-
-    /* The constraint is an enum -> allow writing Int32 */
-    if(UA_NodeId_equal(&dataType->typeId, &UA_TYPES[UA_TYPES_INT32].typeId) &&
-       isNodeInTree_singleRef(server, constraintDataType, &enumNodeId,
-                              UA_REFERENCETYPEINDEX_HASSUBTYPE))
         return true;
 
     /* For actual values, the constraint DataType may be a subtype of the
@@ -1037,7 +1029,7 @@ compatibleValue(UA_Server *server, UA_Session *session, const UA_NodeId *targetD
                 const UA_UInt32 *targetArrayDimensions, const UA_Variant *value,
                 const UA_NumericRange *range, const char **reason) {
     /* Empty value */
-    if(!value->type) {
+    if(UA_Variant_isEmpty(value)) {
         /* Empty value is allowed for BaseDataType */
         if(UA_NodeId_equal(targetDataTypeId, &UA_TYPES[UA_TYPES_VARIANT].typeId) ||
            UA_NodeId_equal(targetDataTypeId, &UA_NODEID_NULL))
@@ -1059,6 +1051,14 @@ compatibleValue(UA_Server *server, UA_Session *session, const UA_NodeId *targetD
         /* Default handling is to abort */
         *reason = reason_EmptyType;
         return false;
+    }
+
+    /* Empty array of ExtensionObjects */
+    if(UA_Variant_hasArrayType(value, &UA_TYPES[UA_TYPES_EXTENSIONOBJECT]) &&
+       value->arrayLength == 0) {
+        /* There is no way to check type compatibility here. Leave it for the upper layers to
+         * decide, if empty array is okay. */
+        return true;        
     }
 
     /* Is the datatype compatible? */
@@ -1092,6 +1092,11 @@ compatibleValue(UA_Server *server, UA_Session *session, const UA_NodeId *targetD
 /*****************/
 
 static void
+freeWrapperArray(void *app, void *context) {
+    UA_free(context);
+}
+
+static void
 unwrapEOArray(UA_Server *server, UA_Variant *value) {
     /* Only works on arrays of ExtensionObjects */
     if(!UA_Variant_hasArrayType(value, &UA_TYPES[UA_TYPES_EXTENSIONOBJECT]) ||
@@ -1117,7 +1122,6 @@ unwrapEOArray(UA_Server *server, UA_Variant *value) {
         UA_malloc(sizeof(UA_DelayedCallback) + (value->arrayLength * innerType->memSize));
     if(!dc)
         return;
-    dc->callback = NULL; /* No callback, just free the memory */
 
     /* Move the content */
     uintptr_t pos = ((uintptr_t)dc) + sizeof(UA_DelayedCallback);
@@ -1132,8 +1136,11 @@ unwrapEOArray(UA_Server *server, UA_Variant *value) {
     value->data = unwrappedArray;
 
     /* Add the delayed callback to free the memory of the unwrapped array */
-    server->config.eventLoop->
-        addDelayedCallback(server->config.eventLoop, dc);
+    dc->callback = freeWrapperArray;
+    dc->application = NULL;
+    dc->context = dc;
+    UA_EventLoop *el = server->config.eventLoop;
+    el->addDelayedCallback(el, dc);
 }
 
 void
@@ -1143,12 +1150,14 @@ adjustValueType(UA_Server *server, UA_Variant *value,
     if(!value->type)
         return;
 
-    const UA_DataType *targetDataType = UA_findDataType(targetDataTypeId);
-    if(!targetDataType)
-        return;
-
     /* Unwrap ExtensionObject arrays if they all contain the same DataType */
     unwrapEOArray(server, value);
+
+    const UA_DataType *targetDataType = UA_findDataTypeWithCustom(targetDataTypeId, server->config.customDataTypes);
+    if(!targetDataType) {
+        /* Type might not have been found, if it's a non-NS0 type or an abstract type. */
+        return;
+    }
 
     /* A string is written to a byte array. the valuerank and array dimensions
      * are checked later */
@@ -1241,9 +1250,9 @@ writeArrayDimensionsAttribute(UA_Server *server, UA_Session *session,
 
 /* Stack layout: ... | node | type */
 static UA_StatusCode
-writeValueRankAttribute(UA_Server *server, UA_Session *session,
-                        UA_VariableNode *node, const UA_VariableTypeNode *type,
-                        UA_Int32 valueRank) {
+writeValueRank(UA_Server *server, UA_Session *session,
+               UA_VariableNode *node, const UA_VariableTypeNode *type,
+               UA_Int32 valueRank) {
     UA_assert(node != NULL);
     UA_assert(type != NULL);
 
@@ -1525,7 +1534,7 @@ writeNodeValueAttribute(UA_Server *server, UA_Session *session,
 }
 
 static UA_StatusCode
-writeIsAbstractAttribute(UA_Node *node, UA_Boolean value) {
+writeIsAbstract(UA_Node *node, UA_Boolean value) {
     switch(node->head.nodeClass) {
     case UA_NODECLASS_OBJECTTYPE:
         node->objectTypeNode.isAbstract = value;
@@ -1604,7 +1613,8 @@ updateLocalizedText(const UA_LocalizedText *source, UA_LocalizedText *target) {
 static void
 triggerImmediateDataChange(UA_Server *server, UA_Session *session,
                            UA_Node *node, const UA_WriteValue *wvalue) {
-    for(UA_MonitoredItem *mon = node->head.monitoredItems; mon != NULL; mon = mon->next) {
+    UA_MonitoredItem *mon = node->head.monitoredItems;
+    for(; mon != NULL; mon = mon->sampling.nodeListNext) {
         if(mon->itemToMonitor.attributeId != wvalue->attributeId)
             continue;
         UA_DataValue value;
@@ -1635,8 +1645,8 @@ copyAttributeIntoNode(UA_Server *server, UA_Session *session,
     UA_UInt32 userWriteMask = getUserWriteMask(server, session, &node->head);
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
 
-    UA_LOG_NODEID_DEBUG(&node->head.nodeId,
-                        UA_LOG_DEBUG_SESSION(&server->config.logger, session,
+    UA_LOG_NODEID_TRACE(&node->head.nodeId,
+                        UA_LOG_TRACE_SESSION(&server->config.logger, session,
                                              "Write attribute %"PRIi32 " of Node %.*s",
                                              wvalue->attributeId, (int)nodeIdStr.length,
                                              nodeIdStr.data));
@@ -1673,7 +1683,7 @@ copyAttributeIntoNode(UA_Server *server, UA_Session *session,
     case UA_ATTRIBUTEID_ISABSTRACT:
         CHECK_USERWRITEMASK(UA_WRITEMASK_ISABSTRACT);
         CHECK_DATATYPE_SCALAR(BOOLEAN);
-        retval = writeIsAbstractAttribute(node, *(const UA_Boolean*)value);
+        retval = writeIsAbstract(node, *(const UA_Boolean*)value);
         break;
     case UA_ATTRIBUTEID_SYMMETRIC:
         CHECK_NODECLASS_WRITE(UA_NODECLASS_REFERENCETYPE);
@@ -1739,8 +1749,8 @@ copyAttributeIntoNode(UA_Server *server, UA_Session *session,
         CHECK_USERWRITEMASK(UA_WRITEMASK_VALUERANK);
         CHECK_DATATYPE_SCALAR(INT32);
         GET_NODETYPE;
-        retval = writeValueRankAttribute(server, session, &node->variableNode,
-                                         type, *(const UA_Int32*)value);
+        retval = writeValueRank(server, session, &node->variableNode,
+                                type, *(const UA_Int32*)value);
         UA_NODESTORE_RELEASE(server, (const UA_Node*)type);
         break;
     case UA_ATTRIBUTEID_ARRAYDIMENSIONS:
@@ -1798,7 +1808,7 @@ copyAttributeIntoNode(UA_Server *server, UA_Session *session,
     return UA_STATUSCODE_GOOD;
 }
 
-static void
+void
 Operation_Write(UA_Server *server, UA_Session *session, void *context,
                 const UA_WriteValue *wv, UA_StatusCode *result) {
     UA_assert(session != NULL);
@@ -2095,8 +2105,7 @@ writeObjectProperty(UA_Server *server, const UA_NodeId objectId,
         return retval;
     }
 
-    retval = writeValueAttribute(server, &server->adminSession,
-                                 &bpr.targets[0].targetId.nodeId, &value);
+    retval = writeValueAttribute(server, bpr.targets[0].targetId.nodeId, &value);
 
     UA_BrowsePathResult_clear(&bpr);
     return retval;

@@ -101,12 +101,23 @@ typedef TAILQ_HEAD(NotificationMessageQueue, UA_NotificationMessageEntry)
 /* MonitoredItem */
 /*****************/
 
+/* The type of sampling for MonitoredItems depends on the sampling interval.
+ *
+ * >0: Cyclic callback
+ * =0: Attached to the node. Sampling is triggered after every "write".
+ * <0: Attached to the subscription. Triggered just before every "publish". */
+typedef enum {
+    UA_MONITOREDITEMSAMPLINGTYPE_NONE = 0,
+    UA_MONITOREDITEMSAMPLINGTYPE_CYCLIC, /* Cyclic callback */
+    UA_MONITOREDITEMSAMPLINGTYPE_EVENT,  /* Attached to the node. Can be a "write
+                                          * event" for DataChange MonitoredItems
+                                          * with a zero sampling interval .*/
+    UA_MONITOREDITEMSAMPLINGTYPE_PUBLISH /* Attached to the subscription */
+} UA_MonitoredItemSamplingType;
+
 struct UA_MonitoredItem {
     UA_DelayedCallback delayedFreePointers;
     LIST_ENTRY(UA_MonitoredItem) listEntry; /* Linked list in the Subscription */
-    UA_MonitoredItem *next; /* Linked list of MonitoredItems directly attached
-                             * to a Node. Initialized to ~0 to indicate that the
-                             * MonitoredItem is not added to a node. */
     UA_Subscription *subscription; /* If NULL, then this is a Local MonitoredItem */
     UA_UInt32 monitoredItemId;
 
@@ -114,8 +125,7 @@ struct UA_MonitoredItem {
     UA_ReadValueId itemToMonitor;
     UA_MonitoringMode monitoringMode;
     UA_TimestampsToReturn timestampsToReturn;
-    UA_Boolean sampleCallbackIsRegistered;
-    UA_Boolean registered; /* Registered in the server / Subscription */
+    UA_Boolean registered;       /* Registered in the server / Subscription */
     UA_DateTime triggeredUntil;  /* If the MonitoringMode is SAMPLING,
                                   * triggering the MonitoredItem puts the latest
                                   * Notification into the publishing queue (of
@@ -138,8 +148,14 @@ struct UA_MonitoredItem {
      * changed at runtime of the MonitoredItem */
     UA_MonitoringParameters parameters;
 
-    /* Sampling Callback */
-    UA_UInt64 sampleCallbackId;
+    /* Sampling */
+    UA_MonitoredItemSamplingType samplingType;
+    union {
+        UA_UInt64 callbackId;
+        UA_MonitoredItem *nodeListNext; /* Event-Based: Attached to Node */
+        LIST_ENTRY(UA_MonitoredItem) samplingListEntry; /* Publish-interval: Linked in
+                                                         * Subscription */
+    } sampling;
     UA_DataValue lastValue;
 
     /* Triggering Links */
@@ -200,23 +216,6 @@ UA_MonitoredItem_createDataChangeNotification(UA_Server *server,
                                               UA_MonitoredItem *mon,
                                               const UA_DataValue *value);
 
-UA_StatusCode
-UA_Event_addEventToMonitoredItem(UA_Server *server, const UA_NodeId *event,
-                                 UA_MonitoredItem *mon);
-
-UA_StatusCode
-UA_Event_generateEventId(UA_ByteString *generatedId);
-
-void
-UA_Event_staticSelectClauseValidation(UA_Server *server,
-                                      const UA_EventFilter *eventFilter,
-                                      UA_StatusCode *result);
-
-UA_StatusCode
-UA_Event_staticWhereClauseValidation(UA_Server *server,
-                                     const UA_ContentFilter *filter,
-                                     UA_ContentFilterResult *);
-
 /* Remove entries until mon->maxQueueSize is reached. Sets infobits for lost
  * data if required. */
 void
@@ -269,10 +268,18 @@ struct UA_Subscription {
     /* Publish Callback. Registered if id > 0. */
     UA_UInt64 publishCallbackId;
 
+    /* Delayed callback to schedule publication of more notifications */
+    UA_Boolean delayedCallbackRegistered;
+    UA_DelayedCallback delayedMoreNotifications;
+
     /* MonitoredItems */
     UA_UInt32 lastMonitoredItemId; /* increase the identifiers */
     LIST_HEAD(, UA_MonitoredItem) monitoredItems;
     UA_UInt32 monitoredItemsSize;
+
+    /* MonitoredItems that are sampled in every publish callback (with the
+     * publish interval of the subscription) */
+    LIST_HEAD(, UA_MonitoredItem) samplingMonitoredItems;
 
     /* Global list of notifications from the MonitoredItems */
     TAILQ_HEAD(, UA_Notification) notificationQueue;
@@ -337,18 +344,42 @@ UA_Session_reachedPublishReqLimit(UA_Server *server, UA_Session *session);
 struct UA_ConditionSource;
 typedef struct UA_ConditionSource UA_ConditionSource;
 
+/* Event Handling */
+#ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
+
+#define UA_EVENTFILTER_MAXELEMENTS 64 /* Max operator elements */
+#define UA_EVENTFILTER_MAXOPERANDS 64 /* Max operands per operator */
+#define UA_EVENTFILTER_MAXSELECT   64 /* Max select clauses */
+
+UA_StatusCode
+UA_MonitoredItem_addEvent(UA_Server *server, UA_MonitoredItem *mon,
+                          const UA_NodeId *event);
+
+UA_StatusCode
+generateEventId(UA_ByteString *generatedId);
+
+/* Static validation when the filter is registered */
+UA_StatusCode
+UA_SimpleAttributeOperandValidation(UA_Server *server,
+                                    UA_SimpleAttributeOperand *sao);
+
+/* Static validation when the filter is registered */
+UA_StatusCode
+UA_ContentFilterValidation(UA_Server *server,
+                           const UA_ContentFilter *filter,
+                           UA_ContentFilterResult *result);
+
+/* Evaluate content filter, exported only for unit testing */
+UA_StatusCode
+evaluateWhereClause(UA_Server *server, UA_Session *session, const UA_NodeId *eventNode,
+                    const UA_ContentFilter *contentFilter,
+                    UA_ContentFilterResult *contentFilterResult);
+
+#endif
+
 /***********/
 /* Helpers */
 /***********/
-
-/* Evaluate content filter, Only for unit testing */
-#ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
-UA_StatusCode
-UA_Server_evaluateWhereClauseContentFilter(UA_Server *server, UA_Session *session,
-                                           const UA_NodeId *eventNode,
-                                           const UA_ContentFilter *contentFilter,
-                                           UA_ContentFilterResult *contentFilterResult);
-#endif
 
 /* Setting an integer value within bounds */
 #define UA_BOUNDEDVALUE_SETWBOUNDS(BOUNDS, SRC, DST) { \

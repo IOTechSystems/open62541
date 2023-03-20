@@ -4,6 +4,7 @@
 #include <open62541/plugin/log_stdout.h>
 
 #include "ua_pubsub.h"
+#include "ua_server_internal.h"
 #include <check.h>
 #include <assert.h>
 
@@ -15,10 +16,10 @@ static void setup(void) {
     UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "setup");
 
     server = UA_Server_new();
-    assert(server != 0);
+    ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDPMP());
+    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDP());
     UA_Server_run_startup(server);
 }
 
@@ -57,7 +58,9 @@ static void AddConnection(
     connectionConfig.publisherId.uint32 = PublisherId;
 
     ck_assert(UA_Server_addPubSubConnection(server, &connectionConfig, opConnectionId) == UA_STATUSCODE_GOOD);
+    UA_LOCK(&server->serviceMutex);
     ck_assert(UA_PubSubConnection_regist(server, opConnectionId, NULL) == UA_STATUSCODE_GOOD);
+    UA_UNLOCK(&server->serviceMutex);
 }
 
 /***************************************************************************************************/

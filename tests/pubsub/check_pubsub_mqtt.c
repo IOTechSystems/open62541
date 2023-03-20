@@ -34,6 +34,7 @@ UA_DataSetReaderConfig readerConfig;
 
 static void setup(void) {
     server = UA_Server_new();
+    ck_assert(server != NULL);
     config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
     UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerMQTT());
@@ -67,8 +68,8 @@ static void setup(void) {
     UA_String mqttClientId = UA_STRING(MQTT_CLIENT_ID);
     UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttClientId, &UA_TYPES[UA_TYPES_STRING]);
 
-    connectionConfig.connectionProperties = connectionOptions;
-    connectionConfig.connectionPropertiesSize = connectionOptionIndex;
+    connectionConfig.connectionProperties.map = connectionOptions;
+    connectionConfig.connectionProperties.mapSize = connectionOptionIndex;
 
     UA_Server_addPubSubConnection(server, &connectionConfig, &connectionIdent);
 }

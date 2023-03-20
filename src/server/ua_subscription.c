@@ -43,12 +43,23 @@ UA_Subscription_new(void) {
     return newSub;
 }
 
+static void
+delayedFreeSubscription(void *app, void *context) {
+    UA_free(context);
+}
+
 void
 UA_Subscription_delete(UA_Server *server, UA_Subscription *sub) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
-    /* Unregister the publish callback */
+    UA_EventLoop *el = server->config.eventLoop;
+
+    /* Unregister the publish callback and possible delayed callback */
     Subscription_unregisterPublishCallback(server, sub);
+    if(sub->delayedCallbackRegistered) {
+        el->removeDelayedCallback(el, &sub->delayedMoreNotifications);
+        sub->delayedCallbackRegistered = false;
+    }
 
     /* Remove the diagnostics object for the subscription */
 #ifdef UA_ENABLE_DIAGNOSTICS
@@ -111,14 +122,13 @@ UA_Subscription_delete(UA_Server *server, UA_Subscription *sub) {
     }
     UA_assert(sub->retransmissionQueueSize == 0);
 
-    /* Add a delayed callback to remove the Subscription when the current jobs
-     * have completed. Pointers to the subscription may still exist upwards in
-     * the call stack. */
-    sub->delayedFreePointers.callback = NULL;
-    sub->delayedFreePointers.application = server;
-    sub->delayedFreePointers.context = NULL;
-    server->config.eventLoop->
-        addDelayedCallback(server->config.eventLoop, &sub->delayedFreePointers);
+    /* Pointers to the subscription may still exist upwards in the call stack.
+     * Add a delayed callback to remove the Subscription when the current jobs
+     * have completed. */
+    sub->delayedFreePointers.callback = delayedFreeSubscription;
+    sub->delayedFreePointers.application = NULL;
+    sub->delayedFreePointers.context = sub;
+    el->addDelayedCallback(el, &sub->delayedFreePointers);
 }
 
 UA_MonitoredItem *
@@ -363,13 +373,6 @@ UA_Subscription_nextSequenceNumber(UA_UInt32 sequenceNumber) {
 }
 
 static void
-publishCallback(UA_Server *server, UA_Subscription *sub) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Subscription_publish(server, sub);
-    UA_UNLOCK(&server->serviceMutex);
-}
-
-static void
 sendStatusChangeDelete(UA_Server *server, UA_Subscription *sub,
                        UA_PublishResponseEntry *pre) {
     /* Cannot send out the StatusChange because no response is queued.
@@ -430,12 +433,11 @@ UA_Subscription_isLate(UA_Subscription *sub) {
 #endif
 }
 
-void
-UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Publish Callback");
-    UA_assert(sub);
+static void
+delayedPublishNotifications(UA_Server *server, UA_Subscription *sub);
 
+static void
+publishNotifications(UA_Server *server, UA_Subscription *sub) {
     /* Dequeue a response */
     UA_PublishResponseEntry *pre = NULL;
     if(sub->session)
@@ -537,13 +539,10 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
 
     /* <-- The point of no return --> */
 
-    /* Notifications remaining? */
-    UA_Boolean moreNotifications = (sub->notificationQueueSize > 0);
-
     /* Set up the response */
     response->responseHeader.timestamp = UA_DateTime_now();
     response->subscriptionId = sub->subscriptionId;
-    response->moreNotifications = moreNotifications;
+    response->moreNotifications = (sub->notificationQueueSize > 0);
     message->publishTime = response->responseHeader.timestamp;
 
     /* Set sequence number to message. Started at 1 which is given during
@@ -612,9 +611,45 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     sub->notificationsCount += (sentDCN + sentEN);
 #endif
 
-    /* Repeat sending responses if there are more notifications to send */
-    if(moreNotifications)
-        UA_Subscription_publish(server, sub);
+    /* Repeat sending notifications if there are more notifications to send. But
+     * only call monitoredItem_sampleCallback in the regular publish
+     * callback. */
+    UA_Boolean done = (sub->notificationQueueSize == 0);
+    if(!done && !sub->delayedCallbackRegistered) {
+        sub->delayedCallbackRegistered = true;
+
+        sub->delayedMoreNotifications.callback = (UA_Callback)delayedPublishNotifications;
+        sub->delayedMoreNotifications.application = server;
+        sub->delayedMoreNotifications.context = sub;
+
+        UA_EventLoop *el = server->config.eventLoop;
+        el->addDelayedCallback(el, &sub->delayedMoreNotifications);
+    }
+}
+
+static void
+delayedPublishNotifications(UA_Server *server, UA_Subscription *sub) {
+    UA_LOCK(&server->serviceMutex);
+    sub->delayedCallbackRegistered = false;
+    publishNotifications(server, sub);
+    UA_UNLOCK(&server->serviceMutex);
+}
+
+void
+UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Publish Callback");
+    UA_assert(sub);
+
+    /* Sample the MonitoredItems with sampling interval <0 (which implies
+     * sampling in the same interval as the subscription) */
+    UA_MonitoredItem *mon;
+    LIST_FOREACH(mon, &sub->samplingMonitoredItems, sampling.samplingListEntry) {
+        monitoredItem_sampleCallback(server, mon);
+    }
+
+    /* Publish waiting notifications */
+    publishNotifications(server, sub);
 }
 
 UA_Boolean
@@ -659,6 +694,13 @@ UA_Session_reachedPublishReqLimit(UA_Server *server, UA_Session *session) {
     return true;
 }
 
+static void
+repeatedPublishCallback(UA_Server *server, UA_Subscription *sub) {
+    UA_LOCK(&server->serviceMutex);
+    UA_Subscription_publish(server, sub);
+    UA_UNLOCK(&server->serviceMutex);
+}
+
 UA_StatusCode
 Subscription_registerPublishCallback(UA_Server *server, UA_Subscription *sub) {
     UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
@@ -669,7 +711,7 @@ Subscription_registerPublishCallback(UA_Server *server, UA_Subscription *sub) {
         return UA_STATUSCODE_GOOD;
 
     UA_StatusCode retval =
-        addRepeatedCallback(server, (UA_ServerCallback)publishCallback,
+        addRepeatedCallback(server, (UA_ServerCallback)repeatedPublishCallback,
                             sub, sub->publishingInterval, &sub->publishCallbackId);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;

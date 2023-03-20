@@ -22,9 +22,10 @@ UA_NodeId connection1, connection2, writerGroup1, writerGroup2, writerGroup3,
 
 static void setup(void) {
     server = UA_Server_new();
+    ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDPMP());
+    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDP());
 
     UA_Server_run_startup(server);
     //add 2 connections
@@ -329,27 +330,50 @@ START_TEST(AddRemoveAddDataSetFieldWithValidConfiguration){
         UA_DataSetFieldConfig fieldConfig;
         memset(&fieldConfig, 0, sizeof(UA_DataSetFieldConfig));
         fieldConfig.dataSetFieldType = UA_PUBSUB_DATASETFIELD_VARIABLE;
-        fieldConfig.field.variable.fieldNameAlias = UA_STRING("field 1");
         fieldConfig.field.variable.publishParameters.publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
         fieldConfig.field.variable.publishParameters.attributeId = UA_ATTRIBUTEID_VALUE;
         UA_NodeId localDataSetField;
         UA_PublishedDataSet *pds1 = UA_PublishedDataSet_findPDSbyId(server, publishedDataSet1);
         ck_assert_ptr_ne(pds1, NULL);
         ck_assert_uint_eq(pds1->fieldSize, 0);
+
+        // Add "field 1"
+        fieldConfig.field.variable.fieldNameAlias = UA_STRING("field 1");
         retVal = UA_Server_addDataSetField(server, publishedDataSet1, &fieldConfig, &localDataSetField).result;
         ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
         ck_assert_uint_eq(pds1->fieldSize, 1);
-        retVal = UA_Server_removeDataSetField(server, localDataSetField).result;
-        ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
-        ck_assert_uint_eq(pds1->fieldSize, 0);
-        retVal = UA_Server_addDataSetField(server, publishedDataSet1, &fieldConfig, &localDataSetField).result;
-        ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
-        ck_assert_uint_eq(pds1->fieldSize, 1);
+
+        // Add "field 2"
+        fieldConfig.field.variable.fieldNameAlias = UA_STRING("field 2");
         retVal = UA_Server_addDataSetField(server, publishedDataSet1, &fieldConfig, &localDataSetField).result;
         ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
         ck_assert_uint_eq(pds1->fieldSize, 2);
+
+        // Remove "field 2"
+        retVal = UA_Server_removeDataSetField(server, localDataSetField).result;
+        ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
+        ck_assert_uint_eq(pds1->fieldSize, 1);
+        // Check that the correct field was removed - "field 1" should still be there
+        UA_String compareString = UA_STRING("field 1");
+        ck_assert(UA_String_equal(&pds1->fields.tqh_first->fieldMetaData.name, &compareString));
+
+        // Add "field 2" again
+        fieldConfig.field.variable.fieldNameAlias = UA_STRING("field 2");
+        retVal = UA_Server_addDataSetField(server, publishedDataSet1, &fieldConfig, &localDataSetField).result;
+        ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
+        ck_assert_uint_eq(pds1->fieldSize, 2);
+
+        // Add "field 3"
+        fieldConfig.field.variable.fieldNameAlias = UA_STRING("field 3");
+        retVal = UA_Server_addDataSetField(server, publishedDataSet1, &fieldConfig, &localDataSetField).result;
+        ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
+        ck_assert_uint_eq(pds1->fieldSize, 3);
+
         UA_PublishedDataSet *pds2 = UA_PublishedDataSet_findPDSbyId(server, publishedDataSet2);
         ck_assert_ptr_ne(pds2, NULL);
+
+        // Add "field 1"
+        fieldConfig.field.variable.fieldNameAlias = UA_STRING("field 1");
         retVal = UA_Server_addDataSetField(server, publishedDataSet2, &fieldConfig, &localDataSetField).result;
         ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
         ck_assert_uint_eq(pds2->fieldSize, 1);
@@ -402,7 +426,7 @@ START_TEST(GetDataSetFieldConfigurationAndCompareValues){
     } END_TEST
 
 
-START_TEST(SinglePublishDataSetField){
+START_TEST(SinglePublishDataSetFieldAndPublishTimestampTest){
         UA_WriterGroupConfig writerGroupConfig;
         memset(&writerGroupConfig, 0, sizeof(writerGroupConfig));
         writerGroupConfig.name = UA_STRING("WriterGroup 1");
@@ -440,8 +464,12 @@ START_TEST(SinglePublishDataSetField){
         dataSetFieldConfig.field.variable.publishParameters.attributeId = UA_ATTRIBUTEID_VALUE;
         UA_Server_addDataSetField(server, publishedDataSet1, &dataSetFieldConfig, NULL);
 
+        UA_DateTime currentTime = UA_DateTime_now();
         UA_WriterGroup *wg = UA_WriterGroup_findWGbyId(server, writerGroup1);
         UA_WriterGroup_publishCallback(server, wg);
+        UA_DateTime publishTime;
+        UA_WriterGroup_lastPublishTimestamp(server, writerGroup1, &publishTime);
+        ck_assert((publishTime - currentTime) < UA_DATETIME_MSEC * 100);
     } END_TEST
 
 START_TEST(PublishDataSetFieldAsDeltaFrame){
@@ -497,7 +525,7 @@ int main(void) {
 
     TCase *tc_pubsub_publish = tcase_create("PubSub publish DataSetFields");
     tcase_add_checked_fixture(tc_pubsub_publish, setup, teardown);
-    tcase_add_test(tc_pubsub_publish, SinglePublishDataSetField);
+    tcase_add_test(tc_pubsub_publish, SinglePublishDataSetFieldAndPublishTimestampTest);
     tcase_add_test(tc_pubsub_publish, PublishDataSetFieldAsDeltaFrame);
 
     Suite *s = suite_create("PubSub WriterGroups/Writer/Fields handling and publishing");

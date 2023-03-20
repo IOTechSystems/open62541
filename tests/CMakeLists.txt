@@ -1,3 +1,4 @@
+add_compile_options(-Wno-unused-variable -Wno-unused-function)
 # Load CMake Packages
 find_package(Check REQUIRED)
 set(LIBS ${CHECK_LIBRARIES} ${open62541_LIBRARIES})
@@ -58,6 +59,7 @@ endif()
 
 # Use different plugins for testing
 set(test_plugin_sources
+    ${PROJECT_SOURCE_DIR}/arch/eventloop_common.c
     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix.c
     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix_select.c
     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix_epoll.c
@@ -75,6 +77,10 @@ set(test_plugin_sources
     ${PROJECT_SOURCE_DIR}/tests/testing-plugins/testing_policy.c
     ${PROJECT_SOURCE_DIR}/tests/testing-plugins/testing_networklayers.c
     )
+
+if(LINUX)
+  list(APPEND test_plugin_sources ${PROJECT_SOURCE_DIR}/arch/eventloop_posix_eth.c)
+endif()
 
 if(UA_ENABLE_HISTORIZING)
     set(test_plugin_sources ${test_plugin_sources}
@@ -118,7 +124,9 @@ endif()
 
 if(UA_ENABLE_PUBSUB)
   list(APPEND test_plugin_sources
-              ${PROJECT_SOURCE_DIR}/plugins/ua_pubsub_udp.c)
+       ${PROJECT_SOURCE_DIR}/plugins/ua_pubsub_udp_multicast.c)
+  list(APPEND test_plugin_sources
+       ${PROJECT_SOURCE_DIR}/plugins/ua_pubsub_udp.c)
     if(UA_ENABLE_PUBSUB_ETH_UADP)
         list(APPEND test_plugin_sources ${PROJECT_SOURCE_DIR}/plugins/include/open62541/plugin/pubsub_ethernet.h)
         list(APPEND test_plugin_sources ${PROJECT_SOURCE_DIR}/plugins/ua_pubsub_ethernet.c)
@@ -137,6 +145,10 @@ if(UA_ENABLE_PUBSUB)
            ${PROJECT_SOURCE_DIR}/plugins/ua_pubsub_mqtt.c
            ${PROJECT_SOURCE_DIR}/plugins/mqtt/ua_mqtt-c_adapter.c)
     endif()
+endif()
+
+if(UA_ENABLE_NODESETLOADER)
+    list(APPEND test_plugin_sources ${PROJECT_SOURCE_DIR}/plugins/ua_nodesetloader.c)
 endif()
 
 if(UA_NAMESPACE_ZERO STREQUAL "FULL")
@@ -209,6 +221,7 @@ function(ua_add_test test_path_relative)
 endfunction()
 
 ua_add_test(check_types_builtin.c)
+ua_add_test(check_ziptree.c)
 
 if(UA_ENABLE_JSON_ENCODING)
     ua_add_test(check_cj5.c)
@@ -218,6 +231,10 @@ if(UA_ENABLE_JSON_ENCODING)
         ua_add_test(pubsub/check_pubsub_encoding_json.c)
         ua_add_test(pubsub/check_pubsub_publish_json.c)
     endif()
+endif()
+
+if(UA_ENABLE_XML_ENCODING)
+    ua_add_test(check_types_builtin_xml.c)
 endif()
 
 ua_add_test(check_types_memory.c)
@@ -230,12 +247,17 @@ endif()
 ua_add_test(check_types_custom.c)
 ua_add_test(check_chunking.c)
 ua_add_test(check_utils.c)
+ua_add_test(check_kvm_utils.c)
 ua_add_test(check_securechannel.c)
 ua_add_test(check_timer.c)
 ua_add_test(check_eventloop.c)
 ua_add_test(check_eventloop_tcp.c)
 ua_add_test(check_eventloop_udp.c)
 ua_add_test(check_eventloop_interrupt.c)
+if(LINUX AND NOT UA_ENABLE_UNIT_TESTS_MEMCHECK)
+    # Requires raw socket capability, currently not possible with valgrind
+    ua_add_test(check_eventloop_eth.c)
+endif()
 
 # Test Server
 
@@ -264,8 +286,10 @@ endif()
 if(UA_ENABLE_SUBSCRIPTIONS)
   ua_add_test(server/check_services_subscriptions.c)
   ua_add_test(server/check_monitoreditem_filter.c)
+if(UA_ENABLE_SUBSCRIPTIONS_EVENTS)
   ua_add_test(server/check_subscription_events.c)
   ua_add_test(server/check_subscription_event_filter.c)
+endif()
 endif()
 
 ua_add_test(server/check_nodestore.c)
@@ -296,6 +320,7 @@ if(UA_ENABLE_PUBSUB)
     ua_add_test(pubsub/check_pubsub_publish.c)
     ua_add_test(pubsub/check_pubsub_publish_uadp.c)
     ua_add_test(pubsub/check_pubsub_get_state.c)
+    ua_add_test(pubsub/check_pubsub_udp_unicast.c)
     ua_add_test(pubsub/check_pubsub_publisherid.c)
 
     #Link libraries for executing subscriber unit test
@@ -314,6 +339,13 @@ if(UA_ENABLE_PUBSUB)
         ua_add_test(pubsub/check_pubsub_decryption.c)
         ua_add_test(pubsub/check_pubsub_subscribe_encrypted.c)
         ua_add_test(pubsub/check_pubsub_encrypted_rt_levels.c)
+        if(UA_ENABLE_PUBSUB_SKS)
+            ua_add_test(pubsub/check_pubsub_sks_keystorage.c)
+            ua_add_test(pubsub/check_pubsub_sks_push.c)
+            ua_add_test(pubsub/check_pubsub_sks_pull.c)
+            ua_add_test(pubsub/check_pubsub_sks_securitygroups.c)
+            ua_add_test(pubsub/check_pubsub_sks_client.c)
+        endif()
     endif()
 
     if (UA_ENABLE_PUBSUB_MONITORING)
@@ -365,6 +397,8 @@ if(UA_ENABLE_ASYNCOPERATIONS)
     ua_add_test(server/check_server_asyncop.c)
 endif()
 
+ua_add_test(server/check_server_reverseconnect.c)
+
 # Test Client
 
 ua_add_test(client/check_client.c)
@@ -382,12 +416,18 @@ if(UA_ENABLE_HISTORIZING)
     ua_add_test(client/check_client_historical_data.c)
 endif()
 
-# Test Encryption
+# Test Encryption and Authentication
 
 if(UA_ENABLE_ENCRYPTION)
     add_executable(check_client_encryption client/check_client_encryption.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
     target_link_libraries(check_client_encryption ${LIBS})
     add_test_valgrind(client_encryption ${TESTS_BINARY_DIR}/check_client_encryption)
+
+    if(UA_ENABLE_ENCRYPTION_OPENSSL OR UA_ENABLE_ENCRYPTION_MBEDTLS)
+        ua_add_test(client/check_client_authentication.c)
+    else()
+        MESSAGE(WARNING "Certificate authentication with LibreSSL as crypto backend is not supported.")
+    endif()
 endif()
 
 if(UA_ENABLE_ENCRYPTION_MBEDTLS)
@@ -395,6 +435,10 @@ if(UA_ENABLE_ENCRYPTION_MBEDTLS)
     ua_add_test(encryption/check_encryption_basic256.c)
     ua_add_test(encryption/check_encryption_basic256sha256.c)
     ua_add_test(encryption/check_encryption_aes128sha256rsaoaep.c)
+endif()
+
+if(UA_ENABLE_ENCRYPTION_MBEDTLS AND UA_ENABLE_CERT_REJECTED_DIR)
+    ua_add_test(encryption/check_save_rejected_cert.c)
 endif()
 
 if(UA_ENABLE_ENCRYPTION_OPENSSL OR UA_ENABLE_ENCRYPTION_LIBRESSL)
@@ -407,6 +451,11 @@ endif()
 
 # Tests for Nodeset Compiler
 add_subdirectory(nodeset-compiler)
+
+# Tests for Nodeset Loader
+if(UA_ENABLE_NODESETLOADER)
+    add_subdirectory(nodeset-loader)
+endif()
 
 # Tests for interfaces
 if(UA_NAMESPACE_ZERO STREQUAL "FULL")
