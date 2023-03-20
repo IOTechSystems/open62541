@@ -14,7 +14,7 @@ parser.add_argument('outfile', help='outfile w/o extension')
 args = parser.parse_args()
 
 rows = []
-with open(args.statuscodes, mode="rt", encoding="utf-8") as f:
+with open(args.statuscodes, mode="rt", encoding='utf8') as f:
     lines = f.readlines()
     for l in lines:
         rows.append(tuple(l.strip().split(',')))
@@ -98,7 +98,7 @@ printc(u'''    {0xffffffff, "Unknown StatusCode"}
 
 const char * UA_StatusCode_name(UA_StatusCode code) {
     for (size_t i = 0; i < statusCodeDescriptionsSize; ++i) {
-        if (statusCodeDescriptions[i].code == code)
+        if (UA_StatusCode_isEqualTop(statusCodeDescriptions[i].code,code))
             return statusCodeDescriptions[i].name;
     }
     return statusCodeDescriptions[statusCodeDescriptionsSize-1].name;

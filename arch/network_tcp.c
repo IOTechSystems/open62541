@@ -555,7 +555,7 @@ ServerNetworkLayerTCP_listen(UA_ServerNetworkLayer *nl, UA_Server *server,
             UA_close(e->connection.sockfd);
             UA_Server_removeConnection(server, &e->connection);
             if(nl->statistics) {
-                nl->statistics->connectionTimeoutCount--;
+                nl->statistics->connectionTimeoutCount++;
                 nl->statistics->currentConnectionCount--;
             }
             continue;
@@ -711,6 +711,10 @@ UA_ClientConnectionTCP_poll(UA_Connection *connection, UA_UInt32 timeout,
 
     /* Connection timeout? */
     TCPClientConnection *tcpConnection = (TCPClientConnection*) connection->handle;
+    if(tcpConnection == NULL) {
+        connection->state = UA_CONNECTIONSTATE_CLOSED;
+        return UA_STATUSCODE_BADDISCONNECT;  // some thing is wrong
+    }
     if((UA_Double) (UA_DateTime_nowMonotonic() - tcpConnection->connStart)
        > (UA_Double) tcpConnection->timeout * UA_DATETIME_MSEC ) {
         UA_LOG_WARNING(logger, UA_LOGCATEGORY_NETWORK, "Timed out");

@@ -125,7 +125,7 @@ getNamespaceByIndex(UA_Server *server, const size_t namespaceIndex,
     /* ensure that the uri for ns1 is set up from the app description */
     setupNs1Uri(server);
     UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
-    if(namespaceIndex > server->namespacesSize)
+    if(namespaceIndex >= server->namespacesSize)
         return res;
     res = UA_String_copy(&server->namespaces[namespaceIndex], foundUri);
     return res;
@@ -325,6 +325,11 @@ UA_Server_init(UA_Server *server) {
 
 #if UA_MULTITHREADING >= 100
     UA_AsyncManager_init(&server->asyncManager, server);
+#endif
+
+    /* Initialized discovery */
+#ifdef UA_ENABLE_DISCOVERY
+    UA_DiscoveryManager_init(&server->discoveryManager, server);
 #endif
 
     /* Add a regular callback for cleanup and maintenance. With a 10s interval. */
@@ -606,11 +611,6 @@ UA_Server_run_startup(UA_Server *server) {
         UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
                        "There has to be at least one endpoint.");
     }
-
-    /* Initialized discovery */
-#ifdef UA_ENABLE_DISCOVERY
-    UA_DiscoveryManager_init(&server->discoveryManager, server);
-#endif
 
     /* Does the ApplicationURI match the local certificates? */
 #ifdef UA_ENABLE_ENCRYPTION

@@ -76,11 +76,11 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
         switch(nodeContext->elementClassiefier) {
         case UA_NS0ID_PUBSUBCONNECTIONTYPE_PUBLISHERID:
             if(pubSubConnection->config->publisherIdType == UA_PUBSUB_PUBLISHERID_STRING) {
-                UA_Variant_setScalar(&value, &pubSubConnection->config->publisherId.numeric,
-                                     &UA_TYPES[UA_TYPES_STRING]);
+                UA_Variant_setScalarCopy(&value, &pubSubConnection->config->publisherId.numeric,
+                                         &UA_TYPES[UA_TYPES_STRING]);
             } else {
-                UA_Variant_setScalar(&value, &pubSubConnection->config->publisherId.numeric,
-                                     &UA_TYPES[UA_TYPES_UINT32]);
+                UA_Variant_setScalarCopy(&value, &pubSubConnection->config->publisherId.numeric,
+                                         &UA_TYPES[UA_TYPES_UINT32]);
             }
             break;
         default:
@@ -96,8 +96,8 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
 
         switch(nodeContext->elementClassiefier) {
         case UA_NS0ID_DATASETREADERTYPE_PUBLISHERID:
-            UA_Variant_setScalar(&value, dataSetReader->config.publisherId.data,
-                                 dataSetReader->config.publisherId.type);
+            UA_Variant_setScalarCopy(&value, dataSetReader->config.publisherId.data,
+                                     dataSetReader->config.publisherId.type);
             break;
         default:
             UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
@@ -111,8 +111,8 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
             return;
         switch(nodeContext->elementClassiefier){
         case UA_NS0ID_WRITERGROUPTYPE_PUBLISHINGINTERVAL:
-            UA_Variant_setScalar(&value, &writerGroup->config.publishingInterval,
-                                 &UA_TYPES[UA_TYPES_DURATION]);
+            UA_Variant_setScalarCopy(&value, &writerGroup->config.publishingInterval,
+                                     &UA_TYPES[UA_TYPES_DURATION]);
             break;
         default:
             UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
@@ -127,8 +127,8 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
 
         switch(nodeContext->elementClassiefier) {
             case UA_NS0ID_DATASETWRITERTYPE_DATASETWRITERID:
-                UA_Variant_setScalar(&value, &dataSetWriter->config.dataSetWriterId,
-                                     &UA_TYPES[UA_TYPES_UINT16]);
+                UA_Variant_setScalarCopy(&value, &dataSetWriter->config.dataSetWriterId,
+                                         &UA_TYPES[UA_TYPES_UINT16]);
                 break;
             default:
                 UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
@@ -148,8 +148,7 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
             UA_DataSetField *field;
             TAILQ_FOREACH(field, &publishedDataSet->fields, listEntry) {
                 pvd[counter].attributeId = UA_ATTRIBUTEID_VALUE;
-                pvd[counter].publishedVariable = field->config.field.variable.publishParameters.publishedVariable;
-                //UA_NodeId_copy(&field->config.field.variable.publishParameters.publishedVariable, &pvd[counter].publishedVariable);
+                UA_NodeId_copy(&field->config.field.variable.publishParameters.publishedVariable, &pvd[counter].publishedVariable);
                 counter++;
             }
             UA_Variant_setArray(&value, pvd, publishedDataSet->fieldSize,
@@ -176,6 +175,7 @@ onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
                        "Read error! Unknown parent element.");
     }
     UA_Server_writeValue(server, *nodeid, value);
+    UA_Variant_clear(&value);
 }
 
 static void
@@ -363,71 +363,70 @@ addSubscribedVariables(UA_Server *server, UA_NodeId dataSetReaderId,
                        UA_DataSetReaderDataType *dataSetReaderDataType,
                        UA_DataSetMetaDataType *pMetaData) {
     UA_StatusCode retVal = UA_STATUSCODE_GOOD;
-    UA_TargetVariablesDataType targetVars;
     UA_ExtensionObject *eoTargetVar = &dataSetReaderDataType->subscribedDataSet;
-    if(eoTargetVar->encoding == UA_EXTENSIONOBJECT_DECODED){
-        if(eoTargetVar->content.decoded.type == &UA_TYPES[UA_TYPES_TARGETVARIABLESDATATYPE]){
-            if(UA_TargetVariablesDataType_copy((UA_TargetVariablesDataType *) eoTargetVar->content.decoded.data,
-                                                &targetVars) != UA_STATUSCODE_GOOD){
-                return UA_STATUSCODE_BADOUTOFMEMORY;
-            }
-        }
-        UA_NodeId folderId;
-        UA_String folderName = pMetaData->name;
-        UA_ObjectAttributes oAttr = UA_ObjectAttributes_default;
-        UA_QualifiedName folderBrowseName;
-        if(folderName.length > 0) {
-            oAttr.displayName.locale = UA_STRING("");
-            oAttr.displayName.text = folderName;
-            folderBrowseName.namespaceIndex = 1;
-            folderBrowseName.name = folderName;
-        } else {
-            oAttr.displayName = UA_LOCALIZEDTEXT("", "Subscribed Variables");
-            folderBrowseName = UA_QUALIFIEDNAME(1, "Subscribed Variables");
-        }
+    if(eoTargetVar->encoding != UA_EXTENSIONOBJECT_DECODED ||
+       eoTargetVar->content.decoded.type != &UA_TYPES[UA_TYPES_TARGETVARIABLESDATATYPE])
+        return UA_STATUSCODE_BADINTERNALERROR;
 
-        UA_Server_addObjectNode(server, UA_NODEID_NULL,
-                                UA_NODEID_NUMERIC (0, UA_NS0ID_OBJECTSFOLDER),
-                                UA_NODEID_NUMERIC (0, UA_NS0ID_ORGANIZES),
-                                folderBrowseName, UA_NODEID_NUMERIC (0,
-                                UA_NS0ID_BASEOBJECTTYPE), oAttr, NULL, &folderId);
-        /**
-        * **TargetVariables**
-        *
-        * The SubscribedDataSet option TargetVariables defines a list of Variable mappings between
-        * received DataSet fields and target Variables in the Subscriber AddressSpace.
-        * The values subscribed from the Publisher are updated in the value field of these variables */
-        /* Create the TargetVariables with respect to DataSetMetaData fields */
-        UA_FieldTargetVariable *targetVarsData = (UA_FieldTargetVariable *)
-            UA_calloc(targetVars.targetVariablesSize, sizeof(UA_FieldTargetVariable));
-        for(size_t i = 0; i < targetVars.targetVariablesSize; i++) {
-            /* Variable to subscribe data */
-            UA_VariableAttributes vAttr = UA_VariableAttributes_default;
-            UA_LocalizedText_copy(&pMetaData->fields[i].description,
-                                &vAttr.description);
-            vAttr.displayName.locale = UA_STRING("");
-            vAttr.displayName.text = pMetaData->fields[i].name;
-            vAttr.dataType = pMetaData->fields[i].dataType;
+    const UA_TargetVariablesDataType *targetVars =
+        (UA_TargetVariablesDataType *) eoTargetVar->content.decoded.data;
 
-            UA_NodeId newNode;
-            retVal |= UA_Server_addVariableNode(server, targetVars.targetVariables[i].targetNodeId,
-                                                folderId,
-                                                UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
-                                                UA_QUALIFIEDNAME(1, (char *)pMetaData->fields[i].name.data),
-                                                UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
-                                                vAttr, NULL, &newNode);
-
-            /* For creating Targetvariables */
-            UA_FieldTargetDataType_init(&targetVarsData[i].targetVariable);
-            targetVarsData[i].targetVariable.attributeId  = targetVars.targetVariables[i].attributeId;
-            targetVarsData[i].targetVariable.targetNodeId = newNode;
-        }
-        retVal = UA_Server_DataSetReader_createTargetVariables(server, dataSetReaderId,
-                                                                targetVars.targetVariablesSize, targetVarsData);
-        for(size_t j = 0; j < targetVars.targetVariablesSize; j++)
-            UA_FieldTargetDataType_clear(&targetVarsData[j].targetVariable);
-        UA_free(targetVarsData);
+    UA_NodeId folderId;
+    UA_String folderName = pMetaData->name;
+    UA_ObjectAttributes oAttr = UA_ObjectAttributes_default;
+    UA_QualifiedName folderBrowseName;
+    if(folderName.length > 0) {
+        oAttr.displayName.locale = UA_STRING("");
+        oAttr.displayName.text = folderName;
+        folderBrowseName.namespaceIndex = 1;
+        folderBrowseName.name = folderName;
+    } else {
+        oAttr.displayName = UA_LOCALIZEDTEXT("", "Subscribed Variables");
+        folderBrowseName = UA_QUALIFIEDNAME(1, "Subscribed Variables");
     }
+
+    UA_Server_addObjectNode(server, UA_NODEID_NULL, UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),
+                            UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES), folderBrowseName,
+                            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE), oAttr, NULL, &folderId);
+    /**
+     * **TargetVariables**
+     *
+     * The SubscribedDataSet option TargetVariables defines a list of Variable
+     * mappings between received DataSet fields and target Variables in the Subscriber
+     * AddressSpace. The values subscribed from the Publisher are updated in the value
+     * field of these variables */
+    /* Create the TargetVariables with respect to DataSetMetaData fields */
+    UA_FieldTargetVariable *targetVarsData = (UA_FieldTargetVariable *)
+        UA_calloc(targetVars->targetVariablesSize, sizeof(UA_FieldTargetVariable));
+    for(size_t i = 0; i < targetVars->targetVariablesSize; i++) {
+        /* Variable to subscribe data */
+        UA_VariableAttributes vAttr = UA_VariableAttributes_default;
+        UA_LocalizedText_copy(&pMetaData->fields[i].description, &vAttr.description);
+        vAttr.displayName.locale = UA_STRING("");
+        vAttr.displayName.text = pMetaData->fields[i].name;
+        vAttr.dataType = pMetaData->fields[i].dataType;
+
+        UA_QualifiedName browseName;
+        browseName.namespaceIndex = 1;
+        browseName.name = pMetaData->fields[i].name;
+
+        UA_NodeId newNode;
+        retVal |= UA_Server_addVariableNode(
+            server, targetVars->targetVariables[i].targetNodeId, folderId,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT), browseName,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), vAttr, NULL, &newNode);
+
+        /* For creating Targetvariables */
+        targetVarsData[i].targetVariable.attributeId =
+            targetVars->targetVariables[i].attributeId;
+        targetVarsData[i].targetVariable.targetNodeId = newNode;
+    }
+    retVal =
+        UA_Server_DataSetReader_createTargetVariables(server, dataSetReaderId,
+                                                      targetVars->targetVariablesSize, targetVarsData);
+    for(size_t j = 0; j < targetVars->targetVariablesSize; j++)
+        UA_FieldTargetDataType_clear(&targetVarsData[j].targetVariable);
+    UA_free(targetVarsData);
 
     return retVal;
 }
@@ -654,29 +653,34 @@ addPubSubConnectionAction(UA_Server *server,
 
     for(size_t i = 0; i < pubSubConnectionDataType.readerGroupsSize; i++){
         UA_NodeId readerGroupId;
-        UA_ReaderGroupDataType *readerGroupDataType = &pubSubConnectionDataType.readerGroups[i];
-        retVal |= addReaderGroupConfig(server, connectionId, readerGroupDataType, &readerGroupId);
+        UA_ReaderGroupDataType *rg = &pubSubConnectionDataType.readerGroups[i];
+        retVal |= addReaderGroupConfig(server, connectionId, rg, &readerGroupId);
         if(retVal != UA_STATUSCODE_GOOD) {
+            UA_NodeId_clear(&readerGroupId);
             UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER, "addReaderGroup failed");
             return retVal;
         }
 
-        for(size_t j = 0; j < pubSubConnectionDataType.readerGroups[i].dataSetReadersSize; j++){
+        for(size_t j = 0; j < rg->dataSetReadersSize; j++) {
             UA_NodeId dataSetReaderId;
-            UA_DataSetReaderDataType *dataSetReaderDataType =  &readerGroupDataType->dataSetReaders[j];
+            UA_DataSetReaderDataType *dataSetReaderDataType =  &rg->dataSetReaders[j];
             retVal |= addDataSetReaderConfig(server, readerGroupId, dataSetReaderDataType, &dataSetReaderId);
             if(retVal != UA_STATUSCODE_GOOD) {
+                UA_NodeId_clear(&readerGroupId);
                 UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER, "addDataSetReader failed");
                 return retVal;
             }
         }
+
         //TODO: Need to handle the UA_Server_setReaderGroupOperational based on the status variable in information model
         if(pubSubConnectionDataType.enabled) {
             UA_Server_freezeReaderGroupConfiguration(server, readerGroupId);
             UA_Server_setReaderGroupOperational(server, readerGroupId);
-        }
-        else
+        } else {
             UA_Server_setReaderGroupDisabled(server, readerGroupId);
+        }
+
+        UA_NodeId_clear(&readerGroupId);
     }
     //set ouput value
     UA_Variant_setScalarCopy(output, &connectionId, &UA_TYPES[UA_TYPES_NODEID]);
@@ -970,7 +974,14 @@ addPublishedDataItemsAction(UA_Server *server,
     size_t fieldFlagsSize = input[2].arrayLength;
     UA_DataSetFieldFlags * fieldFlags = (UA_DataSetFieldFlags *) input[2].data;
     size_t variablesToAddSize = input[3].arrayLength;
-    UA_ExtensionObject *eoAddVar = (UA_ExtensionObject *)input[3].data;
+    UA_PublishedVariableDataType *variablesToAdd = NULL;
+    UA_ExtensionObject *eoAddVar = NULL;
+    if(input[3].type == &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE])
+        variablesToAdd = (UA_PublishedVariableDataType*)input[3].data;
+    else if(input[3].type == &UA_TYPES[UA_TYPES_EXTENSIONOBJECT])
+        eoAddVar = (UA_ExtensionObject *)input[3].data;
+    else
+        return UA_STATUSCODE_BADINTERNALERROR;
 
     if(!(fieldNameAliasesSize == fieldFlagsSize || fieldFlagsSize == variablesToAddSize))
         return UA_STATUSCODE_BADINVALIDARGUMENT;
@@ -991,30 +1002,33 @@ addPublishedDataItemsAction(UA_Server *server,
 
     UA_DataSetFieldConfig dataSetFieldConfig;
     for(size_t j = 0; j < variablesToAddSize; ++j) {
+        /* Prepare the config */
         memset(&dataSetFieldConfig, 0, sizeof(UA_DataSetFieldConfig));
         dataSetFieldConfig.dataSetFieldType = UA_PUBSUB_DATASETFIELD_VARIABLE;
         dataSetFieldConfig.field.variable.fieldNameAlias = fieldNameAliases[j];
         if(fieldFlags[j] == UA_DATASETFIELDFLAGS_PROMOTEDFIELD)
             dataSetFieldConfig.field.variable.promotedField = true;
 
-        UA_PublishedVariableDataType variablesToAddField;
-        UA_PublishedVariableDataType_init(&variablesToAddField);
-        if(eoAddVar[j].encoding == UA_EXTENSIONOBJECT_DECODED){
-            if(eoAddVar[j].content.decoded.type == &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]){
-                if(UA_PublishedVariableDataType_copy((UA_PublishedVariableDataType *) eoAddVar[j].content.decoded.data,
-                                                      &variablesToAddField) != UA_STATUSCODE_GOOD){
-                    return UA_STATUSCODE_BADOUTOFMEMORY;
-                }
-            }
+        UA_PublishedVariableDataType *variableToAdd;
+        if(variablesToAdd) {
+            variableToAdd = &variablesToAdd[j];
+        } else {
+            if(eoAddVar[j].content.decoded.type !=
+               &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE])
+                return UA_STATUSCODE_BADINTERNALERROR;
+            variableToAdd = (UA_PublishedVariableDataType*)
+                eoAddVar[j].content.decoded.data;
         }
-        dataSetFieldConfig.field.variable.publishParameters = variablesToAddField;
-        retVal |= UA_Server_addDataSetField(server, dataSetItemsNodeId, &dataSetFieldConfig, NULL).result;
+        dataSetFieldConfig.field.variable.publishParameters = *variableToAdd;
+
+        /* Add the dataset field */
+        retVal |= UA_Server_addDataSetField(server, dataSetItemsNodeId,
+                                            &dataSetFieldConfig, NULL).result;
         if(retVal != UA_STATUSCODE_GOOD) {
-           UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER, "addDataSetField failed");
+           UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+                        "addDataSetField failed");
            return retVal;
         }
-
-        UA_PublishedVariableDataType_clear(&variablesToAddField);
     }
 
     UA_Variant_setScalarCopy(output, &dataSetItemsNodeId, &UA_TYPES[UA_TYPES_NODEID]);

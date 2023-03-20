@@ -23,9 +23,10 @@ UA_Boolean running;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-        while (running)
+    while(running) {
         UA_Server_run_iterate(server, true);
-        return 0;
+    }
+    return 0;
 }
 
 static void setup(void) {
@@ -150,9 +151,9 @@ static void addPublishedDataSets(void){
     UA_Variant_setArray(&inputArguments[2], dataSetFieldFlags, 2, &UA_TYPES[UA_TYPES_DATASETFIELDFLAGS]);
 
     UA_PublishedVariableDataType *variablesToAdd = (UA_PublishedVariableDataType *) UA_calloc(2, sizeof(UA_PublishedVariableDataType));
-    variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_LOCALTIME);
+    variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
     variablesToAdd[0].attributeId = UA_ATTRIBUTEID_VALUE;
-    variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_CURRENTSERVERID);
+    variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
     variablesToAdd[1].attributeId = UA_ATTRIBUTEID_VALUE;
     UA_Variant_setArray(&inputArguments[3], variablesToAdd, 2, &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
 
@@ -645,9 +646,9 @@ START_TEST(AddAndRemovePublishedDataSetItemsUsingServer){
         UA_Variant_setArray(&inputArguments[2], dataSetFieldFlags, 2, &UA_TYPES[UA_TYPES_DATASETFIELDFLAGS]);
 
         UA_PublishedVariableDataType *variablesToAdd = (UA_PublishedVariableDataType *) UA_calloc(2, sizeof(UA_PublishedVariableDataType));
-        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_LOCALTIME);
+        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
         variablesToAdd[0].attributeId = UA_ATTRIBUTEID_VALUE;
-        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_CURRENTSERVERID);
+        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
         variablesToAdd[1].attributeId = UA_ATTRIBUTEID_VALUE;
         UA_Variant_setArray(&inputArguments[3], variablesToAdd, 2, &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
 
@@ -700,9 +701,9 @@ START_TEST(AddAndRemovePublishedDataSetItemsUsingClient){
         UA_Variant_setArray(&inputArguments[2], dataSetFieldFlags, 2, &UA_TYPES[UA_TYPES_DATASETFIELDFLAGS]);
 
         UA_PublishedVariableDataType *variablesToAdd = (UA_PublishedVariableDataType *) UA_calloc(2, sizeof(UA_PublishedVariableDataType));
-        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_LOCALTIME);
+        variablesToAdd[0].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
         variablesToAdd[0].attributeId = UA_ATTRIBUTEID_VALUE;
-        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_CURRENTSERVERID);
+        variablesToAdd[1].publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
         variablesToAdd[1].attributeId = UA_ATTRIBUTEID_VALUE;
         UA_Variant_setArray(&inputArguments[3], variablesToAdd, 2, &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
 
@@ -1077,6 +1078,7 @@ START_TEST(AddNewPubSubConnectionWithReaderGroupandDataSetReader){
         ck_assert_int_eq(response.results->statusCode, UA_STATUSCODE_GOOD);
         UA_ExtensionObject_clear(&eo);
         UA_free(targetVars.targetVariables);
+        UA_free(pMetaData->fields);
         UA_free(pubSubConnection.readerGroups->dataSetReaders);
         UA_free(pubSubConnection.readerGroups);
         UA_CallResponse_clear(&response);

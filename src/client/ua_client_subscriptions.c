@@ -1061,8 +1061,12 @@ UA_Client_Subscriptions_processPublishResponse(UA_Client *client, UA_PublishRequ
     }
 
     if(response->responseHeader.serviceResult == UA_STATUSCODE_BADTIMEOUT) {
-        if (client->config.inactivityCallback)
-            client->config.inactivityCallback(client);
+        if (client->config.subscriptionInactivityCallback) {
+            UA_Client_Subscription* sub = findSubscription(client, response->subscriptionId);
+            if (sub != NULL)
+                client->config.subscriptionInactivityCallback(client, sub->subscriptionId,
+                                                              sub->context);
+        }
         UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
                        "Received Timeout for Publish Response");
         return;
@@ -1190,7 +1194,7 @@ UA_Client_Subscriptions_backgroundPublishInactivityCheck(UA_Client *client) {
 
 void
 UA_Client_Subscriptions_backgroundPublish(UA_Client *client) {
-    if(client->sessionState < UA_SESSIONSTATE_ACTIVATED)
+    if(client->sessionState != UA_SESSIONSTATE_ACTIVATED)
         return;
 
     /* The session must have at least one subscription */

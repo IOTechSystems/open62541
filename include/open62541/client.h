@@ -112,6 +112,15 @@ typedef struct {
     UA_UserTokenPolicy userTokenPolicy;
 
     /**
+     * If the EndpointDescription has not been defined, the ApplicationURI
+     * constrains the servers considered in the FindServers service and the
+     * Endpoints considered in the GetEndpoints service.
+     *
+     * If empty the applicationURI is not used to filter.
+     */
+    UA_String applicationUri;
+
+    /**
      * Custom Data Types
      * ~~~~~~~~~~~~~~~~~
      * The following is a linked list of arrays with custom data types. All data
@@ -728,6 +737,7 @@ UA_Client_findDataType(UA_Client *client, const UA_NodeId *typeId);
  * .. toctree::
  *
  *    client_highlevel
+ *    client_highlevel_async
  *    client_subscriptions */
 
 _UA_END_DECLS

@@ -25,7 +25,7 @@
 #define UA_MAX_RETRANSMISSIONQUEUESIZE 256
 
 UA_Subscription *
-UA_Subscription_new() {
+UA_Subscription_new(void) {
     /* Allocate the memory */
     UA_Subscription *newSub = (UA_Subscription*)UA_calloc(1, sizeof(UA_Subscription));
     if(!newSub)
@@ -366,7 +366,7 @@ UA_Subscription_nextSequenceNumber(UA_UInt32 sequenceNumber) {
 static void
 publishCallback(UA_Server *server, UA_Subscription *sub) {
     UA_LOCK(&server->serviceMutex);
-    UA_Subscription_publish(server, sub);
+    UA_Subscription_sampleAndPublish(server, sub);
     UA_UNLOCK(&server->serviceMutex);
 }
 
@@ -431,12 +431,9 @@ UA_Subscription_isLate(UA_Subscription *sub) {
 #endif
 }
 
-void
-UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Publish Callback");
-    UA_assert(sub);
-
+/* Returns true if done */
+UA_Boolean
+UA_Subscription_publishOnce(UA_Server *server, UA_Subscription *sub) {
     /* Dequeue a response */
     UA_PublishResponseEntry *pre = NULL;
     if(sub->session)
@@ -461,7 +458,7 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
      * Subscription */
     if(sub->statusChange != UA_STATUSCODE_GOOD) {
         sendStatusChangeDelete(server, sub, pre);
-        return;
+        return true;
     }
 
     /* Count the available notifications */
@@ -475,7 +472,7 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
         if(sub->currentKeepAliveCount < sub->maxKeepAliveCount) {
             if(pre)
                 UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
-            return;
+            return true;
         }
         UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Sending a KeepAlive");
     }
@@ -490,7 +487,7 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
         UA_Subscription_isLate(sub);
         if(pre)
             UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
-        return;
+        return true;
     }
 
     UA_assert(pre);
@@ -516,7 +513,7 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
 
                 UA_Subscription_isLate(sub);
                 UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
-                return;
+                return true;
             }
         }
 
@@ -532,19 +529,16 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
                 UA_free(retransmission);
             UA_Subscription_isLate(sub);
             UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
-            return;
+            return true;
         }
     }
 
     /* <-- The point of no return --> */
 
-    /* Notifications remaining? */
-    UA_Boolean moreNotifications = (sub->notificationQueueSize > 0);
-
     /* Set up the response */
     response->responseHeader.timestamp = UA_DateTime_now();
     response->subscriptionId = sub->subscriptionId;
-    response->moreNotifications = moreNotifications;
+    response->moreNotifications = (sub->notificationQueueSize > 0);
     message->publishTime = response->responseHeader.timestamp;
 
     /* Set sequence number to message. Started at 1 which is given during
@@ -588,8 +582,18 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     sendResponse(server, sub->session, sub->session->header.channel, pre->requestId,
                  (UA_Response*)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
 
-    /* Reset subscription state to normal */
-    sub->state = UA_SUBSCRIPTIONSTATE_NORMAL;
+    /* Reset the Subscription state to NORMAL. But only if all notifications
+     * have been sent out. Otherwise keep the Subscription in the LATE state. So
+     * we immediately answer incoming Publish requests.
+     *
+     * (We also check that session->responseQueueSize > 0 in Service_Publish. To
+     * avoid answering Publish requests out of order. As we additionally may
+     * schedule an immediate next publishOnce if UA_Subscription_publishOnce
+     * returns "not done".) */
+    if(sub->notificationQueueSize == 0)
+        sub->state = UA_SUBSCRIPTIONSTATE_NORMAL;
+
+    /* Reset the KeepAlive after publishing */
     sub->currentKeepAliveCount = 0;
 
     /* Free the response */
@@ -613,9 +617,36 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     sub->notificationsCount += (sentDCN + sentEN);
 #endif
 
-    /* Repeat sending responses if there are more notifications to send */
-    if(moreNotifications)
-        UA_Subscription_publish(server, sub);
+    /* Re-run publishing if notifications are remaining */
+    return (sub->notificationQueueSize == 0);
+}
+
+/* Repeat the main publishing callback until all notifications are sent out or
+ * we have to stop */
+void
+UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
+    UA_Boolean done = false;
+    do {
+        done = UA_Subscription_publishOnce(server, sub);
+    } while(!done);
+}
+
+void
+UA_Subscription_sampleAndPublish(UA_Server *server, UA_Subscription *sub) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                              "Sample and Publish Callback");
+    UA_assert(sub);
+
+    /* Sample the MonitoredItems with sampling interval <0 (which implies
+     * sampling in the same interval as the subscription) */
+    UA_MonitoredItem *mon;
+    LIST_FOREACH(mon, &sub->samplingMonitoredItems, sampling.samplingListEntry) {
+        monitoredItem_sampleCallback(server, mon);
+    }
+
+    /* Publish the queued notifications */
+    UA_Subscription_publish(server, sub);
 }
 
 UA_Boolean

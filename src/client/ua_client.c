@@ -59,6 +59,8 @@ UA_ClientConfig_clear(UA_ClientConfig *config) {
     UA_EndpointDescription_clear(&config->endpoint);
     UA_UserTokenPolicy_clear(&config->userTokenPolicy);
 
+    UA_String_clear(&config->applicationUri);
+
     if(config->certificateVerification.clear)
         config->certificateVerification.clear(&config->certificateVerification);
 
@@ -85,11 +87,19 @@ UA_ClientConfig_clear(UA_ClientConfig *config) {
 
 static void
 UA_Client_clear(UA_Client *client) {
+    /* Prevent new async service calls in UA_Client_AsyncService_removeAll */
+    UA_SessionState oldState = client->sessionState;
+    client->sessionState = UA_SESSIONSTATE_CLOSING;
+
     /* Delete the async service calls with BADHSUTDOWN */
     UA_Client_AsyncService_removeAll(client, UA_STATUSCODE_BADSHUTDOWN);
 
+    /* Reset to the old state to properly close the session */
+    client->sessionState = oldState;
+
     UA_Client_disconnect(client);
     UA_String_clear(&client->endpointUrl);
+    UA_String_clear(&client->discoveryUrl);
 
     UA_String_clear(&client->remoteNonce);
     UA_String_clear(&client->localNonce);
@@ -690,7 +700,9 @@ UA_Client_run_iterate(UA_Client *client, UA_UInt32 timeout) {
 
     /* Make sure we have an open channel */
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    if((client->noSession && client->channel.state != UA_SECURECHANNELSTATE_OPEN) ||
+    if(client->endpointsHandshake || client->findServersHandshake ||
+       client->discoveryUrl.length == 0 ||
+       (client->noSession && client->channel.state != UA_SECURECHANNELSTATE_OPEN) ||
        client->sessionState < UA_SESSIONSTATE_ACTIVATED) {
         retval = connectIterate(client, timeout);
         notifyClientState(client);
