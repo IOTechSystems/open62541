@@ -522,6 +522,7 @@ cleanup:    UA_HistoryReadResponse_clear(&response);
             else
                 retval = UA_STATUSCODE_BADUNEXPECTEDERROR;
         }
+
         if (!UA_StatusCode_isEqualTop(retval,UA_STATUSCODE_GOOD))
             goto cleanup;
 
