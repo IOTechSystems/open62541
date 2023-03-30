@@ -545,7 +545,6 @@ endif()
 
 # Build Targets
 option(UA_BUILD_DOC "Build extended nodesets" OFF)
-option(UA_BUILD_NODESETS "Build extended nodesets" OFF)
 option(UA_BUILD_EXAMPLES "Build example servers and clients" OFF)
 option(UA_BUILD_TOOLS "Build OPC UA shell tools" OFF)
 option(UA_BUILD_UNIT_TESTS "Build the unit tests" OFF)
@@ -1536,14 +1535,6 @@ target_link_libraries(open62541 ${open62541_LIBRARIES})
 
 if(UA_BUILD_DOC)
     add_subdirectory(doc)
-endif()
-
-if(UA_BUILD_NODESETS)
-    if(UA_ENABLE_AMALGAMATION)
-        # Cannot compile tests with amalgamation. Not prepared for single header include
-        message(FATAL_ERROR "Nodeset generation cannot be built with source amalgamation enabled")
-    endif()
-    add_subdirectory(extensions)
 endif()
 
 if(UA_BUILD_EXAMPLES)
