@@ -229,7 +229,7 @@ Service_GetEndpoints(UA_Server *server, UA_Session *session,
     UA_STACKARRAY(UA_Boolean, relevant_endpoints, reSize);
     memset(relevant_endpoints, 0, reSize);
     size_t relevant_count = 0;
-    if(request->profileUrisSize == 0 || (request->profileUrisSize == 1 && UA_String_equal(&request->profileUris[0], &UA_STRING_NULL)) {
+    if(request->profileUrisSize == 0 || (request->profileUrisSize == 1 && UA_String_equal(&request->profileUris[0], &UA_STRING_NULL))) {
         for(size_t j = 0; j < server->config.endpointsSize; ++j)
             relevant_endpoints[j] = true;
         relevant_count = server->config.endpointsSize;
