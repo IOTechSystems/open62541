@@ -235,7 +235,7 @@ Service_GetEndpoints(UA_Server *server, UA_Session *session,
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     for(size_t j = 0; j < server->config.endpointsSize; ++j) {
         /* Test if the supported binary profile shall be returned */
-        UA_Boolean usable = (request->profileUrisSize == 0);
+        UA_Boolean usable = (request->profileUrisSize == 0) || (request->profileUrisSize == 1 && UA_String_equal(&request->profileUris[0], UA_STRING_NULL));
         if(!usable) {
             for(size_t i = 0; i < request->profileUrisSize; ++i) {
                 if(!UA_String_equal(&request->profileUris[i],
