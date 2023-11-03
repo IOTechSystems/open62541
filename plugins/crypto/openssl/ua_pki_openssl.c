@@ -589,7 +589,7 @@ UA_CertificateVerification_VerifyApplicationURI (void *                verificat
 
     const unsigned char * pData;
     X509 *                certificateX509;
-    UA_String             subjectURI;
+    UA_String             subjectURI = UA_STRING_NULL;
     GENERAL_NAMES *       pNames;
     int                   i;
     UA_StatusCode         ret;
@@ -610,6 +610,9 @@ UA_CertificateVerification_VerifyApplicationURI (void *                verificat
         X509_free (certificateX509);
         return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
     }
+    
+    UA_String_init(&subjectURI);
+    
     for (i = 0; i < sk_GENERAL_NAME_num (pNames); i++) {
          GENERAL_NAME * value = sk_GENERAL_NAME_value (pNames, i);
          if (value->type == GEN_URI) {

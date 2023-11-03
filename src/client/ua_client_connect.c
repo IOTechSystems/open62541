@@ -609,7 +609,7 @@ responseGetEndpoints(UA_Client *client, void *userdata, UA_UInt32 requestId,
     client->endpointsHandshake = false;
 
     UA_LOG_DEBUG(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                 "Received FindServersResponse");
+                 "Received GetEndpointsResponse");
 
     UA_GetEndpointsResponse *resp = (UA_GetEndpointsResponse*)response;
     /* GetEndpoints not possible. Fail the connection */
@@ -864,13 +864,11 @@ responseFindServers(UA_Client *client, void *userdata,
         }
     }
 
-    /* The current EndpointURL is not usable. Pick the first DiscoveryUrl of a
+    /* The current EndpointURL is not usable. Pick the first "opc.tcp" DiscoveryUrl of a
      * returned server. */
     for(size_t i = 0; i < fsr->serversSize; i++) {
         UA_ApplicationDescription *server = &fsr->servers[i];
         if(server->applicationType != UA_APPLICATIONTYPE_SERVER)
-            continue;
-        if(server->discoveryUrlsSize == 0)
             continue;
 
         /* Filter by the ApplicationURI if defined */
@@ -879,23 +877,35 @@ responseFindServers(UA_Client *client, void *userdata,
                             &server->applicationUri))
             continue;
 
-        /* Use this DiscoveryUrl in the client */
-        UA_String_clear(&client->discoveryUrl);
-        client->discoveryUrl = server->discoveryUrls[0];
-        UA_String_init(&server->discoveryUrls[0]);
+        for(size_t j = 0; j < server->discoveryUrlsSize; j++) {
+            /* Try to parse the DiscoveryUrl. This weeds out http schemas (etc.)
+             * and invalid DiscoveryUrls in general. */
+            UA_String hostname, path;
+            UA_UInt16 port;
+            UA_StatusCode res =
+                UA_parseEndpointUrl(&server->discoveryUrls[j], &hostname,
+                                    &port, &path);
+            if(res != UA_STATUSCODE_GOOD)
+                continue;
 
-        UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                    "Use the EndpointURL %.*s returned from FindServers",
-                    (int)client->discoveryUrl.length,
-                    client->discoveryUrl.data);
+            /* Use this DiscoveryUrl in the client */
+            UA_String_clear(&client->discoveryUrl);
+            client->discoveryUrl = server->discoveryUrls[j];
+            UA_String_init(&server->discoveryUrls[j]);
 
-        /* Close the SecureChannel to build it up new with the correct
-         * EndpointURL in the HEL/ACK handshake */
-        closeSecureChannel(client);
-        return;
+            UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                        "Use the EndpointURL %.*s returned from FindServers",
+                        (int)client->discoveryUrl.length, client->discoveryUrl.data);
+
+            /* Close the SecureChannel to build it up new with the correct
+             * EndpointURL in the HEL/ACK handshake */
+            closeSecureChannel(client);
+            return;
+        }
     }
 
-    /* Could not find a suitable server. Try to continue. */
+    /* Could not find a suitable server. Try to continue with the
+     * original EndpointURL. */
     UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
                    "FindServers did not returned a suitable DiscoveryURL. "
                    "Continue with the EndpointURL %.*s.",
@@ -1023,6 +1033,27 @@ createSessionAsync(UA_Client *client) {
 static UA_StatusCode
 initConnect(UA_Client *client);
 
+/* A workaround if the DiscoveryUrl returned by the FindServers service doesn't work.
+ * Then default back to the initial EndpointUrl and pretend that was returned
+ * by FindServers. */
+static void
+fixBadDiscoveryUrl(UA_Client* client) {
+    if(client->connectStatus == UA_STATUSCODE_GOOD)
+        return;
+    if(client->discoveryUrl.length == 0 ||
+       UA_String_equal(&client->discoveryUrl, &client->endpointUrl))
+        return;
+
+    UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                   "The DiscoveryUrl returned by the FindServers service (%.*s) could not be "
+                   "connected. Trying with the original EndpointUrl.",
+                   (int)client->discoveryUrl.length, client->discoveryUrl.data);
+
+    UA_String_clear(&client->discoveryUrl);
+    UA_String_copy(&client->endpointUrl, &client->discoveryUrl);
+    client->connectStatus = UA_STATUSCODE_GOOD;
+}
+
 UA_StatusCode
 connectIterate(UA_Client *client, UA_UInt32 timeout) {
     UA_LOG_TRACE(&client->config.logger, UA_LOGCATEGORY_CLIENT,
@@ -1094,13 +1125,16 @@ connectIterate(UA_Client *client, UA_UInt32 timeout) {
             client->connection.close(&client->connection);
             client->connection.free(&client->connection);
         }
+        fixBadDiscoveryUrl(client);
         return client->connectStatus;
     case UA_SECURECHANNELSTATE_ACK_RECEIVED:
         client->connectStatus = sendOPNAsync(client, false);
+        fixBadDiscoveryUrl(client);
         return client->connectStatus;
     case UA_SECURECHANNELSTATE_HEL_SENT:
     case UA_SECURECHANNELSTATE_OPN_SENT:
         client->connectStatus = receiveResponseAsync(client, timeout);
+        fixBadDiscoveryUrl(client);
         return client->connectStatus;
     default:
         break;
@@ -1253,7 +1287,7 @@ UA_Client_connectSecureChannelAsync(UA_Client *client, const char *endpointUrl) 
     return initConnect(client);
 }
 
-static UA_StatusCode
+UA_StatusCode
 connectSync(UA_Client *client) {
     UA_DateTime now = UA_DateTime_nowMonotonic();
     UA_DateTime maxDate = now + ((UA_DateTime)client->config.timeout * UA_DATETIME_MSEC);
