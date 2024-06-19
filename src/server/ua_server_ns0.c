@@ -10,6 +10,7 @@
  *    Copyright 2018 (c) Fabian Arndt, Root-Core
  *    Copyright 2019 (c) Kalycito Infotech Private Limited
  *    Copyright 2021 (c) Christian von Arnim, ISW University of Stuttgart (for VDW and umati)
+ *    Copyright 2023 (c) Fraunhofer IOSB (Author: Andreas Ebner)
  */
 
 #include "open62541/namespace0_generated.h"
@@ -97,7 +98,7 @@ createNS0_base(UA_Server *server) {
     hassubtype_attr.displayName = UA_LOCALIZEDTEXT("", "HasSubtype");
     hassubtype_attr.isAbstract = false;
     hassubtype_attr.symmetric = false;
-    hassubtype_attr.inverseName = UA_LOCALIZEDTEXT("", "HasSupertype");
+    hassubtype_attr.inverseName = UA_LOCALIZEDTEXT("", "SubtypeOf");
     ret |= ns0_addNode_raw(server, UA_NODECLASS_REFERENCETYPE, UA_NS0ID_HASSUBTYPE, "HasSubtype",
                            &hassubtype_attr, &UA_TYPES[UA_TYPES_REFERENCETYPEATTRIBUTES]);
 
@@ -266,11 +267,16 @@ createNS0_base(UA_Server *server) {
     /* Add BaseEventType */
     UA_ObjectTypeAttributes eventtype_attr = UA_ObjectTypeAttributes_default;
     eventtype_attr.displayName = UA_LOCALIZEDTEXT("", "BaseEventType");
-    ret |= ns0_addNode_raw(server, UA_NODECLASS_OBJECTTYPE,
-                           UA_NS0ID_BASEEVENTTYPE, "BaseEventType",
-                           &eventtype_attr, &UA_TYPES[UA_TYPES_OBJECTTYPEATTRIBUTES]);
-    ret |= ns0_addNode_finish(server, UA_NS0ID_BASEEVENTTYPE,
-                              UA_NS0ID_EVENTTYPESFOLDER, UA_NS0ID_ORGANIZES);
+    ret |= addNode(server, UA_NODECLASS_OBJECTTYPE,
+                   UA_NODEID_NUMERIC(0, UA_NS0ID_BASEEVENTTYPE),
+                   UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE),
+                   UA_NODEID_NULL, UA_QUALIFIEDNAME(0, "BaseEventType"),
+                   UA_NODEID_NULL,
+                   &eventtype_attr, &UA_TYPES[UA_TYPES_OBJECTTYPEATTRIBUTES], NULL, NULL);
+    ret |= addRef(server,
+                  UA_NODEID_NUMERIC(0, UA_NS0ID_EVENTTYPESFOLDER),
+                  UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
+                  UA_NODEID_NUMERIC(0, UA_NS0ID_BASEEVENTTYPE), true);
 
     if(ret != UA_STATUSCODE_GOOD)
         ret = UA_STATUSCODE_BADINTERNALERROR;
@@ -283,9 +289,35 @@ createNS0_base(UA_Server *server) {
 /****************/
 
 static UA_StatusCode
+writeStatus(UA_Server *server, const UA_NodeId *sessionId,
+            void *sessionContext, const UA_NodeId *nodeId,
+            void *nodeContext, const UA_NumericRange *range,
+            const UA_DataValue *value) {
+    if(range)
+        return UA_STATUSCODE_BADINDEXRANGEINVALID;
+
+    if(nodeId->identifier.numeric != UA_NS0ID_SERVER_SERVERSTATUS_SECONDSTILLSHUTDOWN)
+        return UA_STATUSCODE_BADINTERNALERROR;
+
+    /* Only the local user can write into this variable */
+    if(sessionId != &server->adminSession.sessionId)
+        return UA_STATUSCODE_BADUSERACCESSDENIED;
+
+    if(!UA_Variant_hasScalarType(&value->value, &UA_TYPES[UA_TYPES_UINT32]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+
+    UA_EventLoop *el = server->config.eventLoop;
+    UA_UInt32 *endTime = (UA_UInt32*)value->value.data;
+    server->endTime = el->dateTime_now(el) + (UA_DateTime)(*endTime * UA_DATETIME_SEC);
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
 readStatus(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
            const UA_NodeId *nodeId, void *nodeContext, UA_Boolean sourceTimestamp,
            const UA_NumericRange *range, UA_DataValue *value) {
+    UA_EventLoop *el = server->config.eventLoop;
+
     if(range) {
         value->hasStatus = true;
         value->status = UA_STATUSCODE_BADINDEXRANGEINVALID;
@@ -294,7 +326,7 @@ readStatus(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
 
     if(sourceTimestamp) {
         value->hasSourceTimestamp = true;
-        value->sourceTimestamp = UA_DateTime_now();
+        value->sourceTimestamp = el->dateTime_now(el);
     }
 
     void *data = NULL;
@@ -307,7 +339,7 @@ readStatus(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
         if(!shutdown)
             return UA_STATUSCODE_BADOUTOFMEMORY;
         if(server->endTime != 0)
-            *shutdown = (UA_UInt32)((server->endTime - UA_DateTime_now()) / UA_DATETIME_SEC);
+            *shutdown = (UA_UInt32)((server->endTime - el->dateTime_now(el)) / UA_DATETIME_SEC);
         value->value.data = shutdown;
         value->value.type = &UA_TYPES[UA_TYPES_UINT32];
         value->hasValue = true;
@@ -331,14 +363,14 @@ readStatus(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
         if(!statustype)
             return UA_STATUSCODE_BADOUTOFMEMORY;
         statustype->startTime = server->startTime;
-        statustype->currentTime = UA_DateTime_now();
+        statustype->currentTime = el->dateTime_now(el);
 
         statustype->state = UA_SERVERSTATE_RUNNING;
         statustype->secondsTillShutdown = 0;
         if(server->endTime != 0) {
             statustype->state = UA_SERVERSTATE_SHUTDOWN;
             statustype->secondsTillShutdown = (UA_UInt32)
-                ((server->endTime - UA_DateTime_now()) / UA_DATETIME_SEC);
+                ((server->endTime - el->dateTime_now(el)) / UA_DATETIME_SEC);
         }
 
         value->value.data = statustype;
@@ -403,6 +435,8 @@ static UA_StatusCode
 readServiceLevel(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
                  const UA_NodeId *nodeId, void *nodeContext, UA_Boolean includeSourceTimeStamp,
                  const UA_NumericRange *range, UA_DataValue *value) {
+    UA_EventLoop *el = server->config.eventLoop;
+
     if(range) {
         value->hasStatus = true;
         value->status = UA_STATUSCODE_BADINDEXRANGEINVALID;
@@ -412,6 +446,8 @@ readServiceLevel(UA_Server *server, const UA_NodeId *sessionId, void *sessionCon
     value->value.type = &UA_TYPES[UA_TYPES_BYTE];
     value->value.arrayLength = 0;
     UA_Byte *byte = UA_Byte_new();
+    if(!byte)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
     *byte = 255;
     value->value.data = byte;
     value->value.arrayDimensionsSize = 0;
@@ -419,7 +455,7 @@ readServiceLevel(UA_Server *server, const UA_NodeId *sessionId, void *sessionCon
     value->hasValue = true;
     if(includeSourceTimeStamp) {
         value->hasSourceTimestamp = true;
-        value->sourceTimestamp = UA_DateTime_now();
+        value->sourceTimestamp = el->dateTime_now(el);
     }
     return UA_STATUSCODE_GOOD;
 }
@@ -428,6 +464,8 @@ static UA_StatusCode
 readAuditing(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
              const UA_NodeId *nodeId, void *nodeContext, UA_Boolean includeSourceTimeStamp,
              const UA_NumericRange *range, UA_DataValue *value) {
+    UA_EventLoop *el = server->config.eventLoop;
+
     if(range) {
         value->hasStatus = true;
         value->status = UA_STATUSCODE_BADINDEXRANGEINVALID;
@@ -437,6 +475,8 @@ readAuditing(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext
     value->value.type = &UA_TYPES[UA_TYPES_BOOLEAN];
     value->value.arrayLength = 0;
     UA_Boolean *boolean = UA_Boolean_new();
+    if(!boolean)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
     *boolean = false;
     value->value.data = boolean;
     value->value.arrayDimensionsSize = 0;
@@ -444,7 +484,7 @@ readAuditing(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext
     value->hasValue = true;
     if(includeSourceTimeStamp) {
         value->hasSourceTimestamp = true;
-        value->sourceTimestamp = UA_DateTime_now();
+        value->sourceTimestamp = el->dateTime_now(el);
     }
     return UA_STATUSCODE_GOOD;
 }
@@ -455,6 +495,8 @@ readNamespaces(UA_Server *server, const UA_NodeId *sessionId, void *sessionConte
                const UA_NodeId *nodeid, void *nodeContext, UA_Boolean includeSourceTimeStamp,
                const UA_NumericRange *range,
                UA_DataValue *value) {
+    UA_EventLoop *el = server->config.eventLoop;
+
     /* ensure that the uri for ns1 is set up from the app description */
     setupNs1Uri(server);
 
@@ -471,7 +513,7 @@ readNamespaces(UA_Server *server, const UA_NodeId *sessionId, void *sessionConte
     value->hasValue = true;
     if(includeSourceTimeStamp) {
         value->hasSourceTimestamp = true;
-        value->sourceTimestamp = UA_DateTime_now();
+        value->sourceTimestamp = el->dateTime_now(el);
     }
     return UA_STATUSCODE_GOOD;
 }
@@ -519,12 +561,15 @@ static UA_StatusCode
 readCurrentTime(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
                 const UA_NodeId *nodeid, void *nodeContext, UA_Boolean sourceTimeStamp,
                 const UA_NumericRange *range, UA_DataValue *value) {
+    UA_EventLoop *el = server->config.eventLoop;
+
     if(range) {
         value->hasStatus = true;
         value->status = UA_STATUSCODE_BADINDEXRANGEINVALID;
         return UA_STATUSCODE_GOOD;
     }
-    UA_DateTime currentTime = UA_DateTime_now();
+
+    UA_DateTime currentTime = el->dateTime_now(el);
     UA_StatusCode retval = UA_Variant_setScalarCopy(&value->value, &currentTime,
                                                     &UA_TYPES[UA_TYPES_DATETIME]);
     if(retval != UA_STATUSCODE_GOOD)
@@ -539,10 +584,50 @@ readCurrentTime(UA_Server *server, const UA_NodeId *sessionId, void *sessionCont
 
 #ifdef UA_GENERATED_NAMESPACE_ZERO
 static UA_StatusCode
+readOperationLimits(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
+                        const UA_NodeId *nodeid, void *nodeContext, UA_Boolean includeSourceTimeStamp,
+                        const UA_NumericRange *range,
+                        UA_DataValue *value) {
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    if(nodeid->identifierType != UA_NODEIDTYPE_NUMERIC)
+        return UA_STATUSCODE_BADNOTSUPPORTED;
+    switch(nodeid->identifier.numeric) {
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREAD:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxNodesPerRead, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERWRITE:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxNodesPerWrite, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERMETHODCALL:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxNodesPerMethodCall, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERBROWSE:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxNodesPerBrowse, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREGISTERNODES:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxNodesPerRegisterNodes, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERTRANSLATEBROWSEPATHSTONODEIDS:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxNodesPerTranslateBrowsePathsToNodeIds, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERNODEMANAGEMENT:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxNodesPerNodeManagement, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        case UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXMONITOREDITEMSPERCALL:
+            retval = UA_Variant_setScalarCopy(&value->value, &server->config.maxMonitoredItemsPerCall, &UA_TYPES[UA_TYPES_UINT32]);
+            break;
+        default:
+            retval = UA_STATUSCODE_BADNOTSUPPORTED;
+    }
+    return retval;
+}
+
+static UA_StatusCode
 readMinSamplingInterval(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
                const UA_NodeId *nodeid, void *nodeContext, UA_Boolean includeSourceTimeStamp,
-               const UA_NumericRange *range,
-               UA_DataValue *value) {
+               const UA_NumericRange *range, UA_DataValue *value) {
+    UA_EventLoop *el = server->config.eventLoop;
+
     if(range) {
         value->hasStatus = true;
         value->status = UA_STATUSCODE_BADINDEXRANGEINVALID;
@@ -562,13 +647,50 @@ readMinSamplingInterval(UA_Server *server, const UA_NodeId *sessionId, void *ses
     value->hasValue = true;
     if(includeSourceTimeStamp) {
         value->hasSourceTimestamp = true;
-        value->sourceTimestamp = UA_DateTime_now();
+        value->sourceTimestamp = el->dateTime_now(el);
     }
     return UA_STATUSCODE_GOOD;
 }
 #endif
 
 #if defined(UA_GENERATED_NAMESPACE_ZERO) && defined(UA_ENABLE_METHODCALLS) && defined(UA_ENABLE_SUBSCRIPTIONS)
+static UA_StatusCode
+resendData(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
+           const UA_NodeId *methodId, void *methodContext, const UA_NodeId *objectId,
+           void *objectContext, size_t inputSize, const UA_Variant *input,
+           size_t outputSize, UA_Variant *output) {
+    /* Get the input argument */
+    if(inputSize != 1 ||
+       !UA_Variant_hasScalarType(input, &UA_TYPES[UA_TYPES_UINT32]))
+        return UA_STATUSCODE_BADSUBSCRIPTIONIDINVALID;
+    UA_UInt32 subscriptionId = *((UA_UInt32*)(input[0].data));
+
+    /* Get the Session */
+    UA_LOCK(&server->serviceMutex);
+    UA_Session *session = getSessionById(server, sessionId);
+    if(!session) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    /* Get the Subscription */
+    UA_Subscription *subscription = getSubscriptionById(server, subscriptionId);
+    if(!subscription) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADSUBSCRIPTIONIDINVALID;
+    }
+
+    /* The Subscription is not attached to this Session */
+    if(subscription->session != session) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADUSERACCESSDENIED;
+    }
+
+    UA_Subscription_resendData(server, subscription);
+
+    UA_UNLOCK(&server->serviceMutex);
+    return UA_STATUSCODE_GOOD;
+}
 static UA_StatusCode
 readMonitoredItems(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
                    const UA_NodeId *methodId, void *methodContext, const UA_NodeId *objectId,
@@ -647,7 +769,7 @@ readMonitoredItems(UA_Server *server, const UA_NodeId *sessionId, void *sessionC
 }
 #endif /* defined(UA_ENABLE_METHODCALLS) && defined(UA_ENABLE_SUBSCRIPTIONS) */
 
-UA_StatusCode
+static UA_StatusCode
 writeNs0VariableArray(UA_Server *server, UA_UInt32 id, void *v,
                       size_t length, const UA_DataType *type) {
     UA_Variant var;
@@ -655,6 +777,16 @@ writeNs0VariableArray(UA_Server *server, UA_UInt32 id, void *v,
     UA_Variant_setArray(&var, v, length, type);
     return writeValueAttribute(server, UA_NODEID_NUMERIC(0, id), &var);
 }
+
+#ifdef UA_GENERATED_NAMESPACE_ZERO
+static UA_StatusCode
+writeNs0Variable(UA_Server *server, UA_UInt32 id, void *v, const UA_DataType *type) {
+    UA_Variant var;
+    UA_Variant_init(&var);
+    UA_Variant_setScalar(&var, v, type);
+    return writeValueAttribute(server, UA_NODEID_NUMERIC(0, id), &var);
+}
+#endif
 
 #ifndef UA_GENERATED_NAMESPACE_ZERO
 static UA_StatusCode
@@ -692,6 +824,10 @@ minimalServerObject(UA_Server *server) {
 
     retval |= addVariableNode(server, "ServerStatus", UA_NS0ID_SERVER_SERVERSTATUS,
                               UA_NS0ID_SERVER, UA_NS0ID_HASCOMPONENT,
+                              UA_VALUERANK_SCALAR, UA_NS0ID_BASEDATATYPE);
+
+    retval |= addVariableNode(server, "StartTime", UA_NS0ID_SERVER_SERVERSTATUS_STARTTIME,
+                              UA_NS0ID_SERVER_SERVERSTATUS, UA_NS0ID_HASCOMPONENT,
                               UA_VALUERANK_SCALAR, UA_NS0ID_BASEDATATYPE);
 
     retval |= addVariableNode(server, "CurrentTime", UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME,
@@ -739,14 +875,6 @@ minimalServerObject(UA_Server *server) {
 }
 
 #else
-
-static UA_StatusCode
-writeNs0Variable(UA_Server *server, UA_UInt32 id, void *v, const UA_DataType *type) {
-    UA_Variant var;
-    UA_Variant_init(&var);
-    UA_Variant_setScalar(&var, v, type);
-    return writeValueAttribute(server, UA_NODEID_NUMERIC(0, id), &var);
-}
 
 static void
 addModellingRules(UA_Server *server) {
@@ -796,6 +924,8 @@ addModellingRules(UA_Server *server) {
  * example server time. */
 UA_StatusCode
 initNS0(UA_Server *server) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
     /* Initialize base nodes which are always required an cannot be created
      * through the NS compiler */
     server->bootstrapNS0 = true;
@@ -814,7 +944,7 @@ initNS0(UA_Server *server) {
     server->bootstrapNS0 = false;
 
     if(retVal != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "Initialization of Namespace 0 failed with %s. "
                      "See previous outputs for any error messages.",
                      UA_StatusCode_name(retVal));
@@ -834,7 +964,7 @@ initNS0(UA_Server *server) {
     retVal |= writeValueRankAttribute(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERARRAY), 1);
 
     /* ServerStatus */
-    UA_DataSource serverStatus = {readStatus, NULL};
+    UA_DataSource serverStatus = {readStatus, writeStatus};
     retVal |= setVariableNode_dataSource(server,
                         UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS), serverStatus);
 
@@ -934,6 +1064,17 @@ initNS0(UA_Server *server) {
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_REDUNDANTSERVERARRAY), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_SERVERURIARRAY), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERREDUNDANCY_SERVERNETWORKGROUPS), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_CONFORMANCEUNITS), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_URISVERSION), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_CONFORMANCEUNITS), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXMONITOREDITEMS), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXMONITOREDITEMSPERSUBSCRIPTION), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXMONITOREDITEMSQUEUESIZE), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXSELECTCLAUSEPARAMETERS), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXSESSIONS), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXSUBSCRIPTIONS), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXSUBSCRIPTIONSPERSESSION), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_MAXWHERECLAUSEPARAMETERS), true);
 
     /* ServerCapabilities - LocaleIdArray */
     UA_LocaleId locale_en = UA_STRING("en");
@@ -949,7 +1090,7 @@ initNS0(UA_Server *server) {
     UA_String profileArray[3];
     UA_UInt16 profileArraySize = 0;
 #define ADDPROFILEARRAY(x) profileArray[profileArraySize++] = UA_STRING(x)
-    ADDPROFILEARRAY("http://opcfoundation.org/UA-Profile/Server/MicroEmbeddedDevice");
+    ADDPROFILEARRAY("http://opcfoundation.org/UA-Profile/Server/StandardUA2017");
 #ifdef UA_ENABLE_NODEMANAGEMENT
     ADDPROFILEARRAY("http://opcfoundation.org/UA-Profile/Server/NodeManagement");
 #endif
@@ -976,36 +1117,37 @@ initNS0(UA_Server *server) {
                                                    samplingInterval);
 
     /* ServerCapabilities - OperationLimits - MaxNodesPerRead */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREAD,
-                               &server->config.maxNodesPerRead, &UA_TYPES[UA_TYPES_UINT32]);
+    UA_DataSource operationLimitRead = {readOperationLimits, NULL};
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREAD),
+                                        operationLimitRead);
 
     /* ServerCapabilities - OperationLimits - maxNodesPerWrite */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERWRITE,
-                               &server->config.maxNodesPerWrite, &UA_TYPES[UA_TYPES_UINT32]);
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERWRITE),
+                                        operationLimitRead);
 
     /* ServerCapabilities - OperationLimits - MaxNodesPerMethodCall */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERMETHODCALL,
-                               &server->config.maxNodesPerMethodCall, &UA_TYPES[UA_TYPES_UINT32]);
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERMETHODCALL),
+                                        operationLimitRead);
 
     /* ServerCapabilities - OperationLimits - MaxNodesPerBrowse */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERBROWSE,
-                               &server->config.maxNodesPerBrowse, &UA_TYPES[UA_TYPES_UINT32]);
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERBROWSE),
+                                        operationLimitRead);
 
     /* ServerCapabilities - OperationLimits - MaxNodesPerRegisterNodes */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREGISTERNODES,
-                               &server->config.maxNodesPerRegisterNodes, &UA_TYPES[UA_TYPES_UINT32]);
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREGISTERNODES),
+                                        operationLimitRead);
 
     /* ServerCapabilities - OperationLimits - MaxNodesPerTranslateBrowsePathsToNodeIds */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERTRANSLATEBROWSEPATHSTONODEIDS,
-                               &server->config.maxNodesPerTranslateBrowsePathsToNodeIds, &UA_TYPES[UA_TYPES_UINT32]);
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERTRANSLATEBROWSEPATHSTONODEIDS),
+                                        operationLimitRead);
 
     /* ServerCapabilities - OperationLimits - MaxNodesPerNodeManagement */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERNODEMANAGEMENT,
-                               &server->config.maxNodesPerNodeManagement, &UA_TYPES[UA_TYPES_UINT32]);
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERNODEMANAGEMENT),
+                                        operationLimitRead);
 
     /* ServerCapabilities - OperationLimits - MaxMonitoredItemsPerCall */
-    retVal |= writeNs0Variable(server, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXMONITOREDITEMSPERCALL,
-                               &server->config.maxMonitoredItemsPerCall, &UA_TYPES[UA_TYPES_UINT32]);
+    retVal |= setVariableNode_dataSource(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXMONITOREDITEMSPERCALL),
+                                        operationLimitRead);
 
     /* Remove unused operation limit components */
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERHISTORYREADDATA), true);
@@ -1021,9 +1163,9 @@ initNS0(UA_Server *server) {
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_ESTIMATEDRETURNTIME), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_LOCALTIME), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_REQUESTSERVERSTATECHANGE), true);
-    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_RESENDDATA), true);
-    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVERCONFIGURATION), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SETSUBSCRIPTIONDURABLE), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVERCONFIGURATION_CERTIFICATEGROUPS_DEFAULTHTTPSGROUP), true);
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVERCONFIGURATION_CERTIFICATEGROUPS_DEFAULTUSERTOKENGROUP), true);
 
 #ifdef UA_ENABLE_DIAGNOSTICS
     /* ServerDiagnostics - ServerDiagnosticsSummary */
@@ -1101,11 +1243,14 @@ initNS0(UA_Server *server) {
      * 1.03 in CTT (Base Inforamtion/Base Info Core Structure/ 001.js) In the
      * 1.04 specification this has been resolved by allowing to remove these
      * static nodes as well */
-    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERDIAGNOSTICS_SAMPLINGINTERVALDIAGNOSTICSARRAY), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERDIAGNOSTICS_SESSIONSDIAGNOSTICSSUMMARY), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERDIAGNOSTICS_SERVERDIAGNOSTICSSUMMARY), true);
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERDIAGNOSTICS_SUBSCRIPTIONDIAGNOSTICSARRAY), true);
 #endif
+
+    /* The sampling diagnostics array is optional
+     * TODO: Add support for this diagnostics */
+    deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERDIAGNOSTICS_SAMPLINGINTERVALDIAGNOSTICSARRAY), true);
 
 #ifndef UA_ENABLE_PUBSUB
     deleteNode(server, UA_NODEID_NUMERIC(0, UA_NS0ID_PUBLISHSUBSCRIBE), true);
@@ -1172,8 +1317,13 @@ initNS0(UA_Server *server) {
 #endif
 
 #if defined(UA_ENABLE_METHODCALLS) && defined(UA_ENABLE_SUBSCRIPTIONS)
-    retVal |= setMethodNode_callback(server, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_GETMONITOREDITEMS),
+    retVal |= setMethodNode_callback(server,
+                                     UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_GETMONITOREDITEMS),
                                      readMonitoredItems);
+
+    retVal |= setMethodNode_callback(server,
+                                     UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_RESENDDATA),
+                                     resendData);
 #endif
 
     /* The HasComponent references to the ModellingRules are not part of the
@@ -1183,7 +1333,7 @@ initNS0(UA_Server *server) {
 #endif /* UA_GENERATED_NAMESPACE_ZERO */
 
     if(retVal != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "Initialization of Namespace 0 (after bootstrapping) "
                      "failed with %s. See previous outputs for any error messages.",
                      UA_StatusCode_name(retVal));

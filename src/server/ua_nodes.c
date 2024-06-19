@@ -21,22 +21,21 @@
 #define UA_REFTYPES_ALL_MASK (~(UA_UInt32)0)
 #define UA_REFTYPES_ALL_MASK2 UA_REFTYPES_ALL_MASK, UA_REFTYPES_ALL_MASK
 #define UA_REFTYPES_ALL_MASK4 UA_REFTYPES_ALL_MASK2, UA_REFTYPES_ALL_MASK2
-#if (UA_REFERENCETYPESET_MAX) / 32 > 8
+#if UA_REFERENCETYPESET_MAX / 32 > 8
 # error Adjust macros to support than 256 reference types
-#elif (UA_REFERENCETYPESET_MAX) / 32 == 8
+#elif UA_REFERENCETYPESET_MAX / 32 == 8
 # define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK4, UA_REFTYPES_ALL_MASK4
-#elif (UA_REFERENCETYPESET_MAX) / 32 == 7
-# define UA_REFTYPES_ALL_ARRAY                                          \
-    UA_REFTYPES_ALL_MASK4, UA_REFTYPES_ALL_MASK2, UA_REFTYPES_ALL_MASK
-#elif (UA_REFERENCETYPESET_MAX) / 32 == 6
+#elif UA_REFERENCETYPESET_MAX / 32 == 7
+# define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK4, UA_REFTYPES_ALL_MASK2, UA_REFTYPES_ALL_MASK
+#elif UA_REFERENCETYPESET_MAX / 32 == 6
 # define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK4, UA_REFTYPES_ALL_MASK2
-#elif (UA_REFERENCETYPESET_MAX) / 32 == 5
+#elif UA_REFERENCETYPESET_MAX / 32 == 5
 # define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK4, UA_REFTYPES_ALL_MASK
-#elif (UA_REFERENCETYPESET_MAX) / 32 == 4
+#elif UA_REFERENCETYPESET_MAX / 32 == 4
 # define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK4
-#elif (UA_REFERENCETYPESET_MAX) / 32 == 3
+#elif UA_REFERENCETYPESET_MAX / 32 == 3
 # define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK2, UA_REFTYPES_ALL_MASK
-#elif (UA_REFERENCETYPESET_MAX) / 32 == 2
+#elif UA_REFERENCETYPESET_MAX / 32 == 2
 # define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK2
 #else
 # define UA_REFTYPES_ALL_ARRAY UA_REFTYPES_ALL_MASK
@@ -313,7 +312,7 @@ UA_NodeReferenceKind_switch(UA_NodeReferenceKind *rk) {
         if(!array)
             return UA_STATUSCODE_BADOUTOFMEMORY;
         size_t pos = 0;
-        moveTreeToArray(array, &pos, rk->targets.tree.idTree.root);
+        moveTreeToArray(array, &pos, rk->targets.tree.idRoot);
         rk->targets.array = array;
         rk->hasRefTree = false;
         return UA_STATUSCODE_GOOD;
@@ -322,15 +321,16 @@ UA_NodeReferenceKind_switch(UA_NodeReferenceKind *rk) {
     /* From array to tree */
     UA_NodeReferenceKind newRk = *rk;
     newRk.hasRefTree = true;
-    newRk.targets.tree.idTree.root = NULL;
-    newRk.targets.tree.nameTree.root = NULL;
+    newRk.targets.tree.idRoot = NULL;
+    newRk.targets.tree.nameRoot = NULL;
     newRk.targetsSize = 0;
     for(size_t i = 0; i < rk->targetsSize; i++) {
         UA_StatusCode res =
             addReferenceTarget(&newRk, rk->targets.array[i].targetId,
                                rk->targets.array[i].targetNameHash);
         if(res != UA_STATUSCODE_GOOD) {
-            ZIP_ITER(UA_ReferenceIdTree, &newRk.targets.tree.idTree,
+            ZIP_ITER(UA_ReferenceIdTree,
+                     (UA_ReferenceIdTree*)&newRk.targets.tree.idRoot,
                      removeTreeEntry, NULL);
             return res;
         }
@@ -347,7 +347,8 @@ UA_NodeReferenceKind_iterate(UA_NodeReferenceKind *rk,
                              UA_NodeReferenceKind_iterateCallback callback,
                              void *context) {
     if(rk->hasRefTree)
-        return ZIP_ITER(UA_ReferenceIdTree, &rk->targets.tree.idTree,
+        return ZIP_ITER(UA_ReferenceIdTree,
+                        (UA_ReferenceIdTree*)&rk->targets.tree.idRoot,
                         (UA_ReferenceIdTree_cb)callback, context);
     for(size_t i = 0; i < rk->targetsSize; i++) {
         void *res = callback(context, &rk->targets.array[i]);
@@ -368,7 +369,7 @@ UA_NodeReferenceKind_findTarget(const UA_NodeReferenceKind *rk,
         tmpTarget.targetIdHash = UA_ExpandedNodeId_hash(targetId);
         UA_ReferenceTargetTreeElem *result =
             ZIP_FIND(UA_ReferenceIdTree, (UA_ReferenceIdTree*)
-                     (uintptr_t)&rk->targets.tree.idTree, &tmpTarget);
+                     (uintptr_t)&rk->targets.tree.idRoot, &tmpTarget);
         if(result)
             return &result->target;
     } else {
@@ -624,7 +625,8 @@ UA_Node_copy(const UA_Node *src, UA_Node *dst) {
                     }
                 }
             } else {
-                void *res = ZIP_ITER(UA_ReferenceIdTree, &srefs->targets.tree.idTree,
+                void *res = ZIP_ITER(UA_ReferenceIdTree,
+                                     (UA_ReferenceIdTree*)&srefs->targets.tree.idRoot,
                                      copyTarget, drefs);
                 if(res != NULL) {
                     UA_Node_clear(dst);
@@ -908,8 +910,10 @@ addReferenceTargetToTree(UA_NodeReferenceKind *rk, UA_NodePointer targetId,
     entry->targetIdHash = targetIdHash;
     entry->target.targetNameHash = targetNameHash;
 
-    ZIP_INSERT(UA_ReferenceIdTree, &rk->targets.tree.idTree, entry);
-    ZIP_INSERT(UA_ReferenceNameTree, &rk->targets.tree.nameTree, entry);
+    ZIP_INSERT(UA_ReferenceIdTree,
+               (UA_ReferenceIdTree*)&rk->targets.tree.idRoot, entry);
+    ZIP_INSERT(UA_ReferenceNameTree,
+               (UA_ReferenceNameTree*)&rk->targets.tree.nameRoot, entry);
 
     rk->targetsSize++;
     return UA_STATUSCODE_GOOD;
@@ -1050,8 +1054,10 @@ UA_Node_deleteReference(UA_Node *node, UA_Byte refTypeIndex, UA_Boolean isForwar
             UA_free(refs->targets.array);
         } else {
             UA_ReferenceTargetTreeElem *elem = (UA_ReferenceTargetTreeElem*)target;
-            ZIP_REMOVE(UA_ReferenceIdTree, &refs->targets.tree.idTree, elem);
-            ZIP_REMOVE(UA_ReferenceNameTree, &refs->targets.tree.nameTree, elem);
+            ZIP_REMOVE(UA_ReferenceIdTree,
+                       (UA_ReferenceIdTree*)&refs->targets.tree.idRoot, elem);
+            ZIP_REMOVE(UA_ReferenceNameTree,
+                       (UA_ReferenceNameTree*)&refs->targets.tree.nameRoot, elem);
             UA_NodePointer_clear(&target->targetId);
             UA_free(target);
             if(refs->targetsSize > 0)
@@ -1097,7 +1103,8 @@ UA_Node_deleteReferencesSubset(UA_Node *node, const UA_ReferenceTypeSet *keepSet
                 UA_NodePointer_clear(&refs->targets.array[j].targetId);
             UA_free(refs->targets.array);
         } else {
-            ZIP_ITER(UA_ReferenceIdTree, &refs->targets.tree.idTree,
+            ZIP_ITER(UA_ReferenceIdTree,
+                     (UA_ReferenceIdTree*)&refs->targets.tree.idRoot,
                      removeTreeEntry, NULL);
         }
 

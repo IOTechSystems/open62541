@@ -3,8 +3,10 @@
  * See http://creativecommons.org/publicdomain/zero/1.0/ for more information. */
 
 #include <open62541/plugin/log_stdout.h>
-#include <open62541/plugin/pubsub_udp.h>
 #include <open62541/server.h>
+#include <open62541/server_pubsub.h>
+
+#include <stdlib.h>
 
 /**
  * The PubSub connection example demonstrate the PubSub TransportLayer configuration and
@@ -12,17 +14,6 @@
  */
 int main(void) {
     UA_Server *server = UA_Server_new();
-    UA_ServerConfig *config = UA_Server_getConfig(server);
-
-    /* Add the PubSubTransportLayer implementation to the server config.
-     * The PubSubTransportLayer is a factory to create new connections
-     * on runtime. The UA_PubSubTransportLayer is used for all kinds of
-     * concrete connections e.g. UDP, MQTT, AMQP...
-     *
-     * It is possible to use multiple PubSubTransportLayers on runtime. The
-     * correct factory is selected on runtime by the standard defined PubSub
-     * TransportProfileUri's. */
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDPMP());
 
     /* Create a new ConnectionConfig. The addPubSubConnection function takes the
      * config and create a new connection. The Connection identifier is
@@ -39,8 +30,8 @@ int main(void) {
         {UA_STRING_NULL , UA_STRING("opc.udp://224.0.0.22:4840/")};
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
-    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT32;
-    connectionConfig.publisherId.uint32 = UA_UInt32_random();
+    connectionConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT32;
+    connectionConfig.publisherId.id.uint32 = UA_UInt32_random();
     /* Connection options are given as Key/Value Pairs. The available options are
      * maybe standard or vendor defined. */
     UA_KeyValuePair connectionOptions[3];

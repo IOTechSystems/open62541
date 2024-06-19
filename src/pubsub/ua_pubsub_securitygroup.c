@@ -75,7 +75,7 @@ static void
 updateSKSKeyStorage(UA_Server *server, UA_SecurityGroup *securityGroup){
 
     if(!securityGroup) {
-        UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_PUBSUB,
+        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_PUBSUB,
                        "UpdateSKSKeyStorage callback failed with Error: %s ",
                        UA_StatusCode_name(UA_STATUSCODE_BADINVALIDARGUMENT));
         return;
@@ -89,7 +89,7 @@ updateSKSKeyStorage(UA_Server *server, UA_SecurityGroup *securityGroup){
 
     retval = UA_ByteString_allocBuffer(&newKey, keyLength);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_PUBSUB,
+        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_PUBSUB,
                        "UpdateSKSKeyStorage callback failed to allocate memory for new key with Error: %s ",
                        UA_StatusCode_name(retval));
         return;
@@ -115,7 +115,7 @@ updateSKSKeyStorage(UA_Server *server, UA_SecurityGroup *securityGroup){
         UA_PubSubKeyListItem *newItem =
             UA_PubSubKeyStorage_push(keyStorage, &newKey, newKeyID);
         if(!newItem) {
-            UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_PUBSUB,
+            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_PUBSUB,
                            "UpdateSKSKeyStorage callback failed to add new key to the "
                            "sks keystorage for the SecurityGroup %.*s",
                            (int)securityGroup->securityGroupId.length,
@@ -130,7 +130,8 @@ updateSKSKeyStorage(UA_Server *server, UA_SecurityGroup *securityGroup){
     if(nextCurrentItem)
         keyStorage->currentItem = nextCurrentItem;
 
-    securityGroup->baseTime = UA_DateTime_nowMonotonic();
+    UA_EventLoop *el = server->config.eventLoop;
+    securityGroup->baseTime = el->dateTime_nowMonotonic(el);
 
     /* We allocated memory for data with allocBuffer so now we free it */
     UA_ByteString_clear(&newKey);
@@ -181,13 +182,15 @@ initializeKeyStorageWithKeys(UA_Server *server, UA_SecurityGroup *securityGroup)
     if(retval != UA_STATUSCODE_GOOD)
         goto cleanup;
 
-    securityGroup->baseTime = UA_DateTime_nowMonotonic();
+    UA_EventLoop *el = server->config.eventLoop;
+    securityGroup->baseTime = el->dateTime_nowMonotonic(el);
     retval = addRepeatedCallback(server, (UA_ServerCallback)updateSKSKeyStorage,
                                  securityGroup, securityGroup->config.keyLifeTime,
                                  &securityGroup->callbackId);
 
 cleanup:
-    UA_Array_delete(futurekeys, securityGroup->config.maxFutureKeyCount, &UA_TYPES[UA_TYPES_BYTESTRING]);
+    UA_Array_delete(futurekeys, securityGroup->config.maxFutureKeyCount,
+                    &UA_TYPES[UA_TYPES_BYTESTRING]);
     UA_ByteString_clear(&currentKey);
     if(retval != UA_STATUSCODE_GOOD)
         UA_PubSubKeyStorage_delete(server, ks);
@@ -228,12 +231,14 @@ addSecurityGroup(UA_Server *server, UA_NodeId securityGroupFolderNodeId,
     memset(newSecurityGroup, 0, sizeof(UA_SecurityGroup));
     UA_SecurityGroupConfig_copy(securityGroupConfig, &newSecurityGroup->config);
 
+#ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
     retval = UA_NodeId_copy(&securityGroupFolderNodeId,
                             &newSecurityGroup->securityGroupFolderId);
     if(retval != UA_STATUSCODE_GOOD) {
         UA_SecurityGroup_delete(newSecurityGroup);
         return retval;
     }
+#endif
 
     retval = UA_String_copy(&securityGroupConfig->securityGroupName,
                             &newSecurityGroup->securityGroupId);
@@ -251,7 +256,7 @@ addSecurityGroup(UA_Server *server, UA_NodeId securityGroupFolderNodeId,
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
     retval = addSecurityGroupRepresentation(server, newSecurityGroup);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "Add SecurityGroup failed with error: %s.",
                      UA_StatusCode_name(retval));
         UA_SecurityGroup_delete(newSecurityGroup);
@@ -303,7 +308,9 @@ static void
 UA_SecurityGroup_clear(UA_SecurityGroup *securityGroup) {
     UA_SecurityGroupConfig_clear(&securityGroup->config);
     UA_String_clear(&securityGroup->securityGroupId);
+#ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
     UA_NodeId_clear(&securityGroup->securityGroupFolderId);
+#endif
     UA_NodeId_clear(&securityGroup->securityGroupNodeId);
 }
 

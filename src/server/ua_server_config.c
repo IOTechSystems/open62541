@@ -11,7 +11,7 @@
 #include "ua_server_internal.h"
 
 void
-UA_ServerConfig_clean(UA_ServerConfig *config) {
+UA_ServerConfig_clear(UA_ServerConfig *config) {
     if(!config)
         return;
 
@@ -71,8 +71,10 @@ UA_ServerConfig_clean(UA_ServerConfig *config) {
     }
 
     /* Certificate Validation */
-    if(config->certificateVerification.clear)
-        config->certificateVerification.clear(&config->certificateVerification);
+    if(config->secureChannelPKI.clear)
+        config->secureChannelPKI.clear(&config->secureChannelPKI);
+    if(config->sessionPKI.clear)
+        config->sessionPKI.clear(&config->sessionPKI);
 
     /* Access Control */
     if(config->accessControl.clear)
@@ -83,19 +85,6 @@ UA_ServerConfig_clean(UA_ServerConfig *config) {
     if(config->historyDatabase.clear)
         config->historyDatabase.clear(&config->historyDatabase);
 #endif
-
-    /* Logger */
-    if(config->logging != NULL) {
-        if((config->logging != &config->logger) &&
-           (config->logging->clear != NULL)) {
-            config->logging->clear(config->logging->context);
-        }
-        config->logging = NULL;
-    }
-    if(config->logger.clear)
-        config->logger.clear(config->logger.context);
-    config->logger.log = NULL;
-    config->logger.clear = NULL;
 
 #ifdef UA_ENABLE_PUBSUB
 #ifdef UA_ENABLE_PUBSUB_ENCRYPTION
@@ -110,26 +99,12 @@ UA_ServerConfig_clean(UA_ServerConfig *config) {
 #endif
 #endif /* UA_ENABLE_PUBSUB */
 
+    /* Logger */
+    if(config->logging != NULL && config->logging->clear != NULL)
+        config->logging->clear(config->logging);
+    config->logging = NULL;
+
     /* Custom Data Types */
     UA_cleanupDataTypeWithCustom(config->customDataTypes);
+    config->customDataTypes = NULL;
 }
-
-#ifdef UA_ENABLE_PUBSUB
-/* Add a pubsubTransportLayer to the configuration. Memory is reallocated on
- * demand. */
-UA_StatusCode
-UA_ServerConfig_addPubSubTransportLayer(UA_ServerConfig *config,
-                                        UA_PubSubTransportLayer pubsubTransportLayer) {
-    UA_PubSubTransportLayer *tmpLayers = (UA_PubSubTransportLayer*)
-        UA_realloc(config->pubSubConfig.transportLayers,
-                   sizeof(UA_PubSubTransportLayer) *
-                   (config->pubSubConfig.transportLayersSize + 1));
-    if(tmpLayers == NULL)
-        return UA_STATUSCODE_BADOUTOFMEMORY;
-
-    config->pubSubConfig.transportLayers = tmpLayers;
-    config->pubSubConfig.transportLayers[config->pubSubConfig.transportLayersSize] = pubsubTransportLayer;
-    config->pubSubConfig.transportLayersSize++;
-    return UA_STATUSCODE_GOOD;
-}
-#endif /* UA_ENABLE_PUBSUB */

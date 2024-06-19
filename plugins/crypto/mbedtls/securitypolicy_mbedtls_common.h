@@ -24,7 +24,7 @@ _UA_BEGIN_DECLS
 void
 swapBuffers(UA_ByteString *const bufA, UA_ByteString *const bufB);
 
-void
+UA_StatusCode
 mbedtls_hmac(mbedtls_md_context_t *context, const UA_ByteString *key,
              const UA_ByteString *in, unsigned char *out);
 
@@ -57,7 +57,7 @@ mbedtls_encrypt_rsaOaep(mbedtls_rsa_context *context,
 UA_StatusCode
 mbedtls_decrypt_rsaOaep(mbedtls_pk_context *localPrivateKey,
                         mbedtls_ctr_drbg_context *drbgContext,
-                        UA_ByteString *data);
+                        UA_ByteString *data, int hash_id);
 
 int UA_mbedTLS_LoadPrivateKey(const UA_ByteString *key, mbedtls_pk_context *target, void *p_rng);
 

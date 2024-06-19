@@ -31,27 +31,38 @@ typedef struct UA_Subscription UA_Subscription;
 typedef struct UA_PublishResponseEntry {
     SIMPLEQ_ENTRY(UA_PublishResponseEntry) listEntry;
     UA_UInt32 requestId;
+    UA_DateTime maxTime; /* Based on the TimeoutHint of the request */
     UA_PublishResponse response;
 } UA_PublishResponseEntry;
 #endif
 
-typedef struct {
-    UA_SessionHeader  header;
+struct UA_Session {
+    UA_Session *next; /* singly-linked list */
+    UA_SecureChannel *channel; /* The pointer back to the SecureChannel in the session. */
+
+    UA_NodeId sessionId;
+    UA_NodeId authenticationToken;
+    UA_String sessionName;
+    UA_Boolean activated;
+
+    void *context; /* Pointer assigned by the user in the
+                    * accessControl->activateSession context */
+
+    UA_ByteString serverNonce;
+
     UA_ApplicationDescription clientDescription;
-    UA_String         sessionName;
-    UA_Boolean        activated;
-    void             *sessionHandle; /* pointer assigned in userland-callback */
-    UA_NodeId         sessionId;
-    UA_UInt32         maxRequestMessageSize;
-    UA_UInt32         maxResponseMessageSize;
-    UA_Double         timeout; /* in ms */
-    UA_DateTime       validTill;
-    UA_ByteString     serverNonce;
+    UA_String clientUserIdOfSession;
+    UA_Double timeout; /* in ms */
+    UA_DateTime validTill;
+
+    UA_KeyValueMap *attributes;
+
+    /* TODO: Currently unused */
+    UA_UInt32 maxRequestMessageSize;
+    UA_UInt32 maxResponseMessageSize;
 
     UA_UInt16         availableContinuationPoints;
     ContinuationPoint *continuationPoints;
-
-    UA_KeyValueMap *attributes;
 
     /* Localization information */
     size_t localeIdsSize;
@@ -75,7 +86,7 @@ typedef struct {
     UA_SessionSecurityDiagnosticsDataType securityDiagnostics;
     UA_SessionDiagnosticsDataType diagnostics;
 #endif
-} UA_Session;
+};
 
 /**
  * Session Lifecycle
@@ -88,7 +99,8 @@ void UA_Session_detachFromSecureChannel(UA_Session *session);
 UA_StatusCode UA_Session_generateNonce(UA_Session *session);
 
 /* If any activity on a session happens, the timeout is extended */
-void UA_Session_updateLifetime(UA_Session *session);
+void UA_Session_updateLifetime(UA_Session *session, UA_DateTime now,
+                               UA_DateTime nowMonotonic);
 
 /**
  * Subscription handling
@@ -134,10 +146,10 @@ UA_Session_dequeuePublishReq(UA_Session *session);
         int nameLen = (SESSION) ? (int)(SESSION)->sessionName.length : 0; \
         const char *nameStr = (SESSION) ?                               \
             (const char*)(SESSION)->sessionName.data : "";              \
-        unsigned long sockId = ((SESSION) && (SESSION)->header.channel) ? \
-            (unsigned long)(SESSION)->header.channel->connectionId : 0; \
-        UA_UInt32 chanId = ((SESSION) && (SESSION)->header.channel) ?   \
-            (SESSION)->header.channel->securityToken.channelId : 0;     \
+        unsigned long sockId = ((SESSION) && (SESSION)->channel) ? \
+            (unsigned long)(SESSION)->channel->connectionId : 0; \
+        UA_UInt32 chanId = ((SESSION) && (SESSION)->channel) ?   \
+            (SESSION)->channel->securityToken.channelId : 0;     \
         UA_LOG_##LEVEL(LOGGER, UA_LOGCATEGORY_SESSION,                  \
                        "TCP %lu\t| SC %" PRIu32 "\t| Session \"%.*s\"\t| " MSG "%.0s", \
                        sockId, chanId, nameLen, nameStr, __VA_ARGS__);   \

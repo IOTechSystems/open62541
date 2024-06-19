@@ -15,7 +15,7 @@ Client_warnEndpointsResult(UA_Client *client,
                            const UA_GetEndpointsResponse *response,
                            const UA_String *endpointUrl) {
     if(response->endpointsSize == 0) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
                        "The server did not return any endpoints. "
                        "Did you use the correct endpointUrl?");
         return;
@@ -27,7 +27,7 @@ Client_warnEndpointsResult(UA_Client *client,
         UA_String *betterUrl = &response->endpoints[0].endpointUrl;
         if(response->endpoints[0].server.discoveryUrlsSize > 0)
             betterUrl = &response->endpoints[0].server.discoveryUrls[0];
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
                        "The server returned Endpoints with a different EndpointUrl %.*s than was "
                        "used to initialize the connection: %.*s. Some servers require a complete "
                        "match of the EndpointUrl/DiscoveryUrl (including the path) "
@@ -46,7 +46,6 @@ getEndpointsInternal(UA_Client *client, const UA_String endpointUrl,
 
     UA_GetEndpointsRequest request;
     UA_GetEndpointsRequest_init(&request);
-    request.requestHeader.timestamp = UA_DateTime_now();
     request.requestHeader.timeoutHint = 10000;
     // assume the endpointurl outlives the service call
     request.endpointUrl = endpointUrl;
@@ -57,15 +56,12 @@ getEndpointsInternal(UA_Client *client, const UA_String endpointUrl,
 
     if(response.responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
         UA_StatusCode retval = response.responseHeader.serviceResult;
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "GetEndpointRequest failed with error code %s",
                      UA_StatusCode_name(retval));
         UA_GetEndpointsResponse_clear(&response);
         return retval;
     }
-
-    /* Warn if the Endpoints look incomplete / don't match the EndpointUrl */
-    Client_warnEndpointsResult(client, &response, &endpointUrl);
 
     *endpointDescriptions = response.endpoints;
     *endpointDescriptionsSize = response.endpointsSize;
@@ -92,11 +88,11 @@ UA_Client_getEndpoints(UA_Client *client, const char *serverUrl,
     UA_StatusCode retval;
     const UA_String url = UA_STRING((char*)(uintptr_t)serverUrl);
     if(!connected) {
-        UA_UNLOCK(&client->clientMutex);
-        retval = UA_Client_connectSecureChannel(client, serverUrl);
-        if(retval != UA_STATUSCODE_GOOD)
+        retval = connectSecureChannel(client, serverUrl);
+        if(retval != UA_STATUSCODE_GOOD) {
+            UA_UNLOCK(&client->clientMutex);
             return retval;
-        UA_LOCK(&client->clientMutex);
+        }
     }
     retval = getEndpointsInternal(client, url, endpointDescriptionsSize,
                                   endpointDescriptions);
@@ -124,11 +120,11 @@ UA_Client_findServers(UA_Client *client, const char *serverUrl,
 
     UA_StatusCode retval;
     if(!connected) {
-        UA_UNLOCK(&client->clientMutex);
-        retval = UA_Client_connectSecureChannel(client, serverUrl);
-        if(retval != UA_STATUSCODE_GOOD)
+        retval = connectSecureChannel(client, serverUrl);
+        if(retval != UA_STATUSCODE_GOOD) {
+            UA_UNLOCK(&client->clientMutex);
             return retval;
-        UA_LOCK(&client->clientMutex);
+        }
     }
 
     /* Prepare the request */
@@ -165,8 +161,6 @@ UA_Client_findServers(UA_Client *client, const char *serverUrl,
     return retval;
 }
 
-#ifdef UA_ENABLE_DISCOVERY
-
 UA_StatusCode
 UA_Client_findServersOnNetwork(UA_Client *client, const char *serverUrl,
                                UA_UInt32 startingRecordId, UA_UInt32 maxRecordsToReturn,
@@ -184,11 +178,11 @@ UA_Client_findServersOnNetwork(UA_Client *client, const char *serverUrl,
 
     UA_StatusCode retval;
     if(!connected) {
-        UA_UNLOCK(&client->clientMutex);
-        retval = UA_Client_connectSecureChannel(client, serverUrl);
-        if(retval != UA_STATUSCODE_GOOD)
+        retval = connectSecureChannel(client, serverUrl);
+        if(retval != UA_STATUSCODE_GOOD) {
+            UA_LOCK(&client->clientMutex);
             return retval;
-        UA_LOCK(&client->clientMutex);
+        }
     }
 
     /* Prepare the request */
@@ -224,5 +218,3 @@ UA_Client_findServersOnNetwork(UA_Client *client, const char *serverUrl,
         UA_Client_disconnect(client);
     return retval;
 }
-
-#endif

@@ -210,7 +210,7 @@ asym_decrypt_sp_aes128sha256rsaoaep(Aes128Sha256PsaOaep_ChannelContext *cc,
     if(cc == NULL || data == NULL)
         return UA_STATUSCODE_BADINTERNALERROR;
     return mbedtls_decrypt_rsaOaep(&cc->policyContext->localPrivateKey,
-                                   &cc->policyContext->drbgContext, data);
+                                   &cc->policyContext->drbgContext, data, MBEDTLS_MD_SHA1);
 }
 
 static size_t
@@ -261,7 +261,9 @@ sym_verify_sp_aes128sha256rsaoaep(Aes128Sha256PsaOaep_ChannelContext *cc,
         return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
     Aes128Sha256PsaOaep_PolicyContext *pc = cc->policyContext;
     unsigned char mac[UA_SHA256_LENGTH];
-    mbedtls_hmac(&pc->sha256MdContext, &cc->remoteSymSigningKey, message, mac);
+    if(mbedtls_hmac(&pc->sha256MdContext, &cc->remoteSymSigningKey,
+                    message, mac) != UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
 
     /* Compare with Signature */
     if(!UA_constantTimeEqual(signature->data, mac, UA_SHA256_LENGTH))
@@ -276,8 +278,10 @@ sym_sign_sp_aes128sha256rsaoaep(const Aes128Sha256PsaOaep_ChannelContext *cc,
     if(signature->length != UA_SHA256_LENGTH)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    mbedtls_hmac(&cc->policyContext->sha256MdContext, &cc->localSymSigningKey,
-                 message, signature->data);
+    if(mbedtls_hmac(&cc->policyContext->sha256MdContext, &cc->localSymSigningKey,
+                    message, signature->data) != UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+
     return UA_STATUSCODE_GOOD;
 }
 
@@ -725,6 +729,7 @@ UA_SecurityPolicy_Aes128Sha256RsaOaep(UA_SecurityPolicy *policy, const UA_ByteSt
     policy->logger = logger;
 
     policy->policyUri = UA_STRING("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
+    policy->securityLevel = 10;
 
     UA_SecurityPolicyAsymmetricModule *const asymmetricModule = &policy->asymmetricModule;
     UA_SecurityPolicySymmetricModule *const symmetricModule = &policy->symmetricModule;

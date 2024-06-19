@@ -8,7 +8,7 @@
 
 #include <open62541/client_config_default.h>
 #include <open62541/plugin/securitypolicy_default.h>
-#include <open62541/plugin/pki_default.h>
+#include <open62541/plugin/certificategroup_default.h>
 #include <open62541/server_config_default.h>
 
 #include "client/ua_client_internal.h"
@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "test_helpers.h"
 #include "certificates.h"
 #include "testing_clock.h"
 #include "testing_networklayers.h"
@@ -65,15 +66,15 @@ static void setup(void) {
     UA_ByteString *revocationList = NULL;
     size_t revocationListSize = 0;
 
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTestWithSecurityPolicies(4840, &certificate, &privateKey,
+                                                          trustList, trustListSize,
+                                                          issuerList, issuerListSize,
+                                                          revocationList, revocationListSize);
     ck_assert(server != NULL);
+
     UA_ServerConfig *config = UA_Server_getConfig(server);
-    UA_ServerConfig_setDefaultWithSecurityPolicies(config, 4840, &certificate, &privateKey,
-                                                   trustList, trustListSize,
-                                                   issuerList, issuerListSize,
-                                                   revocationList, revocationListSize);
-    config->certificateVerification.clear(&config->certificateVerification);
-    UA_CertificateVerification_AcceptAll(&config->certificateVerification);
+    UA_CertificateGroup_AcceptAll(&config->secureChannelPKI);
+    UA_CertificateGroup_AcceptAll(&config->sessionPKI);
 
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
@@ -117,8 +118,7 @@ START_TEST(encryption_connect) {
     /* The Get endpoint (discovery service) is done with
      * security mode as none to see the server's capability
      * and certificate */
-    client = UA_Client_new();
-    UA_ClientConfig_setDefault(UA_Client_getConfig(client));
+    client = UA_Client_newForUnitTest();
     ck_assert(client != NULL);
     UA_StatusCode retval = UA_Client_getEndpoints(client, "opc.tcp://localhost:4840",
                                                   &endpointArraySize, &endpointArray);
@@ -146,13 +146,13 @@ START_TEST(encryption_connect) {
     UA_Client_delete(client);
 
     /* Secure client initialization */
-    client = UA_Client_new();
+    client = UA_Client_newForUnitTest();
     UA_ClientConfig *cc = UA_Client_getConfig(client);
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
                                          revocationList, revocationListSize);
     cc->certificateVerification.clear(&cc->certificateVerification);
-    UA_CertificateVerification_AcceptAll(&cc->certificateVerification);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15");
     ck_assert(client != NULL);
@@ -200,8 +200,7 @@ START_TEST(encryption_connect_pem) {
     /* The Get endpoint (discovery service) is done with
      * security mode as none to see the server's capability
      * and certificate */
-    client = UA_Client_new();
-    UA_ClientConfig_setDefault(UA_Client_getConfig(client));
+    client = UA_Client_newForUnitTest();
     ck_assert(client != NULL);
     UA_StatusCode retval = UA_Client_getEndpoints(client, "opc.tcp://localhost:4840",
                                                   &endpointArraySize, &endpointArray);
@@ -229,13 +228,13 @@ START_TEST(encryption_connect_pem) {
     UA_Client_delete(client);
 
     /* Secure client initialization */
-    client = UA_Client_new();
+    client = UA_Client_newForUnitTest();
     UA_ClientConfig *cc = UA_Client_getConfig(client);
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
                                          revocationList, revocationListSize);
     cc->certificateVerification.clear(&cc->certificateVerification);
-    UA_CertificateVerification_AcceptAll(&cc->certificateVerification);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15");
     ck_assert(client != NULL);

@@ -6,17 +6,17 @@
  * Copyright (c) 2019 Kalycito Infotech Private Limited
  */
 
-#include <open62541/plugin/pubsub.h>
-#include <open62541/plugin/pubsub_udp.h>
 #include <open62541/server_config_default.h>
 #include <open62541/server_pubsub.h>
 #include <open62541/types.h>
 #include <open62541/types_generated.h>
 
 #include "ua_server_internal.h"
+#include "test_helpers.h"
 
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "check.h"
 
@@ -27,12 +27,10 @@ UA_NodeId connection1, connection2, writerGroup1, writerGroup2, writerGroup3,
         dataSetWriter4, readerGroup1, dataSetReader1;
 
 static void setup(void) {
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
-    UA_ServerConfig *config = UA_Server_getConfig(server);
-    UA_ServerConfig_setDefault(config);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDP());
-    UA_Server_run_startup(server);
+    UA_StatusCode retVal = UA_Server_run_startup(server);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 }
 
 static void teardown(void) {
@@ -45,7 +43,7 @@ static void addPublishedDataSet(UA_String pdsName, UA_NodeId *assignedId){
     memset(&pdsConfig, 0, sizeof(UA_PublishedDataSetConfig));
     pdsConfig.publishedDataSetType = UA_PUBSUB_DATASET_PUBLISHEDITEMS;
     pdsConfig.name = pdsName;
-    UA_Server_addPublishedDataSet(server, &pdsConfig, assignedId);
+    ck_assert_int_eq(UA_Server_addPublishedDataSet(server, &pdsConfig, assignedId).addResult, UA_STATUSCODE_GOOD);
 }
 
 static void addDataSetField(UA_NodeId publishedDataSetIdent) {
@@ -59,8 +57,8 @@ static void addDataSetField(UA_NodeId publishedDataSetIdent) {
     dataSetFieldConfig.field.variable.publishParameters.publishedVariable =
     UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
     dataSetFieldConfig.field.variable.publishParameters.attributeId = UA_ATTRIBUTEID_VALUE;
-    UA_Server_addDataSetField(server, publishedDataSetIdent,
-                              &dataSetFieldConfig, &dataSetFieldIdent);
+    ck_assert_int_eq(UA_Server_addDataSetField(server, publishedDataSetIdent,
+                              &dataSetFieldConfig, &dataSetFieldIdent).result, UA_STATUSCODE_GOOD);
 }
 
 static void addPubSubConnection(UA_String connectionName, UA_String addressUrl, UA_NodeId *assignedId){
@@ -71,7 +69,7 @@ static void addPubSubConnection(UA_String connectionName, UA_String addressUrl, 
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri = UA_STRING("http://opcfoundation.org/UA-Profile/Transport/pubsub-udp-uadp");
-    UA_Server_addPubSubConnection(server, &connectionConfig, assignedId);
+    ck_assert_int_eq(UA_Server_addPubSubConnection(server, &connectionConfig, assignedId), UA_STATUSCODE_GOOD);
 }
 
 static void addWriterGroup(UA_NodeId parentConnection, UA_String name, UA_Duration interval, UA_NodeId *assignedId){
@@ -80,29 +78,28 @@ static void addWriterGroup(UA_NodeId parentConnection, UA_String name, UA_Durati
     writerGroupConfig.name = name;
     writerGroupConfig.publishingInterval = interval;
     writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_UADP;
-    UA_Server_addWriterGroup(server, parentConnection, &writerGroupConfig, assignedId);
-    UA_Server_setWriterGroupOperational(server, *assignedId);
+    ck_assert_int_eq(UA_Server_addWriterGroup(server, parentConnection, &writerGroupConfig, assignedId), UA_STATUSCODE_GOOD);
 }
 
 static void addDataSetWriter(UA_NodeId parentWriterGroup, UA_NodeId connectedPDS, UA_String name, UA_NodeId *assignedId){
     UA_DataSetWriterConfig dataSetWriterConfig;
     memset(&dataSetWriterConfig, 0, sizeof(dataSetWriterConfig));
     dataSetWriterConfig.name = name;
-    UA_Server_addDataSetWriter(server, parentWriterGroup, connectedPDS, &dataSetWriterConfig, assignedId);
+    ck_assert_int_eq(UA_Server_addDataSetWriter(server, parentWriterGroup, connectedPDS, &dataSetWriterConfig, assignedId), UA_STATUSCODE_GOOD);
 }
 
 static void addReaderGroup(UA_NodeId parentConnection, UA_String name, UA_NodeId *assignedId){
     UA_ReaderGroupConfig readerGroupConfig;
     memset(&readerGroupConfig, 0, sizeof(readerGroupConfig));
     readerGroupConfig.name = name;
-    UA_Server_addReaderGroup(server, parentConnection, &readerGroupConfig, assignedId);
+    ck_assert_int_eq(UA_Server_addReaderGroup(server, parentConnection, &readerGroupConfig, assignedId), UA_STATUSCODE_GOOD);
 }
 
 static void addDataSetReader(UA_NodeId parentReaderGroup, UA_String name, UA_NodeId *assignedId){
     UA_DataSetReaderConfig readerConfig;
     memset(&readerConfig, 0, sizeof(readerConfig));
     readerConfig.name = name;
-    UA_Server_addDataSetReader(server, parentReaderGroup, &readerConfig, assignedId);
+    ck_assert_int_eq(UA_Server_addDataSetReader(server, parentReaderGroup, &readerConfig, assignedId), UA_STATUSCODE_GOOD);
 }
 
 static UA_Boolean doubleEqual(UA_Double a, UA_Double b, UA_Double maxAbsDelta){
@@ -139,11 +136,11 @@ static void setupBasicPubSubConfiguration(void){
     addPublishedDataSet(UA_STRING("PublishedDataSet 1"), &publishedDataSet1);
     addPublishedDataSet(UA_STRING("PublishedDataSet 2"), &publishedDataSet2);
     addWriterGroup(connection1, UA_STRING("WriterGroup 1"), 10, &writerGroup1);
-    UA_Server_setWriterGroupOperational(server, writerGroup1);
+    UA_Server_enableWriterGroup(server, writerGroup1);
     addWriterGroup(connection1, UA_STRING("WriterGroup 2"), 100, &writerGroup2);
-    UA_Server_setWriterGroupOperational(server, writerGroup2);
+    UA_Server_enableWriterGroup(server, writerGroup2);
     addWriterGroup(connection2, UA_STRING("WriterGroup 3"), 1000, &writerGroup3);
-    UA_Server_setWriterGroupOperational(server, writerGroup3);
+    UA_Server_enableWriterGroup(server, writerGroup3);
     addDataSetWriter(writerGroup1, publishedDataSet1, UA_STRING("DataSetWriter 1"), &dataSetWriter1);
     addDataSetWriter(writerGroup1, publishedDataSet2, UA_STRING("DataSetWriter 2"), &dataSetWriter2);
     addDataSetWriter(writerGroup2, publishedDataSet2, UA_STRING("DataSetWriter 3"), &dataSetWriter3);
@@ -151,8 +148,8 @@ static void setupBasicPubSubConfiguration(void){
     memset(&dataSetWriterConfig, 0, sizeof(UA_DataSetWriterConfig));
     dataSetWriterConfig.name = UA_STRING("Demo DataSetWriter");
     dataSetWriterConfig.dataSetWriterId = 62541;
-    UA_Server_addDataSetWriter(server, writerGroup1, publishedDataSet2,
-                               &dataSetWriterConfig, &dataSetWriter4);
+    ck_assert_int_eq(UA_Server_addDataSetWriter(server, writerGroup1, publishedDataSet2,
+                               &dataSetWriterConfig, &dataSetWriter4), UA_STATUSCODE_GOOD);
     addReaderGroup(connection1, UA_STRING("ReaderGroup 1"), &readerGroup1);
     addDataSetReader(readerGroup1, UA_STRING("DataSetReader 1"), &dataSetReader1);
 }
@@ -239,11 +236,25 @@ START_TEST(AddSingleWriterGroupAndCheckInformationModelRepresentation){
     addPublishedDataSet(pdsName, &publishedDataSet1);
     UA_String wgName = UA_STRING("WriterGroup 1");
     addWriterGroup(connection1, wgName, 10, &writerGroup1);
-    UA_Server_setWriterGroupOperational(server, writerGroup1);
+    UA_Server_enableWriterGroup(server, writerGroup1);
     UA_QualifiedName browseName;
     ck_assert_int_eq(UA_Server_readBrowseName(server, writerGroup1, &browseName), UA_STATUSCODE_GOOD);
     ck_assert_int_eq(UA_String_equal(&browseName.name, &wgName), UA_TRUE);
     UA_QualifiedName_clear(&browseName);
+
+    UA_Variant value;
+    UA_Variant_init(&value);
+    UA_NodeId  statusIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              writerGroup1);
+
+    UA_NodeId stateIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              statusIdNode);
+
+    ck_assert_int_eq(UA_Server_readValue(server, stateIdNode, &value), UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&value);
+
     } END_TEST
 
 START_TEST(AddRemoveAddSingleWriterGroupAndCheckInformationModelRepresentation){
@@ -253,14 +264,14 @@ START_TEST(AddRemoveAddSingleWriterGroupAndCheckInformationModelRepresentation){
     addPublishedDataSet(pdsName, &publishedDataSet1);
     UA_String wgName = UA_STRING("WriterGroup 1");
     addWriterGroup(connection1, wgName, 10, &writerGroup1);
-    UA_Server_setWriterGroupOperational(server, writerGroup1);
+    UA_Server_enableWriterGroup(server, writerGroup1);
     UA_QualifiedName browseName;
     UA_StatusCode retVal;
     ck_assert_int_eq(UA_Server_removeWriterGroup(server, writerGroup1), UA_STATUSCODE_GOOD);
     retVal = UA_Server_readBrowseName(server, writerGroup1, &browseName);
     ck_assert_int_eq(retVal, UA_STATUSCODE_BADNODEIDUNKNOWN);
     addWriterGroup(connection1, wgName, 10, &writerGroup1);
-    UA_Server_setWriterGroupOperational(server, writerGroup1);
+    UA_Server_enableWriterGroup(server, writerGroup1);
     retVal = UA_Server_readBrowseName(server, writerGroup1, &browseName);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
     ck_assert_int_eq(UA_String_equal(&browseName.name, &wgName), UA_TRUE);
@@ -274,13 +285,26 @@ START_TEST(AddSingleDataSetWriterAndCheckInformationModelRepresentation){
     addPublishedDataSet(pdsName, &publishedDataSet1);
     UA_String wgName = UA_STRING("WriterGroup 1");
     addWriterGroup(connection1, wgName, 10, &writerGroup1);
-    UA_Server_setWriterGroupOperational(server, writerGroup1);
+    UA_Server_enableWriterGroup(server, writerGroup1);
     UA_String dswName = UA_STRING("DataSetWriter 1");
     addDataSetWriter(writerGroup1, publishedDataSet1, dswName, &dataSetWriter1);
     UA_QualifiedName browseName;
     ck_assert_int_eq(UA_Server_readBrowseName(server, dataSetWriter1, &browseName), UA_STATUSCODE_GOOD);
     ck_assert_int_eq(UA_String_equal(&browseName.name, &dswName), UA_TRUE);
     UA_QualifiedName_clear(&browseName);
+    UA_Variant value;
+    UA_Variant_init(&value);
+    UA_NodeId  statusIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              dataSetWriter1);
+
+    UA_NodeId stateIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              statusIdNode);
+
+    ck_assert_int_eq(UA_Server_readValue(server, stateIdNode, &value), UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&value);
+
     } END_TEST
 
 START_TEST(AddRemoveAddSingleDataSetWriterAndCheckInformationModelRepresentation){
@@ -290,7 +314,7 @@ START_TEST(AddRemoveAddSingleDataSetWriterAndCheckInformationModelRepresentation
     addPublishedDataSet(pdsName, &publishedDataSet1);
     UA_String wgName = UA_STRING("WriterGroup 1");
     addWriterGroup(connection1, wgName, 10, &writerGroup1);
-    UA_Server_setWriterGroupOperational(server, writerGroup1);
+    UA_Server_enableWriterGroup(server, writerGroup1);
     UA_String dswName = UA_STRING("DataSetWriter 1");
     addDataSetWriter(writerGroup1, publishedDataSet1, dswName, &dataSetWriter1);
     UA_QualifiedName browseName;
@@ -366,8 +390,24 @@ START_TEST(AddSingleDataSetReaderAndCheckInformationModelRepresentation){
     addDataSetReader(readerGroup1, dsrName, &dataSetReader1);
     UA_QualifiedName browseName;
     ck_assert_int_eq(UA_Server_readBrowseName(server, dataSetReader1, &browseName), UA_STATUSCODE_GOOD);
+
     ck_assert_int_eq(UA_String_equal(&browseName.name, &dsrName), UA_TRUE);
+    
     UA_QualifiedName_clear(&browseName);
+
+    UA_Variant value;
+    UA_Variant_init(&value);
+    UA_NodeId  statusIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              dataSetReader1);
+
+    UA_NodeId stateIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              statusIdNode);
+
+    ck_assert_int_eq(UA_Server_readValue(server, stateIdNode, &value), UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&value);
+
     } END_TEST
 
 START_TEST(AddRemoveAddSingleDataSetReaderAndCheckInformationModelRepresentation){
@@ -398,6 +438,20 @@ START_TEST(AddSingleReaderGroupAndCheckInformationModelRepresentation){
     ck_assert_int_eq(UA_Server_readBrowseName(server, readerGroup1, &browseName), UA_STATUSCODE_GOOD);
     ck_assert_int_eq(UA_String_equal(&browseName.name, &rgName), UA_TRUE);
     UA_QualifiedName_clear(&browseName);
+
+    UA_Variant value;
+    UA_Variant_init(&value);
+    UA_NodeId  statusIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              readerGroup1);
+
+    UA_NodeId stateIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                              UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                              statusIdNode);
+
+    ck_assert_int_eq(UA_Server_readValue(server, stateIdNode, &value), UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&value);
+
     } END_TEST
 
 START_TEST(AddRemoveAddSingleReaderGroupAndCheckInformationModelRepresentation){

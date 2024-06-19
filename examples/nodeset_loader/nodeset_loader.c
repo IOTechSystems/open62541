@@ -6,6 +6,9 @@
 #include <open62541/server_config_default.h>
 #include <open62541/plugin/nodesetloader.h>
 
+#include <signal.h>
+#include <stdio.h>
+
 UA_Boolean running = true;
 static void stopHandler(int sign) {
     UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "received ctrl-c");
@@ -21,7 +24,7 @@ int main(int argc, const char *argv[]) {
     UA_Server_run_startup(server);
 
     for (int cnt = 1; cnt < argc; cnt++) {
-        if (!UA_Server_loadNodeset(server, argv[cnt], NULL)) {
+        if (UA_StatusCode_isBad(UA_Server_loadNodeset(server, argv[cnt], NULL))) {
             printf("Nodeset %s could not be loaded, exit\n", argv[cnt]);
             return EXIT_FAILURE;
         }

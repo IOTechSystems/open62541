@@ -11,7 +11,6 @@
  */
 
 #include <open62541/plugin/securitypolicy.h>
-#include <open62541/plugin/pki.h>
 #include <open62541/types.h>
 #include <open62541/util.h>
 
@@ -150,7 +149,7 @@ asym_decrypt_sp_basic256(Basic256_ChannelContext *cc,
     if(cc == NULL || data == NULL)
         return UA_STATUSCODE_BADINTERNALERROR;
     return mbedtls_decrypt_rsaOaep(&cc->policyContext->localPrivateKey,
-                                   &cc->policyContext->drbgContext, data);
+                                   &cc->policyContext->drbgContext, data, MBEDTLS_MD_SHA1);
 }
 
 static size_t
@@ -215,7 +214,9 @@ sym_verify_sp_basic256(Basic256_ChannelContext *cc,
     Basic256_PolicyContext *pc = cc->policyContext;
 
     unsigned char mac[UA_SHA1_LENGTH];
-    mbedtls_hmac(&pc->sha1MdContext, &cc->remoteSymSigningKey, message, mac);
+    if(mbedtls_hmac(&pc->sha1MdContext, &cc->remoteSymSigningKey,
+                    message, mac) != UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
 
     /* Compare with Signature */
     if(!UA_constantTimeEqual(signature->data, mac, UA_SHA1_LENGTH))
@@ -229,8 +230,10 @@ sym_sign_sp_basic256(const Basic256_ChannelContext *cc,
     if(signature->length != UA_SHA1_LENGTH)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    mbedtls_hmac(&cc->policyContext->sha1MdContext, &cc->localSymSigningKey,
-                 message, signature->data);
+    if(mbedtls_hmac(&cc->policyContext->sha1MdContext, &cc->localSymSigningKey,
+                    message, signature->data) != UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+
     return UA_STATUSCODE_GOOD;
 }
 
@@ -669,6 +672,7 @@ UA_SecurityPolicy_Basic256(UA_SecurityPolicy *policy, const UA_ByteString localC
     policy->logger = logger;
 
     policy->policyUri = UA_STRING("http://opcfoundation.org/UA/SecurityPolicy#Basic256\0");
+    policy->securityLevel = 0;
 
     UA_SecurityPolicyAsymmetricModule *const asymmetricModule = &policy->asymmetricModule;
     UA_SecurityPolicySymmetricModule *const symmetricModule = &policy->symmetricModule;

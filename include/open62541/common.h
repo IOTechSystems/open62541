@@ -31,6 +31,7 @@ _UA_BEGIN_DECLS
  * the node type. Possible attributes are as follows: */
 
 typedef enum {
+    UA_ATTRIBUTEID_INVALID                 = 0,
     UA_ATTRIBUTEID_NODEID                  = 1,
     UA_ATTRIBUTEID_NODECLASS               = 2,
     UA_ATTRIBUTEID_BROWSENAME              = 3,
@@ -60,6 +61,11 @@ typedef enum {
     UA_ATTRIBUTEID_ACCESSLEVELEX           = 27
 } UA_AttributeId;
 
+/* Returns a readable attribute name like "NodeId" or "Invalid" if the attribute
+ * does not exist */
+UA_EXPORT const char *
+UA_AttributeId_name(UA_AttributeId attrId);
+
 /**
  * .. _access-level-mask:
  *
@@ -69,7 +75,9 @@ typedef enum {
  * with the overall access level. */
 
 #define UA_ACCESSLEVELMASK_READ           (0x01u << 0u)
+#define UA_ACCESSLEVELMASK_CURRENTREAD    (0x01u << 0u)
 #define UA_ACCESSLEVELMASK_WRITE          (0x01u << 1u)
+#define UA_ACCESSLEVELMASK_CURRENTWRITE   (0x01u << 1u)
 #define UA_ACCESSLEVELMASK_HISTORYREAD    (0x01u << 2u)
 #define UA_ACCESSLEVELMASK_HISTORYWRITE   (0x01u << 3u)
 #define UA_ACCESSLEVELMASK_SEMANTICCHANGE (0x01u << 4u)
@@ -106,6 +114,10 @@ typedef enum {
 #define UA_WRITEMASK_VALUERANK               (0x01u << 19u)
 #define UA_WRITEMASK_WRITEMASK               (0x01u << 20u)
 #define UA_WRITEMASK_VALUEFORVARIABLETYPE    (0x01u << 21u)
+#define UA_WRITEMASK_DATATYPEDEFINITION      (0x01u << 22u)
+#define UA_WRITEMASK_ROLEPERMISSIONS         (0x01u << 23u)
+#define UA_WRITEMASK_ACCESSRESTRICTIONS      (0x01u << 24u)
+#define UA_WRITEMASK_ACCESSLEVELEX           (0x01u << 25u)
 
 /**
  * .. _valuerank-defines:
@@ -174,7 +186,18 @@ typedef enum {
  * ---------------- */
 
 typedef enum {
-    UA_SECURECHANNELSTATE_FRESH = 0,
+    UA_CONNECTIONSTATE_CLOSED,     /* The socket has been closed and the connection
+                                    * will be deleted */
+    UA_CONNECTIONSTATE_OPENING,    /* The socket is open, but the connection not yet
+                                      fully established */
+    UA_CONNECTIONSTATE_ESTABLISHED,/* The socket is open and the connection
+                                    * configured */
+    UA_CONNECTIONSTATE_CLOSING     /* The socket is closing down */
+} UA_ConnectionState;
+
+
+typedef enum {
+    UA_SECURECHANNELSTATE_CLOSED = 0,
     UA_SECURECHANNELSTATE_REVERSE_LISTENING,
     UA_SECURECHANNELSTATE_CONNECTING,
     UA_SECURECHANNELSTATE_CONNECTED,
@@ -187,11 +210,10 @@ typedef enum {
     UA_SECURECHANNELSTATE_OPN_SENT,
     UA_SECURECHANNELSTATE_OPEN,
     UA_SECURECHANNELSTATE_CLOSING,
-    UA_SECURECHANNELSTATE_CLOSED
 } UA_SecureChannelState;
 
 typedef enum {
-    UA_SESSIONSTATE_CLOSED,
+    UA_SESSIONSTATE_CLOSED = 0,
     UA_SESSIONSTATE_CREATE_REQUESTED,
     UA_SESSIONSTATE_CREATED,
     UA_SESSIONSTATE_ACTIVATE_REQUESTED,
@@ -210,6 +232,15 @@ typedef enum {
  * specification. The SecureChannel counters are not defined in the OPC UA spec,
  * but are harmonized with the Session layer counters if possible. */
 
+typedef enum {
+    UA_SHUTDOWNREASON_CLOSE = 0,
+    UA_SHUTDOWNREASON_REJECT,
+    UA_SHUTDOWNREASON_SECURITYREJECT,
+    UA_SHUTDOWNREASON_TIMEOUT,
+    UA_SHUTDOWNREASON_ABORT,
+    UA_SHUTDOWNREASON_PURGE
+} UA_ShutdownReason;
+
 typedef struct {
     size_t currentChannelCount;
     size_t cumulatedChannelCount;
@@ -227,6 +258,20 @@ typedef struct {
     size_t sessionTimeoutCount;          /* only used by servers */
     size_t sessionAbortCount;            /* only used by servers */
 } UA_SessionStatistics;
+
+/**
+ * Lifecycle States
+ * ----------------
+ *
+ * Generic lifecycle states. The STOPPING state indicates that the lifecycle is
+ * being terminated. But it might take time to (asynchronously) perform a
+ * graceful shutdown. */
+
+typedef enum {
+    UA_LIFECYCLESTATE_STOPPED = 0,
+    UA_LIFECYCLESTATE_STARTED,
+    UA_LIFECYCLESTATE_STOPPING
+} UA_LifecycleState;
 
 /**
  * Forward Declarations

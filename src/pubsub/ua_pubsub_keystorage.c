@@ -74,13 +74,8 @@ UA_PubSubKeyStorage_delete(UA_Server *server, UA_PubSubKeyStorage *keyStorage) {
     }
 
     UA_PubSubKeyStorage_clearKeyList(keyStorage);
-
-    if(keyStorage->securityGroupID.data)
-        UA_String_clear(&keyStorage->securityGroupID);
-
-    /* clear SKS client config from keystorage */
+    UA_String_clear(&keyStorage->securityGroupID);
     UA_ClientConfig_clear(&keyStorage->sksConfig.clientConfig);
-
     UA_free(keyStorage);
 }
 
@@ -215,9 +210,9 @@ UA_PubSubKeyStorage_addKeyRolloverCallback(UA_Server *server,
 
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
-    UA_DateTime dateTimeToNextKey = UA_DateTime_nowMonotonic() +
-        (UA_DateTime)(UA_DATETIME_MSEC * timeToNextMs);
     UA_EventLoop *el = server->config.eventLoop;
+    UA_DateTime dateTimeToNextKey = el->dateTime_nowMonotonic(el) +
+        (UA_DateTime)(UA_DATETIME_MSEC * timeToNextMs);
     return el->addTimedCallback(el, (UA_Callback)callback, server, keyStorage,
                                 dateTimeToNextKey, callbackID);
 }
@@ -350,7 +345,7 @@ UA_PubSubKeyStorage_activateKeyToChannelContext(UA_Server *server, UA_NodeId pub
             server, securityGroupId, securityTokenId, signingKey, encryptKey, keyNonce);
 
     if(retval != UA_STATUSCODE_GOOD)
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "Failed to set Encrypting keys with Error: %s",
                      UA_StatusCode_name(retval));
 
@@ -361,14 +356,14 @@ static void
 nextGetSecuritykeysCallback(UA_Server *server, UA_PubSubKeyStorage *keyStorage) {
     UA_StatusCode retval = UA_STATUSCODE_BAD;
     if(!keyStorage) {
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "GetSecurityKeysCall Failed with error: KeyStorage does not exist "
                      "in the server");
         return;
     }
     retval = getSecurityKeysAndStoreFetchedKeys(server, keyStorage);
     if(retval != UA_STATUSCODE_GOOD)
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "GetSecurityKeysCall Failed with error: %s ",
                      UA_StatusCode_name(retval));
 }
@@ -382,7 +377,7 @@ UA_PubSubKeyStorage_keyRolloverCallback(UA_Server *server, UA_PubSubKeyStorage *
                                      (UA_ServerCallback)UA_PubSubKeyStorage_keyRolloverCallback,
                                                    keyStorage->keyLifeTime, &keyStorage->callBackId);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "Failed to update keys for security group id '%.*s'. Reason: '%s'.",
                      (int)keyStorage->securityGroupID.length,
                      keyStorage->securityGroupID.data, UA_StatusCode_name(retval));
@@ -394,13 +389,14 @@ UA_PubSubKeyStorage_keyRolloverCallback(UA_Server *server, UA_PubSubKeyStorage *
         retval = UA_PubSubKeyStorage_activateKeyToChannelContext(server, UA_NODEID_NULL,
                                                                  keyStorage->securityGroupID);
         if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+            UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                          "Failed to update keys for security group id '%.*s'. Reason: '%s'.",
                          (int)keyStorage->securityGroupID.length, keyStorage->securityGroupID.data,
                          UA_StatusCode_name(retval));
         }
     } else if(keyStorage->sksConfig.endpointUrl && keyStorage->sksConfig.reqId == 0) {
-        UA_DateTime now = UA_DateTime_nowMonotonic();
+        UA_EventLoop *el = server->config.eventLoop;
+        UA_DateTime now = el->dateTime_nowMonotonic(el);
         /*Publishers using a central SKS shall call GetSecurityKeys at a period of half the KeyLifetime */
         UA_Duration msTimeToNextGetSecurityKeys = keyStorage->keyLifeTime / 2;
         UA_DateTime dateTimeToNextGetSecurityKeys =
@@ -470,51 +466,53 @@ typedef struct {
     UA_PubSubKeyStorage *ks;
     UA_UInt32 startingTokenId;
     UA_UInt32 requestedKeyCount;
+    UA_DelayedCallback dc;
 } sksClientContext;
 
-void
-sksClientCleanupCb(void *client, void *context);
+static void sksClientCleanupCb(void *client, void *context);
 
-static UA_StatusCode
-addDelayedSksClientCleanupCb(UA_Client *client){
-    UA_DelayedCallback *dc = (UA_DelayedCallback *)UA_calloc(1, sizeof(UA_DelayedCallback));
-    if(!dc) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                       "SKS Client: Failed to add addDelayedSksClientCleanup callback "
-                       "with error: %s ",
-                       UA_StatusCode_name(UA_STATUSCODE_BADOUTOFMEMORY));
-        return UA_STATUSCODE_BADOUTOFMEMORY;
-    }
-    dc->application = client;
-    dc->callback = sksClientCleanupCb;
-    dc->context = dc;
-    client->config.eventLoop->addDelayedCallback(client->config.eventLoop, dc);
-    return UA_STATUSCODE_GOOD;
+static void
+addDelayedSksClientCleanupCb(UA_Client *client, sksClientContext *context) {
+    /* Register at most once */
+    if(context->dc.application != NULL)
+        return;
+    context->dc.application = client;
+    context->dc.callback = sksClientCleanupCb;
+    context->dc.context = context;
+    client->config.eventLoop->addDelayedCallback(client->config.eventLoop, &context->dc);
 }
 
-void
+static void
 sksClientCleanupCb(void *client, void *context) {
     UA_Client *sksClient = (UA_Client *)client;
+    sksClientContext *ctx = (sksClientContext*)context;
+
     /* we do not want to call state change Callback when cleaning up */
     sksClient->config.stateCallback = NULL;
+
     if(sksClient->sessionState > UA_SESSIONSTATE_CLOSED &&
        sksClient->channel.state < UA_SECURECHANNELSTATE_CLOSED) {
+        sksClient->config.eventLoop->
+            addDelayedCallback(sksClient->config.eventLoop, &ctx->dc);
         UA_Client_disconnectAsync(sksClient);
+        return;
     }
-    if(sksClient->sessionState != UA_SESSIONSTATE_ACTIVATED &&
-       sksClient->channel.state == UA_SECURECHANNELSTATE_CLOSED) {
-        /* we cannot make deep copy of the following pointers because these have internal structures,
-        therefore we do not free them here. These will be freed in UA_PubSubKeyStorage_delete */
+
+    if(sksClient->channel.state == UA_SECURECHANNELSTATE_CLOSED) {
+        /* We cannot make deep copy of the following pointers because these have
+         * internal structures, therefore we do not free them here. These will
+         * be freed in UA_PubSubKeyStorage_delete. */
         sksClient->config.securityPolicies = NULL;
         sksClient->config.securityPoliciesSize = 0;
         sksClient->config.certificateVerification.context = NULL;
-        sksClient->config.logger.context = NULL;
-        UA_free(sksClient->config.clientContext);
+        sksClient->config.logging = NULL;
+        sksClient->config.clientContext = NULL;
         UA_Client_delete(sksClient);
+        UA_free(context);
     } else {
-        addDelayedSksClientCleanupCb(sksClient);
+        sksClient->config.eventLoop->
+            addDelayedCallback(sksClient->config.eventLoop, &ctx->dc);
     }
-    UA_free(context);
 }
 
 static void
@@ -531,7 +529,7 @@ storeFetchedKeys(UA_Client *client, void *userdata, UA_UInt32 requestId,
     if(response->resultsSize != 0)
         retval = response->results->statusCode;
     if(retval != UA_STATUSCODE_GOOD) {
-         UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+         UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "SKS Client: Failed to call GetSecurityKeys on SKS server with error: %s ",
                      UA_StatusCode_name(retval));
         goto cleanup;
@@ -586,7 +584,7 @@ storeFetchedKeys(UA_Client *client, void *userdata, UA_UInt32 requestId,
 
 cleanup:
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "Failed to store the fetched keys from SKS server with error: %s",
                      UA_StatusCode_name(retval));
     }
@@ -596,8 +594,7 @@ cleanup:
         ks->sksConfig.userNotifyCallback(server, retval, ks->sksConfig.context);
     ks->sksConfig.reqId = 0;
     UA_Client_disconnectAsync(client);
-    addDelayedSksClientCleanupCb(client);
-    return;
+    addDelayedSksClientCleanupCb(client, ctx);
 }
 
 static UA_StatusCode
@@ -629,7 +626,7 @@ onConnect(UA_Client *client, UA_SecureChannelState channelState,
     if(connectStatus != UA_STATUSCODE_GOOD &&
        connectStatus != UA_STATUSCODE_BADNOTCONNECTED &&
        sessionState != UA_SESSIONSTATE_ACTIVATED) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "SKS Client: Failed to connect SKS server with error: %s ",
                      UA_StatusCode_name(connectStatus));
         triggerSKSCleanup = true;
@@ -637,7 +634,7 @@ onConnect(UA_Client *client, UA_SecureChannelState channelState,
     if(connectStatus == UA_STATUSCODE_GOOD && sessionState == UA_SESSIONSTATE_ACTIVATED) {
         connectStatus = callGetSecurityKeysMethod(client);
         if(connectStatus != UA_STATUSCODE_GOOD) {
-            UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_SERVER,
+            UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_SERVER,
                          "SKS Client: Failed to call GetSecurityKeys on SKS server with "
                          "error: %s ",
                          UA_StatusCode_name(connectStatus));
@@ -645,7 +642,6 @@ onConnect(UA_Client *client, UA_SecureChannelState channelState,
         }
     }
     if(triggerSKSCleanup) {
-        client->noReconnect = true;
         /* call user callback to notify about the status */
         sksClientContext *ctx = (sksClientContext *)client->config.clientContext;
         UA_PubSubKeyStorage *ks = ctx->ks;
@@ -653,9 +649,8 @@ onConnect(UA_Client *client, UA_SecureChannelState channelState,
             ks->sksConfig.userNotifyCallback(ctx->server, connectStatus,
                                              ks->sksConfig.context);
         UA_Client_disconnectAsync(client);
-        addDelayedSksClientCleanupCb(client);
+        addDelayedSksClientCleanupCb(client, ctx);
     }
-    return;
 }
 
 static void
@@ -672,7 +667,7 @@ getSecurityKeysAndStoreFetchedKeys(UA_Server *server, UA_PubSubKeyStorage *keySt
     UA_UInt32 requestKeyCount = UA_UINT32_MAX;
 
     if(keyStorage->sksConfig.reqId != 0) {
-        UA_LOG_INFO(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_INFO(server->config.logging, UA_LOGCATEGORY_SERVER,
                     "SKS Client: SKS Pull request in process ");
         return UA_STATUSCODE_GOOD;
     }
@@ -703,14 +698,14 @@ getSecurityKeysAndStoreFetchedKeys(UA_Server *server, UA_PubSubKeyStorage *keySt
     /* connect to sks server */
     retval = UA_Client_connectAsync(client, keyStorage->sksConfig.endpointUrl);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "Failed to connect SKS server with error: %s ",
                      UA_StatusCode_name(retval));
         /* Make sure the client channel state is closed and not fresh, otherwise, eventloop will
         keep waiting for the client status to go from Fresh to closed in UA_Client_delete*/
         client->channel.state = UA_SECURECHANNELSTATE_CLOSED;
         /* this client instance will be cleared in the next event loop iteration */
-        addDelayedSksClientCleanupCb(client);
+        addDelayedSksClientCleanupCb(client, ctx);
         return retval;
     }
 
@@ -740,7 +735,6 @@ UA_Server_setSksClient(UA_Server *server, UA_String securityGroupId,
     clientConfig->authSecurityPolicies = NULL;
     clientConfig->certificateVerification.context = NULL;
     clientConfig->eventLoop = NULL;
-    clientConfig->logger.context = NULL;
     clientConfig->logging = NULL;
     clientConfig->securityPolicies = NULL;
     UA_ClientConfig_clear(clientConfig);

@@ -4,16 +4,17 @@
  *
  * Copyright (c) 2019 Kalycito Infotech Private Limited
  */
-#include <open62541/plugin/pubsub_ethernet.h>
+
 #include <open62541/server_config_default.h>
 #include <open62541/server_pubsub.h>
 
 #include <check.h>
 #include <time.h>
+#include <stdlib.h>
 
+#include "test_helpers.h"
 #include "ua_pubsub.h"
 #include "ua_server_internal.h"
-#include "ua_pubsub_networkmessage.h"
 
 /* Adjust your configuration globally for the ethernet tests here: */
 #include "ethernet_config.h"
@@ -42,11 +43,10 @@ UA_PubSubConnection *connection; /* setup() is to create an environment for test
 
 static void setup(void) {
     /*Add setup by creating new server with valid configuration */
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
     config = UA_Server_getConfig(server);
     UA_ServerConfig_setMinimal(config, UA_SUBSCRIBER_PORT, NULL);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerEthernet());
     UA_Server_run_startup(server);
 }
 
@@ -58,12 +58,6 @@ static void teardown(void) {
 }
 
 START_TEST(EthernetSendWithoutVLANTag) {
-    struct timespec nextnanosleeptime;
-    UA_UInt64 transmission_time;
-    nextnanosleeptime.tv_sec = SECONDS_SLEEP;
-    nextnanosleeptime.tv_nsec = NANO_SECONDS_SLEEP_PUB;
-    UA_UInt64 roundOffCycleTime = (long) (CYCLE_TIME * MILLI_SECONDS) - NANO_SECONDS_SLEEP_PUB;
-
     /* Add connection to the server */
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(UA_PubSubConnectionConfig));
@@ -72,8 +66,8 @@ START_TEST(EthernetSendWithoutVLANTag) {
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri = UA_STRING(TRANSPORT_PROFILE_URI);
-    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT16;
-    connectionConfig.publisherId.uint16 = PUBLISHER_ID;
+    connectionConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT16;
+    connectionConfig.publisherId.id.uint16 = PUBLISHER_ID;
     /* Connection options are given as Key/Value Pairs - Sockprio and Txtime */
     UA_KeyValuePair connectionOptions[2];
     connectionOptions[0].key = UA_QUALIFIEDNAME(0, "sockpriority");
@@ -86,37 +80,47 @@ START_TEST(EthernetSendWithoutVLANTag) {
     connectionConfig.connectionProperties.mapSize = 2;
     UA_Server_addPubSubConnection(server, &connectionConfig, &connection_test);
     connection = UA_PubSubConnection_findConnectionbyId(server, connection_test);
-    if(!connection) {
-        UA_Server_delete(server);
-    }
+    ck_assert(connection);
 
-    /* Define Ethernet ETF transport settings */
-    UA_EthernetWriterGroupTransportDataType ethernettransportSettings;
-    memset(&ethernettransportSettings, 0, sizeof(UA_EthernetWriterGroupTransportDataType));
-    ethernettransportSettings.transmission_time = 0;
+    /* Add a writer group to enable the connection */
+    UA_WriterGroupConfig writerGroupConfig;
+    memset(&writerGroupConfig, 0, sizeof(writerGroupConfig));
+    writerGroupConfig.name = UA_STRING("WriterGroup 1");
+    writerGroupConfig.publishingInterval = 10;
+    UA_NodeId localWriterGroup;
+    UA_StatusCode retVal =
+        UA_Server_addWriterGroup(server, connection_test,
+                                 &writerGroupConfig, &localWriterGroup);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 
-    /* Encapsulate ETF config in transportSettings */
-    UA_ExtensionObject transportSettings;
-    memset(&transportSettings, 0, sizeof(UA_ExtensionObject));
-    transportSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
-    transportSettings.content.decoded.data = &ethernettransportSettings;
-    clock_gettime(CLOCKID, &nextnanosleeptime);
-    transmission_time = ((UA_UInt64)nextnanosleeptime.tv_sec * SECONDS + (UA_UInt64)nextnanosleeptime.tv_nsec) + roundOffCycleTime + QBV_OFFSET;
-    ethernettransportSettings.transmission_time = transmission_time;
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
+    retVal = UA_Server_enableWriterGroup(server, localWriterGroup);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
+
+    /* TODO: Encapsulate ETF config in transportSettings */
+    /* UA_ExtensionObject transportSettings; */
+    /* memset(&transportSettings, 0, sizeof(UA_ExtensionObject)); */
+    /* transportSettings.encoding = UA_EXTENSIONOBJECT_DECODED; */
+    /* transportSettings.content.decoded.data = &ethernettransportSettings; */
+    /* clock_gettime(CLOCKID, &nextnanosleeptime); */
+    /* transmission_time = ((UA_UInt64)nextnanosleeptime.tv_sec * SECONDS + (UA_UInt64)nextnanosleeptime.tv_nsec) + roundOffCycleTime + QBV_OFFSET; */
+    /* ethernettransportSettings.transmission_time = transmission_time; */
 
     /* Initialize a buffer to send data */
     UA_ByteString testBuffer = UA_STRING(BUFFER_STRING);
-    retVal = connection->channel->send(connection->channel, &transportSettings, &testBuffer);
+    UA_ByteString networkBuffer = UA_STRING_NULL;
+    connection->cm->allocNetworkBuffer(connection->cm,
+                                       connection->sendChannel,
+                                       &networkBuffer,
+                                       testBuffer.length);
+    memcpy(networkBuffer.data, testBuffer.data, testBuffer.length);
+
+    retVal = connection->cm->
+        sendWithConnection(connection->cm, connection->sendChannel,
+                           &UA_KEYVALUEMAP_NULL, &networkBuffer);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
-    } END_TEST
+} END_TEST
 
 START_TEST(EthernetSendWithVLANTag) {
-    struct timespec nextnanosleeptime;
-    UA_UInt64 transmission_time;
-    nextnanosleeptime.tv_sec = SECONDS_SLEEP;
-    nextnanosleeptime.tv_nsec = NANO_SECONDS_SLEEP_PUB;
-    UA_UInt64 roundOffCycleTime = (long) (CYCLE_TIME * MILLI_SECONDS) - NANO_SECONDS_SLEEP_PUB;
     /* Add connection to the server */
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(UA_PubSubConnectionConfig));
@@ -125,8 +129,8 @@ START_TEST(EthernetSendWithVLANTag) {
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri = UA_STRING(TRANSPORT_PROFILE_URI);
-    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT16;
-    connectionConfig.publisherId.uint16 = PUBLISHER_ID;
+    connectionConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT16;
+    connectionConfig.publisherId.id.uint16 = PUBLISHER_ID;
     /* Connection options are given as Key/Value Pairs - Sockprio and Txtime */
     UA_KeyValuePair connectionOptions[2];
     connectionOptions[0].key = UA_QUALIFIEDNAME(0, "sockpriority");
@@ -139,31 +143,49 @@ START_TEST(EthernetSendWithVLANTag) {
     connectionConfig.connectionProperties.mapSize = 2;
     UA_Server_addPubSubConnection(server, &connectionConfig, &connection_test);
     connection = UA_PubSubConnection_findConnectionbyId(server, connection_test);
-    if(!connection) {
-        UA_Server_delete(server);
-    }
-    /* Define Ethernet ETF transport settings */
-    UA_EthernetWriterGroupTransportDataType ethernettransportSettings;
-    memset(&ethernettransportSettings, 0, sizeof(UA_EthernetWriterGroupTransportDataType));
-    ethernettransportSettings.transmission_time = 0;
+    ck_assert(connection);
 
-    /* Encapsulate ETF config in transportSettings */
-    UA_ExtensionObject transportSettings;
-    memset(&transportSettings, 0, sizeof(UA_ExtensionObject));
-    transportSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
-    transportSettings.content.decoded.data = &ethernettransportSettings;
-    clock_gettime(CLOCKID, &nextnanosleeptime);
-    transmission_time = ((UA_UInt64)nextnanosleeptime.tv_sec * SECONDS + (UA_UInt64)nextnanosleeptime.tv_nsec) + roundOffCycleTime + QBV_OFFSET;
-    ethernettransportSettings.transmission_time = transmission_time;
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
+    /* Add a writer group to enable the connection */
+    UA_WriterGroupConfig writerGroupConfig;
+    memset(&writerGroupConfig, 0, sizeof(writerGroupConfig));
+    writerGroupConfig.name = UA_STRING("WriterGroup 1");
+    writerGroupConfig.publishingInterval = 10;
+    UA_NodeId localWriterGroup;
+    UA_StatusCode retVal =
+        UA_Server_addWriterGroup(server, connection_test,
+                                 &writerGroupConfig, &localWriterGroup);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
+
+    retVal = UA_Server_setWriterGroupOperational(server, localWriterGroup);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
+
+    /* TODO: Encapsulate ETF config in transportSettings */
+    /* UA_ExtensionObject transportSettings; */
+    /* memset(&transportSettings, 0, sizeof(UA_ExtensionObject)); */
+    /* transportSettings.encoding = UA_EXTENSIONOBJECT_DECODED; */
+    /* transportSettings.content.decoded.data = &ethernettransportSettings; */
+    /* clock_gettime(CLOCKID, &nextnanosleeptime); */
+    /* transmission_time = ((UA_UInt64)nextnanosleeptime.tv_sec * SECONDS + (UA_UInt64)nextnanosleeptime.tv_nsec) + roundOffCycleTime + QBV_OFFSET; */
+    /* ethernettransportSettings.transmission_time = transmission_time; */
 
     /* Initialize a buffer to send data */
     UA_ByteString testBuffer = UA_STRING(BUFFER_STRING);
-    retVal = connection->channel->send(connection->channel, &transportSettings, &testBuffer);
+    UA_ByteString networkBuffer = UA_STRING_NULL;
+    connection->cm->allocNetworkBuffer(connection->cm,
+                                       connection->sendChannel,
+                                       &networkBuffer,
+                                       testBuffer.length);
+    memcpy(networkBuffer.data, testBuffer.data, testBuffer.length);
+
+    retVal = connection->cm->sendWithConnection(connection->cm, connection->sendChannel,
+                                                &UA_KEYVALUEMAP_NULL, &networkBuffer);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
-    } END_TEST
+} END_TEST
 
 int main(void) {
+    if(SKIP_ETHERNET && strlen(SKIP_ETHERNET) > 0)
+        return EXIT_SUCCESS;
+
     /*Test case to run both publisher*/
     TCase *tc_pubsub_ethernet_etf_publish = tcase_create("Publisher publishing Ethernet packets based on etf");
     tcase_add_checked_fixture(tc_pubsub_ethernet_etf_publish, setup, teardown);

@@ -7,16 +7,12 @@
 
 #include <open62541/client_config_default.h>
 #include <open62541/plugin/log_stdout.h>
-#include <open62541/plugin/pubsub_udp.h>
 #include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/server_config_default.h>
-#include <open62541/types_generated.h>
+#include <open62541/server.h>
+#include <open62541/server_pubsub.h>
 
 #include "common.h"
-
-#if defined(UA_ENABLE_PUBSUB_ETH_UADP)
-#include <open62541/plugin/pubsub_ethernet.h>
-#endif
 
 #include <signal.h>
 #include <stdio.h>
@@ -60,8 +56,8 @@ addPubSubConnection(UA_Server *server, UA_String *transportProfile,
     connectionConfig.enabled = UA_TRUE;
     UA_Variant_setScalar(&connectionConfig.address, networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
-    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT32;
-    connectionConfig.publisherId.uint32 = UA_UInt32_random();
+    connectionConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT32;
+    connectionConfig.publisherId.id.uint32 = UA_UInt32_random();
     retval |=
         UA_Server_addPubSubConnection(server, &connectionConfig, &connectionIdentifier);
     if(retval != UA_STATUSCODE_GOOD) {
@@ -73,10 +69,10 @@ addPubSubConnection(UA_Server *server, UA_String *transportProfile,
 
 static void
 sksPullRequestCallback(UA_Server *server, UA_StatusCode sksPullRequestStatus, void *data) {
-    if(sksPullRequestStatus == UA_STATUSCODE_GOOD)
-        UA_Server_setReaderGroupOperational(server, readerGroupIdentifier);
     if(sksPullRequestStatus != UA_STATUSCODE_GOOD)
         running = false;
+
+    UA_Server_setReaderGroupActivateKey(server, readerGroupIdentifier);
 }
 
 /**
@@ -108,7 +104,7 @@ addReaderGroup(UA_Server *server, UA_ClientConfig *sksClientConfig) {
 
     retval |= UA_Server_addReaderGroup(server, connectionIdentifier, &readerGroupConfig,
                                        &readerGroupIdentifier);
-
+    retval |= UA_Server_enableReaderGroup(server, readerGroupIdentifier);
     /* We need to set the sks client before setting Reader/Writer Group into operational
      * because it will fetch the initial set of keys. The sks client is required to set
      * once per security group on publisher/subscriber application.*/
@@ -142,8 +138,8 @@ addDataSetReader(UA_Server *server) {
      * tutorial_pubsub_publish.c is being subscribed and is being updated in
      * the information model */
     UA_UInt16 publisherIdentifier = 2234;
-    readerConfig.publisherId.type = &UA_TYPES[UA_TYPES_UINT16];
-    readerConfig.publisherId.data = &publisherIdentifier;
+    readerConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT16;
+    readerConfig.publisherId.id.uint16 = publisherIdentifier;
     readerConfig.writerGroupId = 100;
     readerConfig.dataSetWriterId = 62541;
 
@@ -301,16 +297,7 @@ run(UA_UInt16 port, UA_String *transportProfile,
         (UA_PubSubSecurityPolicy *)UA_malloc(sizeof(UA_PubSubSecurityPolicy));
     config->pubSubConfig.securityPoliciesSize = 1;
     UA_PubSubSecurityPolicy_Aes256Ctr(config->pubSubConfig.securityPolicies,
-                                      &config->logger);
-
-    /* Add the PubSub network layer implementation to the server config.
-     * The TransportLayer is acting as factory to create new connections
-     * on runtime. Details about the PubSubTransportLayer can be found inside the
-     * tutorial_pubsub_connection */
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDPMP());
-#ifdef UA_ENABLE_PUBSUB_ETH_UADP
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerEthernet());
-#endif
+                                      config->logging);
 
     /* API calls */
     /* Add PubSubConnection */
@@ -335,6 +322,7 @@ run(UA_UInt16 port, UA_String *transportProfile,
 
     retval = UA_Server_run(server, &running);
     UA_Server_delete(server);
+    UA_ClientConfig_delete(sksClientConfig);
     return retval == UA_STATUSCODE_GOOD ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 

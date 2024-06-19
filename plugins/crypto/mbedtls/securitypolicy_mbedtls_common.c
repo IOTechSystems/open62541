@@ -1,5 +1,5 @@
 #include <open62541/plugin/securitypolicy.h>
-#include <open62541/plugin/pki.h>
+#include <open62541/plugin/certificategroup.h>
 #include <open62541/types.h>
 
 #if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) || defined(UA_ENABLE_PUBSUB_ENCRYPTION)
@@ -22,12 +22,20 @@ swapBuffers(UA_ByteString *const bufA, UA_ByteString *const bufB) {
     *bufB = tmp;
 }
 
-void
+UA_StatusCode
 mbedtls_hmac(mbedtls_md_context_t *context, const UA_ByteString *key,
              const UA_ByteString *in, unsigned char *out) {
-    mbedtls_md_hmac_starts(context, key->data, key->length);
-    mbedtls_md_hmac_update(context, in->data, in->length);
-    mbedtls_md_hmac_finish(context, out);
+
+    if(mbedtls_md_hmac_starts(context, key->data, key->length) != 0)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+
+    if(mbedtls_md_hmac_update(context, in->data, in->length) != 0)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+
+    if(mbedtls_md_hmac_finish(context, out) != 0)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+
+    return UA_STATUSCODE_GOOD;
 }
 
 UA_StatusCode
@@ -58,9 +66,14 @@ mbedtls_generateKey(mbedtls_md_context_t *context,
         ANext_and_seed.data
     };
 
-    mbedtls_hmac(context, secret, seed, A.data);
+    UA_StatusCode retval = mbedtls_hmac(context, secret, seed, A.data);
 
-    UA_StatusCode retval = 0;
+    if(retval != UA_STATUSCODE_GOOD){
+        UA_ByteString_clear(&A_and_seed);
+        UA_ByteString_clear(&ANext_and_seed);
+        return retval;
+    }
+
     for(size_t offset = 0; offset < out->length; offset += hashLen) {
         UA_ByteString outSegment = {
             hashLen,
@@ -80,12 +93,14 @@ mbedtls_generateKey(mbedtls_md_context_t *context,
             bufferAllocated = UA_TRUE;
         }
 
-        mbedtls_hmac(context, secret, &A_and_seed, outSegment.data);
-        mbedtls_hmac(context, secret, &A, ANext.data);
-
-        if(retval != UA_STATUSCODE_GOOD) {
-            if(bufferAllocated)
-                UA_ByteString_clear(&outSegment);
+        retval = mbedtls_hmac(context, secret, &A_and_seed, outSegment.data);
+        if(retval != UA_STATUSCODE_GOOD){
+            UA_ByteString_clear(&A_and_seed);
+            UA_ByteString_clear(&ANext_and_seed);
+            return retval;
+        }
+        retval = mbedtls_hmac(context, secret, &A, ANext.data);
+        if(retval != UA_STATUSCODE_GOOD){
             UA_ByteString_clear(&A_and_seed);
             UA_ByteString_clear(&ANext_and_seed);
             return retval;
@@ -230,12 +245,13 @@ mbedtls_encrypt_rsaOaep(mbedtls_rsa_context *context,
 UA_StatusCode
 mbedtls_decrypt_rsaOaep(mbedtls_pk_context *localPrivateKey,
                         mbedtls_ctr_drbg_context *drbgContext,
-                        UA_ByteString *data) {
+                        UA_ByteString *data, int hash_id) {
     mbedtls_rsa_context *rsaContext = mbedtls_pk_rsa(*localPrivateKey);
-    mbedtls_rsa_set_padding(rsaContext, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA1);
 #if MBEDTLS_VERSION_NUMBER >= 0x02060000 && MBEDTLS_VERSION_NUMBER < 0x03000000
+    mbedtls_rsa_set_padding(rsaContext, MBEDTLS_RSA_PKCS_V21, hash_id);
     size_t keylen = rsaContext->len;
 #else
+    mbedtls_rsa_set_padding(rsaContext, MBEDTLS_RSA_PKCS_V21, (mbedtls_md_type_t)hash_id);
     size_t keylen = mbedtls_rsa_get_len(rsaContext);
 #endif
     if(data->length % keylen != 0)

@@ -17,11 +17,10 @@
  *    Copyright 2017 (c) Henrik Norrman
  */
 
-#include <open62541/types_generated.h>
-#include <open62541/types_generated_handling.h>
+#include <open62541/types.h>
 
 #include "ua_types_encoding_binary.h"
-#include "ua_util_internal.h"
+#include "util/ua_util_internal.h"
 
 /**
  * Type Encoding and Decoding
@@ -57,19 +56,20 @@ typedef status
 typedef status
 (*decodeBinarySignature)(void *UA_RESTRICT dst, const UA_DataType *type,
                          Ctx *UA_RESTRICT ctx);
-typedef size_t
-(*calcSizeBinarySignature)(const void *UA_RESTRICT p, const UA_DataType *type);
-
 #define ENCODE_BINARY(TYPE) static status                               \
     TYPE##_encodeBinary(const UA_##TYPE *UA_RESTRICT src,               \
                         const UA_DataType *type, Ctx *UA_RESTRICT ctx)
 #define DECODE_BINARY(TYPE) static status                               \
     TYPE##_decodeBinary(UA_##TYPE *UA_RESTRICT dst,                     \
                         const UA_DataType *type, Ctx *UA_RESTRICT ctx)
-#define CALCSIZE_BINARY(TYPE) static size_t                             \
-    TYPE##_calcSizeBinary(const UA_##TYPE *UA_RESTRICT src, const UA_DataType *_)
 #define ENCODE_DIRECT(SRC, TYPE) TYPE##_encodeBinary((const UA_##TYPE*)SRC, NULL, ctx)
 #define DECODE_DIRECT(DST, TYPE) TYPE##_decodeBinary((UA_##TYPE*)DST, NULL, ctx)
+
+#define IF_CHECK_BUFSIZE(check)                             \
+    if(!UA_LIKELY(check)) {                                 \
+        if(ctx->end != NULL)                                \
+            return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED; \
+    } else                                                  \
 
 /* Jumptables for de-/encoding and computing the buffer length. The methods in
  * the decoding jumptable do not all clean up their allocated memory when an
@@ -77,7 +77,6 @@ typedef size_t
  * user. */
 extern const encodeBinarySignature encodeBinaryJumpTable[UA_DATATYPEKINDS];
 extern const decodeBinarySignature decodeBinaryJumpTable[UA_DATATYPEKINDS];
-extern const calcSizeBinarySignature calcSizeBinaryJumpTable[UA_DATATYPEKINDS];
 
 /* Send the current chunk and replace the buffer */
 static status exchangeBuffer(Ctx *ctx) {
@@ -91,7 +90,10 @@ static status exchangeBuffer(Ctx *ctx) {
 static status
 encodeWithExchangeBuffer(const void *ptr, const UA_DataType *type, Ctx *ctx) {
     u8 *oldpos = ctx->pos; /* Last known good position */
-#ifndef NDEBUG
+/**
+ * It is often forgotten to include -DNDEBUG in the compiler flags when using the single-file release.
+ * So we make assertions dependent on the UA_DEBUG definition handled by CMake. */
+#ifdef UA_DEBUG
     /* We have to ensure that the buffer was not exchanged AND
      * BADENCODINGLIMITSEXCEEDED was returned. If that were the case, oldpos
      * would be invalid. That means, a type encoding must never return
@@ -171,8 +173,9 @@ UA_decode64(const u8 buf[8], u64 *v) {
 /* Note that sizeof(bool) != 1 on some platforms. Overlayable integer encoding
  * is disabled in those cases. */
 ENCODE_BINARY(Boolean) {
-    UA_CHECK(ctx->pos + 1 <= ctx->end, return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
-    *ctx->pos = *(const u8*)src;
+    IF_CHECK_BUFSIZE(ctx->pos + 1 <= ctx->end) {
+        *ctx->pos = *(const u8*)src;
+    }
     ++ctx->pos;
     return UA_STATUSCODE_GOOD;
 }
@@ -186,9 +189,9 @@ DECODE_BINARY(Boolean) {
 
 /* Byte */
 ENCODE_BINARY(Byte) {
-    UA_CHECK(ctx->pos + sizeof(u8) <= ctx->end,
-             return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
-    *ctx->pos = *(const u8*)src;
+    IF_CHECK_BUFSIZE(ctx->pos + sizeof(u8) <= ctx->end) {
+        *ctx->pos = *(const u8*)src;
+    }
     ++ctx->pos;
     return UA_STATUSCODE_GOOD;
 }
@@ -203,13 +206,13 @@ DECODE_BINARY(Byte) {
 
 /* UInt16 */
 ENCODE_BINARY(UInt16) {
-    UA_CHECK(ctx->pos + sizeof(u16) <= ctx->end,
-             return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
+    IF_CHECK_BUFSIZE(ctx->pos + sizeof(u16) <= ctx->end) {
 #if UA_BINARY_OVERLAYABLE_INTEGER
-    memcpy(ctx->pos, src, sizeof(u16));
+        memcpy(ctx->pos, src, sizeof(u16));
 #else
-    UA_encode16(*src, ctx->pos);
+        UA_encode16(*src, ctx->pos);
 #endif
+    }
     ctx->pos += 2;
     return UA_STATUSCODE_GOOD;
 }
@@ -228,13 +231,13 @@ DECODE_BINARY(UInt16) {
 
 /* UInt32 */
 ENCODE_BINARY(UInt32) {
-    UA_CHECK(ctx->pos + sizeof(u32) <= ctx->end,
-             return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
+    IF_CHECK_BUFSIZE(ctx->pos + sizeof(u32) <= ctx->end) {
 #if UA_BINARY_OVERLAYABLE_INTEGER
-    memcpy(ctx->pos, src, sizeof(u32));
+        memcpy(ctx->pos, src, sizeof(u32));
 #else
-    UA_encode32(*src, ctx->pos);
+        UA_encode32(*src, ctx->pos);
 #endif
+    }
     ctx->pos += 4;
     return UA_STATUSCODE_GOOD;
 }
@@ -253,13 +256,13 @@ DECODE_BINARY(UInt32) {
 
 /* UInt64 */
 ENCODE_BINARY(UInt64) {
-    UA_CHECK(ctx->pos + sizeof(u64) <= ctx->end,
-             return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
+    IF_CHECK_BUFSIZE(ctx->pos + sizeof(u64) <= ctx->end) {
 #if UA_BINARY_OVERLAYABLE_INTEGER
-    memcpy(ctx->pos, src, sizeof(u64));
+        memcpy(ctx->pos, src, sizeof(u64));
 #else
-    UA_encode64(*src, ctx->pos);
+        UA_encode64(*src, ctx->pos);
 #endif
+    }
     ctx->pos += 8;
     return UA_STATUSCODE_GOOD;
 }
@@ -397,6 +400,12 @@ DECODE_BINARY(Double) {
 
 static status
 Array_encodeBinaryOverlayable(uintptr_t ptr, size_t memSize, Ctx *ctx) {
+    /* CalcSize only */
+    if(ctx->end == NULL) {
+        ctx->pos += memSize;
+        return UA_STATUSCODE_GOOD;
+    }
+
     /* Loop as long as more elements remain than fit into the chunk */
     while(ctx->end < ctx->pos + memSize) {
         size_t possible = ((uintptr_t)ctx->end - (uintptr_t)ctx->pos);
@@ -475,9 +484,13 @@ Array_decodeBinary(void *UA_RESTRICT *UA_RESTRICT dst, size_t *out_length,
 
     /* Filter out arrays that can obviously not be decoded, because the message
      * is too small for the array length. This prevents the allocation of very
-     * long arrays for bogus messages.*/
+     * long arrays for bogus messages.
+     *
+     * The worst known case (so far) is UA_DataValue. It has
+     * sizeof(UA_DataValue) == 80 and an empty DataValue is encoded with just
+     * one byte. We use 128 as the smallest power of 2 larger than 80. */
     size_t length = (size_t)signed_length;
-    UA_CHECK(ctx->pos + ((type->memSize * length) / 32) <= ctx->end,
+    UA_CHECK(ctx->pos + ((type->memSize * length) / 128) <= ctx->end,
              return UA_STATUSCODE_BADDECODINGERROR);
 
     /* Allocate memory */
@@ -522,9 +535,9 @@ ENCODE_BINARY(Guid) {
     ret |= ENCODE_DIRECT(&src->data1, UInt32);
     ret |= ENCODE_DIRECT(&src->data2, UInt16);
     ret |= ENCODE_DIRECT(&src->data3, UInt16);
-    UA_CHECK(ctx->pos + (8*sizeof(u8)) <= ctx->end,
-             return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
-    memcpy(ctx->pos, src->data4, 8*sizeof(u8));
+    IF_CHECK_BUFSIZE(ctx->pos + (8*sizeof(u8)) <= ctx->end) {
+        memcpy(ctx->pos, src->data4, 8*sizeof(u8));
+    }
     ctx->pos += 8;
     return ret;
 }
@@ -841,11 +854,16 @@ ENCODE_BINARY(ExtensionObject) {
     UA_assert(ret != UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
     UA_CHECK_STATUS(ret, return ret);
 
-    /* Encode the content length */
     const UA_DataType *contentType = src->content.decoded.type;
-    size_t len = UA_calcSizeBinary(src->content.decoded.data, contentType);
-    UA_CHECK(len <= UA_INT32_MAX, return UA_STATUSCODE_BADENCODINGERROR);
-    i32 signed_len = (i32)len;
+
+    /* Compute the content length. But only if we are not already in the
+     * calcSizeBinary mode. This is avoids recursive cycles.*/
+    i32 signed_len = 0;
+    if(ctx->end != NULL) {
+        size_t len = UA_calcSizeBinary(src->content.decoded.data, contentType);
+        UA_CHECK(len <= UA_INT32_MAX, return UA_STATUSCODE_BADENCODINGERROR);
+        signed_len = (i32)len;
+    }
     ret = encodeWithExchangeBuffer(&signed_len, &UA_TYPES[UA_TYPES_INT32], ctx);
     UA_assert(ret != UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
     UA_CHECK_STATUS(ret, return ret);
@@ -929,8 +947,10 @@ Variant_encodeBinaryWrapExtensionObject(const UA_Variant *src,
     if(isArray) {
         UA_CHECK(src->arrayLength <= UA_INT32_MAX, return UA_STATUSCODE_BADENCODINGERROR);
         length = src->arrayLength;
+
         i32 encodedLength = (i32)src->arrayLength;
-        ret = ENCODE_DIRECT(&encodedLength, UInt32); /* Int32 */
+        ret = encodeWithExchangeBuffer(&encodedLength, &UA_TYPES[UA_TYPES_INT32], ctx);
+        UA_assert(ret != UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
         UA_CHECK_STATUS(ret, return ret);
     }
 
@@ -1051,6 +1071,105 @@ Variant_decodeBinaryUnwrapExtensionObject(UA_Variant *dst, Ctx *ctx) {
     return decodeBinaryJumpTable[dst->type->typeKind](dst->data, dst->type, ctx);
 }
 
+/* Unwraps all ExtensionObjects in an array if they have the same type.
+ * For that we check whether all ExtensionObjects have the same header. */
+static status
+Variant_decodeBinaryUnwrapExtensionObjectArray(void *UA_RESTRICT *UA_RESTRICT dst,
+                                               size_t *out_length, const UA_DataType **type,
+                                               Ctx *ctx) {
+    u8 *orig_pos = ctx->pos;
+
+    /* Decode the length */
+    i32 signed_length;
+    status ret = DECODE_DIRECT(&signed_length, UInt32); /* Int32 */
+    UA_CHECK_STATUS(ret, return ret);
+
+    /* Return early for empty arrays */
+    if(signed_length <= 0) {
+        *out_length = 0;
+        if(signed_length < 0)
+            *dst = NULL;
+        else
+            *dst = UA_EMPTY_ARRAY_SENTINEL;
+        /* The *type field stays an ExtensionObject, as we did not decode any
+         * member who's type is known. */
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* Protect against memory exhaustion by unrealistic array lengths. An
+     * ExtensionObject is at least 4 byte long (3 byte NodeId + 1 Byte encoding
+     * field). */
+    size_t length = (size_t)signed_length;
+    UA_CHECK(ctx->pos + ((4 * length) / 32) <= ctx->end,
+             return UA_STATUSCODE_BADDECODINGERROR);
+
+    /* Decode the type NodeId of the first member */
+    UA_NodeId binTypeId;
+    UA_NodeId_init(&binTypeId);
+    ret |= DECODE_DIRECT(&binTypeId, NodeId);
+    UA_CHECK_STATUS(ret, return ret);
+
+    /* Lookup the data type */
+    const UA_DataType *contentType = UA_findDataTypeByBinaryInternal(&binTypeId, ctx);
+    UA_NodeId_clear(&binTypeId);
+    if(!contentType) {
+        /* DataType unknown, decode as ExtensionObject array */
+        ctx->pos = orig_pos;
+        return Array_decodeBinary(dst, out_length, *type, ctx);
+    }
+
+    /* Check that the encoding is binary */
+    u8 encoding = 0;
+    ret |= DECODE_DIRECT(&encoding, Byte);
+    UA_CHECK_STATUS(ret, return ret);
+    if(encoding != UA_EXTENSIONOBJECT_ENCODED_BYTESTRING) {
+        /* Encoding format is not automatically decoded, decode as
+         * ExtensionObject array */
+        ctx->pos = orig_pos;
+        return Array_decodeBinary(dst, out_length, *type, ctx);
+    }
+
+    /* Compare the header of all array members if the array can be unwrapped */
+    UA_ByteString header = {(uintptr_t)ctx->pos - (uintptr_t)orig_pos - 4, &orig_pos[4]};
+    UA_ByteString compare_header = header;
+    ctx->pos = &orig_pos[4];
+
+    for(size_t i = 0; i < length; i++) {
+        compare_header.data = ctx->pos;
+        UA_CHECK(compare_header.data + compare_header.length <= ctx->end,
+                 return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED);
+        if(!UA_ByteString_equal(&header, &compare_header)) {
+            /* Different member types, decode as ExtensionObject array */
+            ctx->pos = orig_pos;
+            return Array_decodeBinary(dst, out_length, *type, ctx);
+        }
+
+        /* Decode the length field and jump to the next element */
+        ctx->pos += header.length;
+        u32 member_length = 0;
+        ret = DECODE_DIRECT(&member_length, UInt32);
+        UA_CHECK_STATUS(ret, return ret);
+        ctx->pos += member_length;
+    }
+
+    /* Allocate memory for the unwrapped members */
+    *dst = UA_calloc(length, contentType->memSize);
+    UA_CHECK_MEM(*dst, return UA_STATUSCODE_BADOUTOFMEMORY);
+    *out_length = length;
+    *type = contentType;
+
+    /* Decode unwrapped members */
+    uintptr_t array_pos = (uintptr_t)*dst;
+    ctx->pos = &orig_pos[4];
+    for(size_t i = 0; i < length && ret == UA_STATUSCODE_GOOD; i++) {
+        ctx->pos += header.length + 4; /* Jump over the header and length field */
+        ret = decodeBinaryJumpTable[contentType->typeKind]
+            ((void*)array_pos, contentType, ctx);
+        array_pos += contentType->memSize;
+    }
+    return ret;
+}
+
 /* The resulting variant always has the storagetype UA_VARIANT_DATA. */
 DECODE_BINARY(Variant) {
     /* Decode the encoding byte */
@@ -1083,20 +1202,29 @@ DECODE_BINARY(Variant) {
 
     /* Decode the content */
     dst->type = &UA_TYPES[typeKind];
-    if(isArray) {
-        ret = Array_decodeBinary(&dst->data, &dst->arrayLength, dst->type, ctx);
-    } else if(typeKind != UA_DATATYPEKIND_EXTENSIONOBJECT) {
-        dst->data = UA_new(dst->type);
-        UA_CHECK_MEM(dst->data, ctx->depth--; return UA_STATUSCODE_BADOUTOFMEMORY);
-        ret = decodeBinaryJumpTable[typeKind](dst->data, dst->type, ctx);
+    if(!isArray) {
+        /* Decode scalar */
+        if(typeKind != UA_DATATYPEKIND_EXTENSIONOBJECT) {
+            dst->data = UA_new(dst->type);
+            UA_CHECK_MEM(dst->data, ctx->depth--; return UA_STATUSCODE_BADOUTOFMEMORY);
+            ret = decodeBinaryJumpTable[typeKind](dst->data, dst->type, ctx);
+        } else {
+            ret = Variant_decodeBinaryUnwrapExtensionObject(dst, ctx);
+        }
     } else {
-        ret = Variant_decodeBinaryUnwrapExtensionObject(dst, ctx);
-    }
+        /* Decode array */
+        if(typeKind != UA_DATATYPEKIND_EXTENSIONOBJECT) {
+            ret = Array_decodeBinary(&dst->data, &dst->arrayLength, dst->type, ctx);
+        } else {
+            ret = Variant_decodeBinaryUnwrapExtensionObjectArray(&dst->data, &dst->arrayLength,
+                                                                 &dst->type, ctx);
+        }
 
-    /* Decode array dimensions */
-    if(isArray && (encodingByte & (u8)UA_VARIANT_ENCODINGMASKTYPE_DIMENSIONS) > 0)
-        ret |= Array_decodeBinary((void**)&dst->arrayDimensions, &dst->arrayDimensionsSize,
-                                  &UA_TYPES[UA_TYPES_INT32], ctx);
+        /* Decode array dimensions */
+        if((encodingByte & (u8)UA_VARIANT_ENCODINGMASKTYPE_DIMENSIONS) > 0)
+            ret |= Array_decodeBinary((void**)&dst->arrayDimensions, &dst->arrayDimensionsSize,
+                                      &UA_TYPES[UA_TYPES_INT32], ctx);
+    }
 
     ctx->depth--;
     return ret;
@@ -1477,6 +1605,9 @@ UA_encodeBinaryInternal(const void *src, const UA_DataType *type,
                         u8 **bufPos, const u8 **bufEnd,
                         UA_exchangeEncodeBuffer exchangeCallback,
                         void *exchangeHandle) {
+    if(!type || !src)
+        return UA_STATUSCODE_BADENCODINGERROR;
+
     /* Set up the context */
     Ctx ctx;
     ctx.pos = *bufPos;
@@ -1484,8 +1615,6 @@ UA_encodeBinaryInternal(const void *src, const UA_DataType *type,
     ctx.depth = 0;
     ctx.exchangeBufferCallback = exchangeCallback;
     ctx.exchangeBufferCallbackHandle = exchangeHandle;
-
-    UA_CHECK_MEM(ctx.pos, return UA_STATUSCODE_BADINVALIDARGUMENT);
 
     /* Encode */
     status ret = encodeWithExchangeBuffer(src, type, &ctx);
@@ -1730,308 +1859,15 @@ UA_decodeBinary(const UA_ByteString *inBuf,
  * Compute the Message Size
  * ------------------------
  * The following methods are used to compute the length of a datum in binary
- * encoding. */
-
-static size_t
-Array_calcSizeBinary(const void *src, size_t length, const UA_DataType *type) {
-    size_t s = 4; /* length */
-    if(type->overlayable) {
-        s += type->memSize * length;
-        return s;
-    }
-    uintptr_t ptr = (uintptr_t)src;
-    for(size_t i = 0; i < length; ++i) {
-        s += calcSizeBinaryJumpTable[type->typeKind]((const void*)ptr, type);
-        ptr += type->memSize;
-    }
-    return s;
-}
-
-static size_t calcSizeBinary1(const void *_, const UA_DataType *__) { (void)_, (void)__; return 1; }
-static size_t calcSizeBinary2(const void *_, const UA_DataType *__) { (void)_, (void)__; return 2; }
-static size_t calcSizeBinary4(const void *_, const UA_DataType *__) { (void)_, (void)__; return 4; }
-static size_t calcSizeBinary8(const void *_, const UA_DataType *__) { (void)_, (void)__; return 8; }
-
-CALCSIZE_BINARY(String) { return 4 + src->length; }
-
-CALCSIZE_BINARY(Guid) { return 16; }
-
-CALCSIZE_BINARY(NodeId) {
-    size_t s = 1; /* Encoding byte */
-    switch(src->identifierType) {
-    case UA_NODEIDTYPE_NUMERIC:
-        if(src->identifier.numeric > UA_UINT16_MAX || src->namespaceIndex > UA_BYTE_MAX) {
-            s += 6;
-        } else if(src->identifier.numeric > UA_BYTE_MAX || src->namespaceIndex > 0) {
-            s += 3;
-        } else {
-            s += 1;
-        }
-        break;
-    case UA_NODEIDTYPE_BYTESTRING:
-    case UA_NODEIDTYPE_STRING:
-        s += 2;
-        s += String_calcSizeBinary(&src->identifier.string, NULL);
-        break;
-    case UA_NODEIDTYPE_GUID:
-        s += 18;
-        break;
-    default:
-        return 0;
-    }
-    return s;
-}
-
-CALCSIZE_BINARY(ExpandedNodeId) {
-    size_t s = NodeId_calcSizeBinary(&src->nodeId, NULL);
-    if(src->namespaceUri.length > 0)
-        s += String_calcSizeBinary(&src->namespaceUri, NULL);
-    if(src->serverIndex > 0)
-        s += 4;
-    return s;
-}
-
-CALCSIZE_BINARY(QualifiedName) {
-    return 2 + String_calcSizeBinary(&src->name, NULL);
-}
-
-CALCSIZE_BINARY(LocalizedText) {
-    size_t s = 1; /* Encoding byte */
-    if(src->locale.data)
-        s += String_calcSizeBinary(&src->locale, NULL);
-    if(src->text.data)
-        s += String_calcSizeBinary(&src->text, NULL);
-    return s;
-}
-
-CALCSIZE_BINARY(ExtensionObject) {
-    size_t s = 1; /* Encoding byte */
-
-    /* Encoded content */
-    if(src->encoding <= UA_EXTENSIONOBJECT_ENCODED_XML) {
-        s += NodeId_calcSizeBinary(&src->content.encoded.typeId, NULL);
-        switch(src->encoding) {
-        case UA_EXTENSIONOBJECT_ENCODED_NOBODY:
-            break;
-        case UA_EXTENSIONOBJECT_ENCODED_BYTESTRING:
-        case UA_EXTENSIONOBJECT_ENCODED_XML:
-            s += String_calcSizeBinary(&src->content.encoded.body, NULL);
-            break;
-        default:
-            return 0;
-        }
-        return s;
-    }
-
-    /* Decoded content */
-    if(!src->content.decoded.type || !src->content.decoded.data)
-        return 0;
-    if(src->content.decoded.type->typeId.identifierType != UA_NODEIDTYPE_NUMERIC)
-        return 0;
-
-    s += NodeId_calcSizeBinary(&src->content.decoded.type->binaryEncodingId, NULL); /* Type encoding length */
-    s += 4; /* Encoding length field */
-    const UA_DataType *type = src->content.decoded.type;
-    s += calcSizeBinaryJumpTable[type->typeKind](src->content.decoded.data, type); /* Encoding length */
-    return s;
-}
-
-CALCSIZE_BINARY(Variant) {
-    size_t s = 1; /* Encoding byte */
-    if(!src->type)
-        return s;
-
-    const UA_Boolean isArray = src->arrayLength > 0 || src->data <= UA_EMPTY_ARRAY_SENTINEL;
-    if(isArray)
-        s += Array_calcSizeBinary(src->data, src->arrayLength, src->type);
-    else
-        s += calcSizeBinaryJumpTable[src->type->typeKind](src->data, src->type);
-
-    const UA_Boolean isBuiltin = (src->type->typeKind <= UA_DATATYPEKIND_DIAGNOSTICINFO);
-    const UA_Boolean isEnum = (src->type->typeKind == UA_DATATYPEKIND_ENUM);
-    if(!isBuiltin && !isEnum) {
-        /* The type is wrapped inside an extensionobject */
-        /* (NodeId + encoding byte + extension object length) * array length */
-        size_t length = isArray ? src->arrayLength : 1;
-        s += (NodeId_calcSizeBinary(&src->type->binaryEncodingId, NULL) + 1 + 4) * length;
-    }
-
-    const UA_Boolean hasDimensions = isArray && src->arrayDimensionsSize > 0;
-    if(hasDimensions)
-        s += Array_calcSizeBinary(src->arrayDimensions, src->arrayDimensionsSize,
-                                  &UA_TYPES[UA_TYPES_INT32]);
-    return s;
-}
-
-CALCSIZE_BINARY(DataValue) {
-    size_t s = 1; /* Encoding byte */
-    if(src->hasValue)
-        s += Variant_calcSizeBinary(&src->value, NULL);
-    if(src->hasStatus)
-        s += 4;
-    if(src->hasSourceTimestamp)
-        s += 8;
-    if(src->hasSourcePicoseconds)
-        s += 2;
-    if(src->hasServerTimestamp)
-        s += 8;
-    if(src->hasServerPicoseconds)
-        s += 2;
-    return s;
-}
-
-CALCSIZE_BINARY(DiagnosticInfo) {
-    size_t s = 1; /* Encoding byte */
-    if(src->hasSymbolicId)
-        s += 4;
-    if(src->hasNamespaceUri)
-        s += 4;
-    if(src->hasLocalizedText)
-        s += 4;
-    if(src->hasLocale)
-        s += 4;
-    if(src->hasAdditionalInfo)
-        s += String_calcSizeBinary(&src->additionalInfo, NULL);
-    if(src->hasInnerStatusCode)
-        s += 4;
-    if(src->hasInnerDiagnosticInfo)
-        s += DiagnosticInfo_calcSizeBinary(src->innerDiagnosticInfo, NULL);
-    return s;
-}
-
-static size_t
-calcSizeBinaryStructure(const void *p, const UA_DataType *type) {
-    size_t s = 0;
-    uintptr_t ptr = (uintptr_t)p;
-    u8 membersSize = type->membersSize;
-
-    /* Loop over members */
-    for(size_t i = 0; i < membersSize; ++i) {
-        const UA_DataTypeMember *member = &type->members[i];
-        const UA_DataType *membertype = member->memberType;
-        ptr += member->padding;
-
-        /* Array */
-        if(member->isArray) {
-            const size_t length = *((const size_t*)ptr);
-            ptr += sizeof(size_t);
-            s += Array_calcSizeBinary(*(void *UA_RESTRICT const *)ptr, length, membertype);
-            ptr += sizeof(void*);
-            continue;
-        }
-
-        /* Scalar */
-        s += calcSizeBinaryJumpTable[membertype->typeKind]((const void*)ptr, membertype);
-        ptr += membertype->memSize;
-    }
-
-    return s;
-}
-
-static size_t
-calcSizeBinaryStructureWithOptFields(const void *p, const UA_DataType *type) {
-    /* Start with the size of the encoding mask */
-    size_t s = sizeof(UA_UInt32);
-
-    /* Loop over members */
-    uintptr_t ptr = (uintptr_t)p;
-    for(size_t i = 0; i < type->membersSize; ++i) {
-        const UA_DataTypeMember *member = &type->members[i];
-        const UA_DataType *membertype = member->memberType;
-        ptr += member->padding;
-        if(member->isOptional) {
-            if((member->isArray && ((*(void* const*)(ptr+sizeof(size_t))) == NULL)) ||
-                (!member->isArray && (*(void* const*)ptr == NULL))) {
-                /* Optional member not contained */
-                if(member->isArray)
-                    ptr += sizeof(size_t);
-                ptr += sizeof(void *);
-                continue;
-            }
-            /* Fallthrough to take the size into account */
-        }
-        /* Array */
-        if(member->isArray) {
-            const size_t length = *((const size_t*)ptr);
-            ptr += sizeof(size_t);
-            s += Array_calcSizeBinary(*(void *UA_RESTRICT const *)ptr, length, membertype);
-            ptr += sizeof(void*);
-            continue;
-        }
-        /* Scalar */
-        if (member->isOptional) {
-            s += calcSizeBinaryJumpTable[membertype->typeKind](*(void* const*)ptr, membertype);
-            ptr += sizeof(void *);
-        } else {
-            s += calcSizeBinaryJumpTable[membertype->typeKind]((const void*)ptr, membertype);
-            ptr += membertype->memSize;
-        }
-    }
-    return s;
-}
-
-static size_t
-calcSizeBinaryUnion(const void *p, const UA_DataType *type) {
-    size_t s = 4; /* UA_TYPES[UA_TYPES_UINT32].memSize; */
-    const UA_UInt32 selection = *(const UA_UInt32 *)p;
-    if(selection == 0)
-        return s;
-
-    const UA_DataTypeMember *m = &type->members[selection-1];
-    const UA_DataType *mt = m->memberType;
-
-    uintptr_t ptr = ((uintptr_t)p) + m->padding; /* includes switchfield length */
-    if(!m->isArray) {
-        s += UA_calcSizeBinary((const void*)ptr, mt);
-    } else {
-        const size_t length = *((const size_t*)ptr);
-        ptr += sizeof(size_t);
-        s += Array_calcSizeBinary(*(void *UA_RESTRICT const *)ptr, length, mt);
-    }
-    return s;
-}
-
-static size_t
-calcSizeBinaryNotImplemented(const void *p, const UA_DataType *type) {
-    (void)p, (void)type;
-    return 0;
-}
-
-const calcSizeBinarySignature calcSizeBinaryJumpTable[UA_DATATYPEKINDS] = {
-    (calcSizeBinarySignature)calcSizeBinary1, /* Boolean */
-    (calcSizeBinarySignature)calcSizeBinary1, /* SByte */
-    (calcSizeBinarySignature)calcSizeBinary1, /* Byte */
-    (calcSizeBinarySignature)calcSizeBinary2, /* Int16 */
-    (calcSizeBinarySignature)calcSizeBinary2, /* UInt16 */
-    (calcSizeBinarySignature)calcSizeBinary4, /* Int32 */
-    (calcSizeBinarySignature)calcSizeBinary4, /* UInt32 */
-    (calcSizeBinarySignature)calcSizeBinary8, /* Int64 */
-    (calcSizeBinarySignature)calcSizeBinary8, /* UInt64 */
-    (calcSizeBinarySignature)calcSizeBinary4, /* Float */
-    (calcSizeBinarySignature)calcSizeBinary8, /* Double */
-    (calcSizeBinarySignature)String_calcSizeBinary,
-    (calcSizeBinarySignature)calcSizeBinary8, /* DateTime */
-    (calcSizeBinarySignature)Guid_calcSizeBinary,
-    (calcSizeBinarySignature)String_calcSizeBinary, /* ByteString */
-    (calcSizeBinarySignature)String_calcSizeBinary, /* XmlElement */
-    (calcSizeBinarySignature)NodeId_calcSizeBinary,
-    (calcSizeBinarySignature)ExpandedNodeId_calcSizeBinary,
-    (calcSizeBinarySignature)calcSizeBinary4, /* StatusCode */
-    (calcSizeBinarySignature)QualifiedName_calcSizeBinary,
-    (calcSizeBinarySignature)LocalizedText_calcSizeBinary,
-    (calcSizeBinarySignature)ExtensionObject_calcSizeBinary,
-    (calcSizeBinarySignature)DataValue_calcSizeBinary,
-    (calcSizeBinarySignature)Variant_calcSizeBinary,
-    (calcSizeBinarySignature)DiagnosticInfo_calcSizeBinary,
-    (calcSizeBinarySignature)calcSizeBinaryNotImplemented, /* Decimal */
-    (calcSizeBinarySignature)calcSizeBinary4, /* Enumeration */
-    (calcSizeBinarySignature)calcSizeBinaryStructure,
-    (calcSizeBinarySignature)calcSizeBinaryStructureWithOptFields, /* Structure with Optional Fields */
-    (calcSizeBinarySignature)calcSizeBinaryUnion, /* Union */
-    (calcSizeBinarySignature)calcSizeBinaryNotImplemented /* BitfieldCluster */
-};
+ * encoding. If the end-ptr is NULL, then the normal encoding functions do not
+ * throw an error when the buffer limits are exceeded. */
 
 size_t
 UA_calcSizeBinary(const void *p, const UA_DataType *type) {
-    return calcSizeBinaryJumpTable[type->typeKind](p, type);
+    u8 *pos = NULL;
+    const u8 *posEnd = NULL;
+    UA_StatusCode res = UA_encodeBinaryInternal(p, type, &pos, &posEnd, NULL, NULL);
+    if(res != UA_STATUSCODE_GOOD)
+        return 0;
+    return (size_t)(uintptr_t)pos;
 }

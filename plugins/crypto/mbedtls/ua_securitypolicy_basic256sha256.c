@@ -212,7 +212,7 @@ asym_decrypt_sp_basic256sha256(Basic256Sha256_ChannelContext *cc,
     if(cc == NULL || data == NULL)
         return UA_STATUSCODE_BADINTERNALERROR;
     return mbedtls_decrypt_rsaOaep(&cc->policyContext->localPrivateKey,
-                                   &cc->policyContext->drbgContext, data);
+                                   &cc->policyContext->drbgContext, data, MBEDTLS_MD_SHA1);
 }
 
 static size_t
@@ -264,7 +264,8 @@ sym_verify_sp_basic256sha256(Basic256Sha256_ChannelContext *cc,
 
     Basic256Sha256_PolicyContext *pc = cc->policyContext;
     unsigned char mac[UA_SHA256_LENGTH];
-    mbedtls_hmac(&pc->sha256MdContext, &cc->remoteSymSigningKey, message, mac);
+    if(mbedtls_hmac(&pc->sha256MdContext, &cc->remoteSymSigningKey, message, mac) != UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
 
     /* Compare with Signature */
     if(!UA_constantTimeEqual(signature->data, mac, UA_SHA256_LENGTH))
@@ -279,8 +280,10 @@ sym_sign_sp_basic256sha256(const Basic256Sha256_ChannelContext *cc,
     if(signature->length != UA_SHA256_LENGTH)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    mbedtls_hmac(&cc->policyContext->sha256MdContext, &cc->localSymSigningKey,
-                 message, signature->data);
+    if(mbedtls_hmac(&cc->policyContext->sha256MdContext, &cc->localSymSigningKey,
+                    message, signature->data) != UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+
     return UA_STATUSCODE_GOOD;
 }
 
@@ -718,6 +721,7 @@ UA_SecurityPolicy_Basic256Sha256(UA_SecurityPolicy *policy, const UA_ByteString 
     policy->logger = logger;
 
     policy->policyUri = UA_STRING("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
+    policy->securityLevel = 20;
 
     UA_SecurityPolicyAsymmetricModule *const asymmetricModule = &policy->asymmetricModule;
     UA_SecurityPolicySymmetricModule *const symmetricModule = &policy->symmetricModule;
@@ -772,7 +776,7 @@ UA_SecurityPolicy_Basic256Sha256(UA_SecurityPolicy *policy, const UA_ByteString 
     UA_SecurityPolicySignatureAlgorithm *sym_signatureAlgorithm =
         &symmetricModule->cryptoModule.signatureAlgorithm;
     sym_signatureAlgorithm->uri =
-        UA_STRING("http://www.w3.org/2000/09/xmldsig#hmac-sha1\0");
+        UA_STRING("http://www.w3.org/2000/09/xmldsig#hmac-sha2-256\0");
     sym_signatureAlgorithm->verify =
         (UA_StatusCode (*)(void *, const UA_ByteString *, const UA_ByteString *))sym_verify_sp_basic256sha256;
     sym_signatureAlgorithm->sign =

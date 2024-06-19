@@ -5,25 +5,22 @@
  * Copyright (c) 2020 Siemens AG (Author: Thomas Fischer)
  */
 
-#include <open62541/plugin/pubsub_udp.h>
 #include <open62541/server_config_default.h>
 #include <open62541/server_pubsub.h>
 #include "../common.h"
 
+#include "test_helpers.h"
 #include "ua_pubsub.h"
-#include "pubsub/ua_pubsub_config.h"
 #include "ua_server_internal.h"
 
 #include <check.h>
+#include <stdlib.h>
 
 UA_Server *server = NULL;
 
 static void setup(void) {
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
-    UA_ServerConfig *config = UA_Server_getConfig(server);
-    UA_ServerConfig_setDefault(config);
-
     UA_Server_run_startup(server);
 }
 
@@ -35,6 +32,7 @@ static void teardown(void) {
 START_TEST(AddPublisherUsingBinaryFile) {
     UA_ByteString publisherConfiguration = loadFile("../../tests/pubsub/check_publisher_configuration.bin");
     ck_assert(publisherConfiguration.length > 0);
+    UA_LOCK(&server->serviceMutex);
     UA_StatusCode retVal = UA_PubSubManager_loadPubSubConfigFromByteString(server, publisherConfiguration);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
     UA_PubSubConnection *connection;
@@ -47,7 +45,7 @@ START_TEST(AddPublisherUsingBinaryFile) {
     TAILQ_FOREACH(connection, &server->pubSubManager.connections, listEntry) {
         connectionCount++;
         tmp = UA_STRING("UADP Connection 1");
-        ck_assert(UA_String_equal(&tmp, &connection->config->name));
+        ck_assert(UA_String_equal(&tmp, &connection->config.name));
         LIST_FOREACH(writerGroup, &connection->writerGroups, listEntry){
             writerGroupCount++;
             tmp = UA_STRING("Demo WriterGroup");
@@ -59,6 +57,7 @@ START_TEST(AddPublisherUsingBinaryFile) {
             }
         }
     }
+    UA_UNLOCK(&server->serviceMutex);
     ck_assert_uint_eq(connectionCount, 1);
     ck_assert_uint_eq(writerGroupCount, 1);
     ck_assert_uint_eq(dataSetWriterCount, 1);
@@ -68,6 +67,7 @@ START_TEST(AddPublisherUsingBinaryFile) {
 START_TEST(AddSubscriberUsingBinaryFile) {
     UA_ByteString subscriberConfiguration = loadFile("../../tests/pubsub/check_subscriber_configuration.bin");
     ck_assert(subscriberConfiguration.length > 0);
+    UA_LOCK(&server->serviceMutex);
     UA_StatusCode retVal = UA_PubSubManager_loadPubSubConfigFromByteString(server, subscriberConfiguration);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
     UA_PubSubConnection *connection;
@@ -80,7 +80,7 @@ START_TEST(AddSubscriberUsingBinaryFile) {
     TAILQ_FOREACH(connection, &server->pubSubManager.connections, listEntry) {
         connectionCount++;
         tmp = UA_STRING("UDPMC Connection 1");
-        ck_assert(UA_String_equal(&tmp, &connection->config->name));
+        ck_assert(UA_String_equal(&tmp, &connection->config.name));
         LIST_FOREACH(readerGroup, &connection->readerGroups, listEntry){
             readerGroupCount++;
             tmp = UA_STRING("ReaderGroup1");
@@ -92,6 +92,7 @@ START_TEST(AddSubscriberUsingBinaryFile) {
             }
         }
     }
+    UA_UNLOCK(&server->serviceMutex);
     ck_assert_uint_eq(connectionCount, 1);
     ck_assert_uint_eq(readerGroupCount, 1);
     ck_assert_uint_eq(dataSetReaderCount, 1);

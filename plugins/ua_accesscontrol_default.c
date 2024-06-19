@@ -21,7 +21,9 @@ typedef struct {
     UA_Boolean allowAnonymous;
     size_t usernamePasswordLoginSize;
     UA_UsernamePasswordLogin *usernamePasswordLogin;
-    UA_CertificateVerification verifyX509;
+    UA_UsernamePasswordLoginCallback loginCallback;
+    void *loginContext;
+    UA_CertificateGroup verifyX509;
 } AccessControlContext;
 
 #define ANONYMOUS_POLICY "open62541-anonymous-policy"
@@ -43,47 +45,56 @@ activateSession_default(UA_Server *server, UA_AccessControl *ac,
                         const UA_ExtensionObject *userIdentityToken,
                         void **sessionContext) {
     AccessControlContext *context = (AccessControlContext*)ac->context;
+    UA_ServerConfig *config = UA_Server_getConfig(server);
 
     /* The empty token is interpreted as anonymous */
+    UA_AnonymousIdentityToken anonToken;
+    UA_ExtensionObject tmpIdentity;
     if(userIdentityToken->encoding == UA_EXTENSIONOBJECT_ENCODED_NOBODY) {
-        if(!context->allowAnonymous)
-            return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
-
-        /* No userdata atm */
-        *sessionContext = NULL;
-        return UA_STATUSCODE_GOOD;
+        UA_AnonymousIdentityToken_init(&anonToken);
+        UA_ExtensionObject_init(&tmpIdentity);
+        UA_ExtensionObject_setValueNoDelete(&tmpIdentity,
+                                            &anonToken,
+                                            &UA_TYPES[UA_TYPES_ANONYMOUSIDENTITYTOKEN]);
+        userIdentityToken = &tmpIdentity;
     }
 
     /* Could the token be decoded? */
     if(userIdentityToken->encoding < UA_EXTENSIONOBJECT_DECODED)
         return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
 
-    /* Anonymous login */
-    if(userIdentityToken->content.decoded.type == &UA_TYPES[UA_TYPES_ANONYMOUSIDENTITYTOKEN]) {
+    const UA_DataType *tokenType = userIdentityToken->content.decoded.type;
+    if(tokenType == &UA_TYPES[UA_TYPES_ANONYMOUSIDENTITYTOKEN]) {
+        /* Anonymous login */
         if(!context->allowAnonymous)
             return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
 
         const UA_AnonymousIdentityToken *token = (UA_AnonymousIdentityToken*)
             userIdentityToken->content.decoded.data;
 
-        /* Compatibility notice: Siemens OPC Scout v10 provides an empty
+        /* Match the beginnig of the PolicyId.
+         * Compatibility notice: Siemens OPC Scout v10 provides an empty
          * policyId. This is not compliant. For compatibility, assume that empty
          * policyId == ANONYMOUS_POLICY */
-        if(token->policyId.data && !UA_String_equal(&token->policyId, &anonymous_policy))
+        if(token->policyId.data &&
+           (token->policyId.length < anonymous_policy.length ||
+            strncmp((const char*)token->policyId.data,
+                    (const char*)anonymous_policy.data,
+                    anonymous_policy.length) != 0)) {
             return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
+        }
+    } else if(tokenType == &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]) {
+        /* Username and password */
+        const UA_UserNameIdentityToken *userToken = (UA_UserNameIdentityToken*)
+            userIdentityToken->content.decoded.data;
 
-        /* No userdata atm */
-        *sessionContext = NULL;
-        return UA_STATUSCODE_GOOD;
-    }
-
-    /* Username and password */
-    if(userIdentityToken->content.decoded.type == &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]) {
-        const UA_UserNameIdentityToken *userToken =
-            (UA_UserNameIdentityToken*)userIdentityToken->content.decoded.data;
-
-        if(!UA_String_equal(&userToken->policyId, &username_policy))
+        /* Match the beginnig of the PolicyId */
+        if(userToken->policyId.length < username_policy.length ||
+           strncmp((const char*)userToken->policyId.data,
+                   (const char*)username_policy.data,
+                   username_policy.length) != 0) {
             return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
+        }
 
         /* The userToken has been decrypted by the server before forwarding
          * it to the plugin. This information can be used here. */
@@ -95,49 +106,53 @@ activateSession_default(UA_Server *server, UA_AccessControl *ac,
 
         /* Try to match username/pw */
         UA_Boolean match = false;
-        for(size_t i = 0; i < context->usernamePasswordLoginSize; i++) {
-            if(UA_String_equal(&userToken->userName, &context->usernamePasswordLogin[i].username) &&
-               UA_String_equal(&userToken->password, &context->usernamePasswordLogin[i].password)) {
+        if(context->loginCallback) {
+            if(context->loginCallback(&userToken->userName, &userToken->password,
+               context->usernamePasswordLoginSize, context->usernamePasswordLogin,
+               sessionContext, context->loginContext) == UA_STATUSCODE_GOOD)
                 match = true;
-                break;
+        } else {
+            for(size_t i = 0; i < context->usernamePasswordLoginSize; i++) {
+                if(UA_String_equal(&userToken->userName, &context->usernamePasswordLogin[i].username) &&
+                   UA_String_equal(&userToken->password, &context->usernamePasswordLogin[i].password)) {
+                    match = true;
+                    break;
+                }
             }
         }
         if(!match)
             return UA_STATUSCODE_BADUSERACCESSDENIED;
-
-        /* For the CTT, recognize whether two sessions are  */
-        UA_ByteString *username = UA_ByteString_new();
-        if(username)
-            UA_ByteString_copy(&userToken->userName, username);
-        *sessionContext = username;
-        return UA_STATUSCODE_GOOD;
-    }
-
-    /* x509 certificate */
-    if(userIdentityToken->content.decoded.type == &UA_TYPES[UA_TYPES_X509IDENTITYTOKEN]) {
+    } else if(tokenType == &UA_TYPES[UA_TYPES_X509IDENTITYTOKEN]) {
+        /* x509 certificate */
         const UA_X509IdentityToken *userToken = (UA_X509IdentityToken*)
             userIdentityToken->content.decoded.data;
 
-        if(!UA_String_equal(&userToken->policyId, &certificate_policy))
+        /* Match the beginnig of the PolicyId */
+        if(userToken->policyId.length < certificate_policy.length ||
+           strncmp((const char*)userToken->policyId.data,
+                   (const char*)certificate_policy.data,
+                   certificate_policy.length) != 0) {
+            return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
+        }
+
+        if(!config->sessionPKI.verifyCertificate)
             return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
 
-        if(!context->verifyX509.verifyCertificate)
-            return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
-
-        return context->verifyX509.
-            verifyCertificate(&context->verifyX509,
-                              &userToken->certificateData);
+       UA_StatusCode res = config->sessionPKI.
+            verifyCertificate(&config->sessionPKI, &userToken->certificateData);
+        if(res != UA_STATUSCODE_GOOD)
+            return UA_STATUSCODE_BADIDENTITYTOKENREJECTED;
+    } else {
+        /* Unsupported token type */
+        return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
     }
 
-    /* Unsupported token type */
-    return UA_STATUSCODE_BADIDENTITYTOKENINVALID;
+    return UA_STATUSCODE_GOOD;
 }
 
 static void
 closeSession_default(UA_Server *server, UA_AccessControl *ac,
                      const UA_NodeId *sessionId, void *sessionContext) {
-    if(sessionContext)
-        UA_ByteString_delete((UA_ByteString*)sessionContext);
 }
 
 static UA_UInt32
@@ -209,12 +224,22 @@ static UA_Boolean
 allowTransferSubscription_default(UA_Server *server, UA_AccessControl *ac,
                                   const UA_NodeId *oldSessionId, void *oldSessionContext,
                                   const UA_NodeId *newSessionId, void *newSessionContext) {
-    if(oldSessionContext == newSessionContext)
+    if(!oldSessionId)
         return true;
-    if(oldSessionContext && newSessionContext)
-        return UA_ByteString_equal((UA_ByteString*)oldSessionContext,
-                                   (UA_ByteString*)newSessionContext);
-    return false;
+    /* Allow the transfer if the same user-id was used to activate both sessions */
+    UA_Variant session1UserId;
+    UA_Variant_init(&session1UserId);
+    UA_Server_getSessionAttribute(server, oldSessionId,
+                                  UA_QUALIFIEDNAME(0, "clientUserId"),
+                                  &session1UserId);
+    UA_Variant session2UserId;
+    UA_Variant_init(&session2UserId);
+    UA_Server_getSessionAttribute(server, newSessionId,
+                                  UA_QUALIFIEDNAME(0, "clientUserId"),
+                                  &session2UserId);
+
+    return (UA_order(&session1UserId, &session2UserId,
+                     &UA_TYPES[UA_TYPES_VARIANT]) == UA_ORDER_EQ);
 }
 #endif
 
@@ -260,9 +285,6 @@ static void clear_default(UA_AccessControl *ac) {
         if(context->usernamePasswordLoginSize > 0)
             UA_free(context->usernamePasswordLogin);
 
-        if(context->verifyX509.clear)
-            context->verifyX509.clear(&context->verifyX509);
-
         UA_free(ac->context);
         ac->context = NULL;
     }
@@ -271,11 +293,10 @@ static void clear_default(UA_AccessControl *ac) {
 UA_StatusCode
 UA_AccessControl_default(UA_ServerConfig *config,
                          UA_Boolean allowAnonymous,
-                         UA_CertificateVerification *verifyX509,
                          const UA_ByteString *userTokenPolicyUri,
                          size_t usernamePasswordLoginSize,
                          const UA_UsernamePasswordLogin *usernamePasswordLogin) {
-    UA_LOG_WARNING(&config->logger, UA_LOGCATEGORY_SERVER,
+    UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
                    "AccessControl: Unconfigured AccessControl. Users have all permissions.");
     UA_AccessControl *ac = &config->accessControl;
 
@@ -315,25 +336,8 @@ UA_AccessControl_default(UA_ServerConfig *config,
     /* Allow anonymous? */
     context->allowAnonymous = allowAnonymous;
     if(allowAnonymous) {
-        UA_LOG_INFO(&config->logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_INFO(config->logging, UA_LOGCATEGORY_SERVER,
                     "AccessControl: Anonymous login is enabled");
-    }
-
-    if(config->logging == NULL) {
-        config->logging = &config->logger;
-    }
-    /* Allow x509 certificates? Move the plugin over. */
-    if(verifyX509) {
-        context->verifyX509 = *verifyX509;
-        memset(verifyX509, 0, sizeof(UA_CertificateVerification));
-        if(context->verifyX509.logging == NULL) {
-            context->verifyX509.logging = &config->logging;
-        }
-    } else {
-        memset(&context->verifyX509, 0, sizeof(UA_CertificateVerification));
-        context->verifyX509.logging = &config->logging;
-        UA_LOG_INFO(&config->logger, UA_LOGCATEGORY_SERVER,
-                    "AccessControl: x509 certificate user authentication is enabled");
     }
 
     /* Copy username/password to the access control plugin */
@@ -351,58 +355,108 @@ UA_AccessControl_default(UA_ServerConfig *config,
         }
     }
 
+    size_t numOfPolcies = 1;
+    if(!userTokenPolicyUri) {
+        if(config->securityPoliciesSize > 0)
+            numOfPolcies = config->securityPoliciesSize;
+        else {
+            UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
+                           "No security policies defined for the secure channel.");
+            return UA_STATUSCODE_BADINTERNALERROR;
+        }
+    }
+
     /* Set the allowed policies */
     size_t policies = 0;
     if(allowAnonymous)
         policies++;
-    if(verifyX509)
-        policies++;
     if(usernamePasswordLoginSize > 0)
+        policies++;
+    if(config->sessionPKI.verifyCertificate)
         policies++;
     ac->userTokenPoliciesSize = 0;
     ac->userTokenPolicies = (UA_UserTokenPolicy *)
-        UA_Array_new(policies, &UA_TYPES[UA_TYPES_USERTOKENPOLICY]);
+        UA_Array_new(policies * numOfPolcies, &UA_TYPES[UA_TYPES_USERTOKENPOLICY]);
     if(!ac->userTokenPolicies)
         return UA_STATUSCODE_BADOUTOFMEMORY;
-    ac->userTokenPoliciesSize = policies;
+    ac->userTokenPoliciesSize = policies * numOfPolcies;
 
+    if(policies == 0) {
+        UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
+                       "No allowed policies set.");
+        return UA_STATUSCODE_GOOD;
+    }
+
+    const UA_ByteString *utpUri = NULL;
     policies = 0;
-    if(allowAnonymous) {
-        ac->userTokenPolicies[policies].tokenType = UA_USERTOKENTYPE_ANONYMOUS;
-        ac->userTokenPolicies[policies].policyId = UA_STRING_ALLOC(ANONYMOUS_POLICY);
-        policies++;
-    }
-
-    if(verifyX509) {
-        ac->userTokenPolicies[policies].tokenType = UA_USERTOKENTYPE_CERTIFICATE;
-        ac->userTokenPolicies[policies].policyId = UA_STRING_ALLOC(CERTIFICATE_POLICY);
-#if UA_LOGLEVEL <= 400
-        if(UA_ByteString_equal(userTokenPolicyUri, &UA_SECURITY_POLICY_NONE_URI)) {
-            UA_LOG_WARNING(&config->logger, UA_LOGCATEGORY_SERVER,
-                           "x509 Certificate Authentication configured, "
-                           "but no encrypting SecurityPolicy. "
-                           "This can leak credentials on the network.");
+    for(size_t i = 0; i < numOfPolcies; i++) {
+        if(userTokenPolicyUri) {
+            utpUri = userTokenPolicyUri;
+        } else {
+            utpUri = &config->securityPolicies[i].policyUri;
         }
-#endif
-        UA_ByteString_copy(userTokenPolicyUri,
-                           &ac->userTokenPolicies[policies].securityPolicyUri);
-        policies++;
-    }
-
-    if(usernamePasswordLoginSize > 0) {
-        ac->userTokenPolicies[policies].tokenType = UA_USERTOKENTYPE_USERNAME;
-        ac->userTokenPolicies[policies].policyId = UA_STRING_ALLOC(USERNAME_POLICY);
-#if UA_LOGLEVEL <= 400
-        if(UA_ByteString_equal(userTokenPolicyUri, &UA_SECURITY_POLICY_NONE_URI)) {
-            UA_LOG_WARNING(&config->logger, UA_LOGCATEGORY_SERVER,
-                           "Username/Password Authentication configured, "
-                           "but no encrypting SecurityPolicy. "
-                           "This can leak credentials on the network.");
+        if(allowAnonymous) {
+            ac->userTokenPolicies[policies].tokenType = UA_USERTOKENTYPE_ANONYMOUS;
+            ac->userTokenPolicies[policies].policyId = UA_STRING_ALLOC(ANONYMOUS_POLICY);
+            UA_ByteString_copy(utpUri,
+                               &ac->userTokenPolicies[policies].securityPolicyUri);
+            policies++;
         }
+
+        if(config->sessionPKI.verifyCertificate) {
+            ac->userTokenPolicies[policies].tokenType = UA_USERTOKENTYPE_CERTIFICATE;
+            ac->userTokenPolicies[policies].policyId = UA_STRING_ALLOC(CERTIFICATE_POLICY);
+#if UA_LOGLEVEL <= 400
+            if(UA_ByteString_equal(utpUri, &UA_SECURITY_POLICY_NONE_URI)) {
+                UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
+                               "x509 Certificate Authentication configured, "
+                               "but no encrypting SecurityPolicy. "
+                               "This can leak credentials on the network.");
+            }
 #endif
-        UA_ByteString_copy(userTokenPolicyUri,
-                           &ac->userTokenPolicies[policies].securityPolicyUri);
+            UA_ByteString_copy(utpUri,
+                               &ac->userTokenPolicies[policies].securityPolicyUri);
+            policies++;
+        }
+
+        if(usernamePasswordLoginSize > 0) {
+            ac->userTokenPolicies[policies].tokenType = UA_USERTOKENTYPE_USERNAME;
+            ac->userTokenPolicies[policies].policyId = UA_STRING_ALLOC(USERNAME_POLICY);
+#if UA_LOGLEVEL <= 400
+            if(UA_ByteString_equal(utpUri, &UA_SECURITY_POLICY_NONE_URI)) {
+                UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
+                               "Username/Password Authentication configured, "
+                               "but no encrypting SecurityPolicy. "
+                               "This can leak credentials on the network.");
+            }
+#endif
+            UA_ByteString_copy(utpUri,
+                               &ac->userTokenPolicies[policies].securityPolicyUri);
+            policies++;
+        }
     }
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_AccessControl_defaultWithLoginCallback(UA_ServerConfig *config,
+                                          UA_Boolean allowAnonymous,
+                                          const UA_ByteString *userTokenPolicyUri,
+                                          size_t usernamePasswordLoginSize,
+                                          const UA_UsernamePasswordLogin *usernamePasswordLogin,
+                                          UA_UsernamePasswordLoginCallback loginCallback,
+                                          void *loginContext) {
+    AccessControlContext *context;
+    UA_StatusCode sc =
+        UA_AccessControl_default(config, allowAnonymous, userTokenPolicyUri,
+                                 usernamePasswordLoginSize, usernamePasswordLogin);
+    if(sc != UA_STATUSCODE_GOOD)
+        return sc;
+
+    context = (AccessControlContext *)config->accessControl.context;
+    context->loginCallback = loginCallback;
+    context->loginContext = loginContext;
+
     return UA_STATUSCODE_GOOD;
 }
 

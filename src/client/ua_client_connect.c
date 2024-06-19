@@ -6,20 +6,90 @@
  *    Copyright 2017-2019 (c) Fraunhofer IOSB (Author: Mark Giraud)
  */
 
-#include <open62541/transport_generated.h>
-#include <open62541/transport_generated_handling.h>
+#include <open62541/types.h>
 
+#include "open62541/transport_generated.h"
 #include "ua_client_internal.h"
 #include "ua_types_encoding_binary.h"
+
+/* Some OPC UA servers only return all Endpoints if the EndpointURL used during
+ * the HEL/ACK handshake exactly matches -- including the path following the
+ * address and port! Hence for the first connection we only call FindServers and
+ * reopen a new TCP connection using then EndpointURL found there.
+ *
+ * The overall process is this:
+ * - Connect with the EndpointURL provided by the user (HEL/ACK)
+ * - Call FindServers
+ *   - If one of the results has an exactly matching EndpointUrl, continue.
+ *   - Otherwise select a matching server, update the endpointURL member of
+ *     UA_Client and reconnect.
+ * - Call GetEndpoints and select an Endpoint
+ * - Open a SecureChannel and Session for that Endpoint
+ */
 
 #define UA_MINMESSAGESIZE 8192
 #define UA_SESSION_LOCALNONCELENGTH 32
 #define MAX_DATA_SIZE 4096
-
 #define REVERSE_CONNECT_INDICATOR (void *)(uintptr_t)0xFFFFFFFF
 
-static UA_StatusCode initConnect(UA_Client *client);
+static void initConnect(UA_Client *client);
 static UA_StatusCode createSessionAsync(UA_Client *client);
+
+/* Get the EndpointUrl to be used right now.
+ * This is adjusted during the discovery process.
+ * We fall back if connecting to an EndpointUrl fails. */
+static UA_String
+getEndpointUrl(UA_Client *client) {
+    if(client->config.endpoint.endpointUrl.length > 0) {
+        return client->config.endpoint.endpointUrl;
+    } else if(client->discoveryUrl.length > 0) {
+        return client->discoveryUrl;
+    } else {
+        return client->config.endpointUrl;
+    }
+}
+
+/* If an EndpointUrl doesn't work (TCP connection fails), fall back to the
+ * initial EndpointUrl */
+static UA_StatusCode
+fallbackEndpointUrl(UA_Client* client) {
+    /* Cannot fallback, the initial EndpointUrl is already in use */
+    UA_String currentUrl = getEndpointUrl(client);
+    if(UA_String_equal(&currentUrl, &client->config.endpointUrl)) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "Could not open a TCP connection to the Endpoint at %.*s",
+                     (int)client->config.endpointUrl.length,
+                     client->config.endpointUrl.data);
+        return UA_STATUSCODE_BADCONNECTIONREJECTED;
+    }
+
+    if(client->config.endpoint.endpointUrl.length > 0) {
+        /* Overwrite the EndpointUrl of the Endpoint */
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                       "Could not open a TCP connection to the Endpoint at %.*s. "
+                       "Overriding the endpoint description with the initial "
+                       "EndpointUrl at %.*s.",
+                       (int)client->config.endpoint.endpointUrl.length,
+                       client->config.endpoint.endpointUrl.data,
+                       (int)client->config.endpointUrl.length,
+                       client->config.endpointUrl.data);
+        UA_String_clear(&client->config.endpoint.endpointUrl);
+        return UA_String_copy(&client->config.endpointUrl,
+                              &client->config.endpoint.endpointUrl);
+    } else {
+        /* Overwrite the DiscoveryUrl returned by FindServers */
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                       "The DiscoveryUrl returned by the FindServers service (%.*s) "
+                       "could not be connected. Continuing with the initial EndpointUrl "
+                       "%.*s for the GetEndpoints service.",
+                       (int)client->config.endpointUrl.length,
+                       client->config.endpointUrl.data,
+                       (int)client->config.endpointUrl.length,
+                       client->config.endpointUrl.data);
+        UA_String_clear(&client->discoveryUrl);
+        return UA_String_copy(&client->config.endpointUrl, &client->discoveryUrl);
+    }
+}
 
 static UA_SecurityPolicy *
 getSecurityPolicy(UA_Client *client, UA_String policyUri) {
@@ -30,7 +100,6 @@ getSecurityPolicy(UA_Client *client, UA_String policyUri) {
     return NULL;
 }
 
-#ifdef UA_ENABLE_ENCRYPTION
 static UA_SecurityPolicy *
 getAuthSecurityPolicy(UA_Client *client, UA_String policyUri) {
     for(size_t i = 0; i < client->config.authSecurityPoliciesSize; i++) {
@@ -39,21 +108,33 @@ getAuthSecurityPolicy(UA_Client *client, UA_String policyUri) {
     }
     return NULL;
 }
-#endif
 
+/* The endpoint is unconfigured if the description is all zeroed-out */
 static UA_Boolean
 endpointUnconfigured(UA_Client *client) {
-    char test = 0;
-    char *pos = (char *)&client->config.endpoint;
-    for(size_t i = 0; i < sizeof(UA_EndpointDescription); i++)
-        test = test | *(pos + i);
-    pos = (char *)&client->config.userTokenPolicy;
-    for(size_t i = 0; i < sizeof(UA_UserTokenPolicy); i++)
-        test = test | *(pos + i);
-    return (test == 0);
+    UA_EndpointDescription tmp;
+    UA_EndpointDescription_init(&tmp);
+    return UA_equal(&tmp, &client->config.endpoint,
+                    &UA_TYPES[UA_TYPES_ENDPOINTDESCRIPTION]);
 }
 
-#ifdef UA_ENABLE_ENCRYPTION
+UA_Boolean
+isFullyConnected(UA_Client *client) {
+    /* No Session, but require one */
+    if(client->sessionState != UA_SESSIONSTATE_ACTIVATED && !client->config.noSession)
+        return false;
+
+    /* No SecureChannel */
+    if(client->channel.state != UA_SECURECHANNELSTATE_OPEN)
+        return false;
+
+    /* Handshake ongoing or not yet done */
+    if(client->endpointsHandshake || endpointUnconfigured(client) ||
+       client->findServersHandshake || client->discoveryUrl.length == 0)
+        return false;
+
+    return true;
+}
 
 /* Function to create a signature using remote certificate and nonce */
 static UA_StatusCode
@@ -65,25 +146,26 @@ signActivateSessionRequest(UA_Client *client, UA_SecureChannel *channel,
 
     const UA_SecurityPolicy *sp = channel->securityPolicy;
     UA_SignatureData *sd = &request->clientSignature;
+    const UA_SecurityPolicySignatureAlgorithm *signAlg =
+        &sp->asymmetricModule.cryptoModule.signatureAlgorithm;
 
-    /* Prepare the clientSignature */
-    size_t signatureSize = sp->certificateSigningAlgorithm.
-        getLocalSignatureSize(channel->channelContext);
-    UA_StatusCode retval = UA_String_copy(&sp->certificateSigningAlgorithm.uri,
-                                          &sd->algorithm);
+    /* Copy the signature algorithm identifier */
+    UA_StatusCode retval = UA_String_copy(&signAlg->uri, &sd->algorithm);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
+    /* Allocate memory for the signature */
+    size_t signatureSize = signAlg->getLocalSignatureSize(channel->channelContext);
     retval = UA_ByteString_allocBuffer(&sd->signature, signatureSize);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
     /* Allocate a temporary buffer */
-    size_t dataToSignSize = channel->remoteCertificate.length + client->remoteNonce.length;
+    UA_ByteString dataToSign;
+    size_t dataToSignSize =
+        channel->remoteCertificate.length + client->serverSessionNonce.length;
     if(dataToSignSize > MAX_DATA_SIZE)
         return UA_STATUSCODE_BADINTERNALERROR;
-
-    UA_ByteString dataToSign;
     retval = UA_ByteString_allocBuffer(&dataToSign, dataToSignSize);
     if(retval != UA_STATUSCODE_GOOD)
         return retval; /* sd->signature is cleaned up with the response */
@@ -92,63 +174,75 @@ signActivateSessionRequest(UA_Client *client, UA_SecureChannel *channel,
     memcpy(dataToSign.data, channel->remoteCertificate.data,
            channel->remoteCertificate.length);
     memcpy(dataToSign.data + channel->remoteCertificate.length,
-           client->remoteNonce.data, client->remoteNonce.length);
-    retval = sp->certificateSigningAlgorithm.sign(channel->channelContext,
-                                                  &dataToSign, &sd->signature);
+           client->serverSessionNonce.data, client->serverSessionNonce.length);
+    retval = signAlg->sign(channel->channelContext, &dataToSign, &sd->signature);
     if(retval != UA_STATUSCODE_GOOD)
-        return retval;
+        goto cleanup;
 
     /* Prepare the userTokenSignature */
-if(client->config.userTokenPolicy.tokenType == UA_USERTOKENTYPE_CERTIFICATE) {
-    UA_SignatureData *utsd = &request->userTokenSignature;
-    UA_X509IdentityToken *userIdentityToken = (UA_X509IdentityToken *)
-        request->userIdentityToken.content.decoded.data;
+    if(client->config.userTokenPolicy.tokenType == UA_USERTOKENTYPE_CERTIFICATE) {
+        /* Get the correct securityPolicy for authentication */
+        UA_SecurityPolicy *utsp =
+            getAuthSecurityPolicy(client, client->config.authSecurityPolicyUri);
+        if(!utsp) {
+            UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                         "The configured SecurityPolicy for certificate "
+                         "authentication could not be found");
+            retval = UA_STATUSCODE_BADSECURITYPOLICYREJECTED;
+            goto cleanup;
+        }
 
-    /* Get the correct securityPolicy for authentication */
-    UA_SecurityPolicy* utpSecurityPolicy;
-    utpSecurityPolicy = getAuthSecurityPolicy(client, client->config.authSecurityPolicyUri);
+        UA_SignatureData *utsd = &request->userTokenSignature;
+        UA_X509IdentityToken *token = (UA_X509IdentityToken *)
+            request->userIdentityToken.content.decoded.data;
+        UA_SecurityPolicySignatureAlgorithm *utpSignAlg =
+            &utsp->asymmetricModule.cryptoModule.signatureAlgorithm;
 
-    /* We need a channel context with the user certificate in order to reuse
-    * the code for signing. */
-    void *tempChannelContext;
-    retval = utpSecurityPolicy->channelModule.
-        newContext(utpSecurityPolicy, &userIdentityToken->certificateData, &tempChannelContext);
-    if(retval != UA_STATUSCODE_GOOD)
-        return UA_STATUSCODE_BADINTERNALERROR;
+        /* Check the size of the content for signing */
+        UA_ByteString signData = UA_BYTESTRING_NULL;
+        size_t signDataSize =
+            channel->remoteCertificate.length + client->serverSessionNonce.length;
+        if(dataToSignSize > MAX_DATA_SIZE) {
+            retval = UA_STATUSCODE_BADINTERNALERROR;
+            goto cleanup;
+        }
 
-    size_t userTokenSignatureSize = utpSecurityPolicy->certificateSigningAlgorithm.
-        getLocalSignatureSize(tempChannelContext);
-    retval = UA_String_copy(&utpSecurityPolicy->certificateSigningAlgorithm.uri,
-                            &utsd->algorithm);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
+        /* Copy the algorithm identifier */
+        retval = UA_String_copy(&utpSignAlg->uri, &utsd->algorithm);
+        if(retval != UA_STATUSCODE_GOOD)
+            goto cleanup;
 
-    retval = UA_ByteString_allocBuffer(&utsd->signature, userTokenSignatureSize);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
+        /* We need a channel context with the user certificate in order to reuse
+         * the code for signing. */
+        void *tmpCtx;
+        retval = utsp->channelModule.newContext(utsp, &token->certificateData, &tmpCtx);
+        if(retval != UA_STATUSCODE_GOOD)
+            goto cleanup;
 
-    /* Allocate a temporary buffer */
-    size_t userTokenSignSize = channel->remoteCertificate.length + client->remoteNonce.length;
-    if(dataToSignSize > MAX_DATA_SIZE)
-        return UA_STATUSCODE_BADINTERNALERROR;
+        /* Allocate memory for the signature */
+        retval = UA_ByteString_allocBuffer(&utsd->signature,
+                                           utpSignAlg->getLocalSignatureSize(tmpCtx));
+        if(retval != UA_STATUSCODE_GOOD)
+            goto cleanup_utp;
 
-    UA_ByteString userTokenSign;
-    retval = UA_ByteString_allocBuffer(&userTokenSign, userTokenSignSize);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval; /* sd->signature is cleaned up with the response */
+        /* Allocate a temporary buffer for the data to be signed */
+        retval = UA_ByteString_allocBuffer(&signData, signDataSize);
+        if(retval != UA_STATUSCODE_GOOD)
+            goto cleanup_utp;
 
-    /* Create the userTokenSignature */
-    memcpy(userTokenSign.data, channel->remoteCertificate.data,
-           channel->remoteCertificate.length);
-    memcpy(userTokenSign.data + channel->remoteCertificate.length,
-           client->remoteNonce.data, client->remoteNonce.length);
-    retval = utpSecurityPolicy->certificateSigningAlgorithm.sign(tempChannelContext,
-                                                  &userTokenSign, &utsd->signature);
-    /* Clean up */
-    UA_ByteString_clear(&userTokenSign);
-    utpSecurityPolicy->channelModule.deleteContext(tempChannelContext);
-}
-    /* Clean up */
+        /* Create the userTokenSignature */
+        memcpy(signData.data, channel->remoteCertificate.data,
+               channel->remoteCertificate.length);
+        memcpy(signData.data + channel->remoteCertificate.length,
+               client->serverSessionNonce.data, client->serverSessionNonce.length);
+        retval = utpSignAlg->sign(tmpCtx, &signData, &utsd->signature);
+
+    cleanup_utp:
+        UA_ByteString_clear(&signData);
+        utsp->channelModule.deleteContext(tmpCtx);
+    }
+
+ cleanup:
     UA_ByteString_clear(&dataToSign);
     return retval;
 }
@@ -179,7 +273,7 @@ encryptUserIdentityToken(UA_Client *client, const UA_String *userTokenSecurityPo
 
     UA_SecurityPolicy *sp = getSecurityPolicy(client, *userTokenSecurityPolicy);
     if(!sp) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_NETWORK,
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_NETWORK,
                        "Could not find the required SecurityPolicy for the UserToken");
         return UA_STATUSCODE_BADSECURITYPOLICYREJECTED;
     }
@@ -190,7 +284,7 @@ encryptUserIdentityToken(UA_Client *client, const UA_String *userTokenSecurityPo
     UA_StatusCode retval = sp->channelModule.
         newContext(sp, &client->config.endpoint.serverCertificate, &channelContext);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_NETWORK,
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_NETWORK,
                        "Could not instantiate the SecurityPolicy for the UserToken");
         return UA_STATUSCODE_BADINTERNALERROR;
     }
@@ -200,7 +294,8 @@ encryptUserIdentityToken(UA_Client *client, const UA_String *userTokenSecurityPo
         encryptionAlgorithm.getRemotePlainTextBlockSize(channelContext);
     size_t encryptedBlockSize = sp->asymmetricModule.cryptoModule.
         encryptionAlgorithm.getRemoteBlockSize(channelContext);
-    UA_UInt32 length = (UA_UInt32)(tokenData->length + client->remoteNonce.length);
+    UA_UInt32 length = (UA_UInt32)(tokenData->length +
+                                   client->serverSessionNonce.length);
     UA_UInt32 totalLength = length + 4; /* Including the length field */
     size_t blocks = totalLength / plainTextBlockSize;
     if(totalLength % plainTextBlockSize != 0)
@@ -219,7 +314,8 @@ encryptUserIdentityToken(UA_Client *client, const UA_String *userTokenSecurityPo
     const UA_Byte *end = &encrypted.data[encrypted.length];
     retval = UA_UInt32_encodeBinary(&length, &pos, end);
     memcpy(pos, tokenData->data, tokenData->length);
-    memcpy(&pos[tokenData->length], client->remoteNonce.data, client->remoteNonce.length);
+    memcpy(&pos[tokenData->length], client->serverSessionNonce.data,
+           client->serverSessionNonce.length);
     UA_assert(retval == UA_STATUSCODE_GOOD);
 
     /* Add padding
@@ -269,23 +365,23 @@ checkCreateSessionSignature(UA_Client *client, const UA_SecureChannel *channel,
     const UA_SecurityPolicy *sp = channel->securityPolicy;
     const UA_ByteString *lc = &sp->localCertificate;
 
-    size_t dataToVerifySize = lc->length + client->localNonce.length;
+    size_t dataToVerifySize = lc->length + client->clientSessionNonce.length;
     UA_ByteString dataToVerify = UA_BYTESTRING_NULL;
     UA_StatusCode retval = UA_ByteString_allocBuffer(&dataToVerify, dataToVerifySize);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
     memcpy(dataToVerify.data, lc->data, lc->length);
-    memcpy(dataToVerify.data + lc->length,
-           client->localNonce.data, client->localNonce.length);
+    memcpy(dataToVerify.data + lc->length, client->clientSessionNonce.data,
+           client->clientSessionNonce.length);
 
-    retval = sp->certificateSigningAlgorithm.verify(channel->channelContext, &dataToVerify,
-                                                    &response->serverSignature.signature);
+    const UA_SecurityPolicySignatureAlgorithm *signAlg =
+        &sp->asymmetricModule.cryptoModule.signatureAlgorithm;
+    retval = signAlg->verify(channel->channelContext, &dataToVerify,
+                             &response->serverSignature.signature);
     UA_ByteString_clear(&dataToVerify);
     return retval;
 }
-
-#endif
 
 /***********************/
 /* Open the Connection */
@@ -297,19 +393,19 @@ processERRResponse(UA_Client *client, const UA_ByteString *chunk) {
 
     size_t offset = 0;
     UA_TcpErrorMessage errMessage;
-    UA_StatusCode res =
+    client->connectStatus =
         UA_decodeBinaryInternal(chunk, &offset, &errMessage,
                                 &UA_TRANSPORT[UA_TRANSPORT_TCPERRORMESSAGE], NULL);
-    if(res != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR_CHANNEL(&client->config.logger, &client->channel,
+    if(client->connectStatus != UA_STATUSCODE_GOOD) {
+        UA_LOG_ERROR_CHANNEL(client->config.logging, &client->channel,
                              "Received an ERR response that could not be decoded "
-                             "with StatusCode %s", UA_StatusCode_name(res));
-        client->connectStatus = res;
+                             "with StatusCode %s",
+                             UA_StatusCode_name(client->connectStatus));
         closeSecureChannel(client);
         return;
     }
 
-    UA_LOG_ERROR_CHANNEL(&client->config.logger, &client->channel,
+    UA_LOG_ERROR_CHANNEL(client->config.logging, &client->channel,
                          "Received an ERR response with StatusCode %s and the following "
                          "reason: %.*s", UA_StatusCode_name(errMessage.error),
                          (int)errMessage.reason.length, errMessage.reason.data);
@@ -322,7 +418,7 @@ void
 processACKResponse(UA_Client *client, const UA_ByteString *chunk) {
     UA_SecureChannel *channel = &client->channel;
     if(channel->state != UA_SECURECHANNELSTATE_HEL_SENT) {
-        UA_LOG_ERROR_CHANNEL(&client->config.logger, channel,
+        UA_LOG_ERROR_CHANNEL(client->config.logging, channel,
                              "SecureChannel not in the HEL-sent state");
         client->connectStatus = UA_STATUSCODE_BADSECURECHANNELCLOSED;
         closeSecureChannel(client);
@@ -336,7 +432,7 @@ processACKResponse(UA_Client *client, const UA_ByteString *chunk) {
         UA_decodeBinaryInternal(chunk, &offset, &ackMessage,
                                 &UA_TRANSPORT[UA_TRANSPORT_TCPACKNOWLEDGEMESSAGE], NULL);
     if(client->connectStatus != UA_STATUSCODE_GOOD) {
-        UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_NETWORK,
+        UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_NETWORK,
                      "Decoding ACK message failed");
         closeSecureChannel(client);
         return;
@@ -345,7 +441,7 @@ processACKResponse(UA_Client *client, const UA_ByteString *chunk) {
     client->connectStatus =
         UA_SecureChannel_processHELACK(channel, &ackMessage);
     if(client->connectStatus != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_NETWORK,
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_NETWORK,
                      "Processing the ACK message failed with StatusCode %s",
                      UA_StatusCode_name(client->connectStatus));
         closeSecureChannel(client);
@@ -375,7 +471,7 @@ sendHELMessage(UA_Client *client) {
     hello.sendBufferSize = client->config.localConnectionConfig.sendBufferSize;
     hello.maxMessageSize = client->config.localConnectionConfig.localMaxMessageSize;
     hello.maxChunkCount = client->config.localConnectionConfig.localMaxChunkCount;
-    hello.endpointUrl = client->endpointUrl;
+    hello.endpointUrl = getEndpointUrl(client);
 
     UA_Byte *bufPos = &message.data[8]; /* skip the header */
     const UA_Byte *bufEnd = &message.data[message.length];
@@ -401,18 +497,18 @@ sendHELMessage(UA_Client *client) {
     retval = cm->sendWithConnection(cm, client->channel.connectionId,
                                     &UA_KEYVALUEMAP_NULL, &message);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT, "Sending HEL failed");
+        UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT, "Sending HEL failed");
         closeSecureChannel(client);
         return retval;
     }
 
-    UA_LOG_DEBUG(&client->config.logger, UA_LOGCATEGORY_CLIENT, "Sent HEL message");
+    UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_CLIENT, "Sent HEL message");
     client->channel.state = UA_SECURECHANNELSTATE_HEL_SENT;
     return UA_STATUSCODE_GOOD;
 }
 
 void processRHEMessage(UA_Client *client, const UA_ByteString *chunk) {
-    UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT, "RHE received");
+    UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT, "RHE received");
 
     size_t offset = 0; /* Go to the beginning of the TcpHelloMessage */
     UA_TcpReverseHelloMessage rheMessage;
@@ -421,14 +517,14 @@ void processRHEMessage(UA_Client *client, const UA_ByteString *chunk) {
                                 &UA_TRANSPORT[UA_TRANSPORT_TCPREVERSEHELLOMESSAGE], NULL);
 
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_NETWORK,
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_NETWORK,
                      "Decoding RHE message failed");
         closeSecureChannel(client);
         return;
     }
 
-    UA_String_clear(&client->endpointUrl);
-    UA_String_copy(&rheMessage.endpointUrl, &client->endpointUrl);
+    UA_String_clear(&client->discoveryUrl);
+    UA_String_copy(&rheMessage.endpointUrl, &client->discoveryUrl);
 
     UA_TcpReverseHelloMessage_clear(&rheMessage);
 
@@ -467,7 +563,7 @@ processOPNResponse(UA_Client *client, const UA_ByteString *message) {
     if(client->channel.securityMode != UA_MESSAGESECURITYMODE_NONE &&
        UA_ByteString_equal(&client->channel.remoteNonce,
                            &response.serverNonce)) {
-        UA_LOG_ERROR_CHANNEL(&client->config.logger, &client->channel,
+        UA_LOG_ERROR_CHANNEL(client->config.logging, &client->channel,
                              "The server reused the last nonce");
         client->connectStatus = UA_STATUSCODE_BADSECURITYCHECKSFAILED;
         closeSecureChannel(client);
@@ -477,7 +573,8 @@ processOPNResponse(UA_Client *client, const UA_ByteString *message) {
     /* Response.securityToken.revisedLifetime is UInt32 we need to cast it to
      * DateTime=Int64 we take 75% of lifetime to start renewing as described in
      * standard */
-    client->nextChannelRenewal = UA_DateTime_nowMonotonic()
+    UA_EventLoop *el = client->config.eventLoop;
+    client->nextChannelRenewal = el->dateTime_nowMonotonic(el)
             + (UA_DateTime) (response.securityToken.revisedLifetime
                     * (UA_Double) UA_DATETIME_MSEC * 0.75);
 
@@ -504,10 +601,10 @@ processOPNResponse(UA_Client *client, const UA_ByteString *message) {
     UA_Float lifetime = (UA_Float)response.securityToken.revisedLifetime / 1000;
     UA_Boolean renew = (client->channel.state == UA_SECURECHANNELSTATE_OPEN);
     if(renew) {
-        UA_LOG_INFO_CHANNEL(&client->config.logger, &client->channel, "SecureChannel "
+        UA_LOG_INFO_CHANNEL(client->config.logging, &client->channel, "SecureChannel "
                             "renewed with a revised lifetime of %.2fs", lifetime);
     } else {
-        UA_LOG_INFO_CHANNEL(&client->config.logger, &client->channel,
+        UA_LOG_INFO_CHANNEL(client->config.logging, &client->channel,
                             "SecureChannel opened with SecurityPolicy %.*s "
                             "and a revised lifetime of %.2fs",
                             (int)client->channel.securityPolicy->policyUri.length,
@@ -518,30 +615,35 @@ processOPNResponse(UA_Client *client, const UA_ByteString *message) {
 }
 
 /* OPN messges to renew the channel are sent asynchronous */
-static UA_StatusCode
+static void
 sendOPNAsync(UA_Client *client, UA_Boolean renew) {
-    if(!UA_SecureChannel_isConnected(&client->channel))
-        return UA_STATUSCODE_BADINTERNALERROR;
+    if(!UA_SecureChannel_isConnected(&client->channel)) {
+        client->connectStatus = UA_STATUSCODE_BADINTERNALERROR;
+        return;
+    }
 
-    UA_StatusCode retval = UA_SecureChannel_generateLocalNonce(&client->channel);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
+    client->connectStatus =
+        UA_SecureChannel_generateLocalNonce(&client->channel);
+    if(client->connectStatus != UA_STATUSCODE_GOOD)
+        return;
+
+    UA_EventLoop *el = client->config.eventLoop;
 
     /* Prepare the OpenSecureChannelRequest */
     UA_OpenSecureChannelRequest opnSecRq;
     UA_OpenSecureChannelRequest_init(&opnSecRq);
-    opnSecRq.requestHeader.timestamp = UA_DateTime_now();
+    opnSecRq.requestHeader.timestamp = el->dateTime_now(el);
     opnSecRq.requestHeader.authenticationToken = client->authenticationToken;
     opnSecRq.securityMode = client->channel.securityMode;
     opnSecRq.clientNonce = client->channel.localNonce;
     opnSecRq.requestedLifetime = client->config.secureChannelLifeTime;
     if(renew) {
         opnSecRq.requestType = UA_SECURITYTOKENREQUESTTYPE_RENEW;
-        UA_LOG_DEBUG_CHANNEL(&client->config.logger, &client->channel,
+        UA_LOG_DEBUG_CHANNEL(client->config.logging, &client->channel,
                              "Requesting to renew the SecureChannel");
     } else {
         opnSecRq.requestType = UA_SECURITYTOKENREQUESTTYPE_ISSUE;
-        UA_LOG_DEBUG_CHANNEL(&client->config.logger, &client->channel,
+        UA_LOG_DEBUG_CHANNEL(client->config.logging, &client->channel,
                              "Requesting to open a SecureChannel");
     }
 
@@ -549,35 +651,43 @@ sendOPNAsync(UA_Client *client, UA_Boolean renew) {
     UA_UInt32 requestId = ++client->requestId;
 
     /* Send the OPN message */
-    UA_LOG_DEBUG(&client->config.logger, UA_LOGCATEGORY_SECURECHANNEL,
+    UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_SECURECHANNEL,
                  "Requesting to open a SecureChannel");
-    retval =
+    client->connectStatus =
         UA_SecureChannel_sendAsymmetricOPNMessage(&client->channel, requestId, &opnSecRq,
                                                   &UA_TYPES[UA_TYPES_OPENSECURECHANNELREQUEST]);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_SECURECHANNEL,
+    if(client->connectStatus != UA_STATUSCODE_GOOD) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_SECURECHANNEL,
                       "Sending OPN message failed with error %s",
-                      UA_StatusCode_name(retval));
-        client->connectStatus = retval;
+                      UA_StatusCode_name(client->connectStatus));
         closeSecureChannel(client);
-        return retval;
+        return;
     }
 
+    /* Update the state */
     client->channel.renewState = UA_SECURECHANNELRENEWSTATE_SENT;
     if(client->channel.state < UA_SECURECHANNELSTATE_OPN_SENT)
         client->channel.state = UA_SECURECHANNELSTATE_OPN_SENT;
-    UA_LOG_DEBUG(&client->config.logger, UA_LOGCATEGORY_SECURECHANNEL, "OPN message sent");
-    return UA_STATUSCODE_GOOD;
+
+    UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_SECURECHANNEL,
+                 "OPN message sent");
 }
 
 UA_StatusCode
 __Client_renewSecureChannel(UA_Client *client) {
+    UA_LOCK_ASSERT(&client->clientMutex, 1);
+
+    UA_EventLoop *el = client->config.eventLoop;
+    UA_DateTime now = el->dateTime_nowMonotonic(el);
+
     /* Check if OPN has been sent or the SecureChannel is still valid */
     if(client->channel.state != UA_SECURECHANNELSTATE_OPEN ||
        client->channel.renewState == UA_SECURECHANNELRENEWSTATE_SENT ||
-       client->nextChannelRenewal > UA_DateTime_nowMonotonic())
+       client->nextChannelRenewal > now)
         return UA_STATUSCODE_GOODCALLAGAIN;
+
     sendOPNAsync(client, true);
+
     return client->connectStatus;
 }
 
@@ -596,28 +706,45 @@ responseActivateSession(UA_Client *client, void *userdata,
 
     UA_ActivateSessionResponse *ar = (UA_ActivateSessionResponse*)response;
     if(ar->responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                     "ActivateSession failed with error code %s",
-                     UA_StatusCode_name(ar->responseHeader.serviceResult));
-        if(ar->responseHeader.serviceResult == UA_STATUSCODE_BADSESSIONIDINVALID ||
-           ar->responseHeader.serviceResult == UA_STATUSCODE_BADSESSIONCLOSED) {
-            /* The session is no longer usable. Create a brand new one. */
-            cleanupSession(client);
-            UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                         "Session cannot be activated. Create a new Session.");
-            client->connectStatus = createSessionAsync(client);
-        } else {
-            /* Something else is wrong. Give up. */
+        /* Activating the Session failed */
+        cleanupSession(client);
+
+        /* Configuration option to not create a new Session */
+        if(client->config.noNewSession) {
+            UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                         "Session cannot be activated with StatusCode %s. "
+                         "The client is configured not to create a new Session.",
+                         UA_StatusCode_name(ar->responseHeader.serviceResult));
             client->connectStatus = ar->responseHeader.serviceResult;
             closeSecureChannel(client);
+            UA_UNLOCK(&client->clientMutex);
+            return;
         }
+
+        /* The Session is no longer usable. Create a brand new one. */
+        if(ar->responseHeader.serviceResult == UA_STATUSCODE_BADSESSIONIDINVALID ||
+           ar->responseHeader.serviceResult == UA_STATUSCODE_BADSESSIONCLOSED) {
+            UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                           "Session to be activated no longer exists. Create a new Session.");
+            client->connectStatus = createSessionAsync(client);
+            UA_UNLOCK(&client->clientMutex);
+            return;
+        }
+
+        /* Something else is wrong. Maybe the credentials no longer work. Give up. */
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "Session cannot be activated with StatusCode %s. "
+                     "The client cannot recover from this, closing the connection.",
+                     UA_StatusCode_name(ar->responseHeader.serviceResult));
+        client->connectStatus = ar->responseHeader.serviceResult;
+        closeSecureChannel(client);
         UA_UNLOCK(&client->clientMutex);
         return;
     }
 
     /* Replace the nonce */
-    UA_ByteString_clear(&client->remoteNonce);
-    client->remoteNonce = ar->serverNonce;
+    UA_ByteString_clear(&client->serverSessionNonce);
+    client->serverSessionNonce = ar->serverNonce;
     UA_ByteString_init(&ar->serverNonce);
 
     client->sessionState = UA_SESSIONSTATE_ACTIVATED;
@@ -636,6 +763,14 @@ static UA_StatusCode
 activateSessionAsync(UA_Client *client) {
     UA_LOCK_ASSERT(&client->clientMutex, 1);
 
+    if(client->sessionState != UA_SESSIONSTATE_CREATED &&
+       client->sessionState != UA_SESSIONSTATE_ACTIVATED) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "Can not activate session, session neither created nor activated. "
+                     "Actual state: '%u'", client->sessionState);
+        return UA_STATUSCODE_BADSESSIONCLOSED;
+    }
+
     UA_ActivateSessionRequest request;
     UA_ActivateSessionRequest_init(&request);
     UA_StatusCode retval =
@@ -644,13 +779,12 @@ activateSessionAsync(UA_Client *client) {
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
-    if (client->config.sessionLocaleIdsSize && client->config.sessionLocaleIds) {
+    if(client->config.sessionLocaleIdsSize && client->config.sessionLocaleIds) {
         retval = UA_Array_copy(client->config.sessionLocaleIds,
                                client->config.sessionLocaleIdsSize,
                                (void **)&request.localeIds, &UA_TYPES[UA_TYPES_LOCALEID]);
-        if (retval != UA_STATUSCODE_GOOD)
+        if(retval != UA_STATUSCODE_GOOD)
             return retval;
-
         request.localeIdsSize = client->config.sessionLocaleIdsSize;
     }
 
@@ -667,20 +801,17 @@ activateSessionAsync(UA_Client *client) {
         request.userIdentityToken.encoding = UA_EXTENSIONOBJECT_DECODED;
     }
 
-    /* Set the policy-Id from the endpoint. Every IdentityToken starts with a
-     * string. With an X509IdentityToken, the policy-Id is already set. */
-    if(client->config.userTokenPolicy.tokenType != UA_USERTOKENTYPE_CERTIFICATE)
-        retval = UA_String_copy(&client->config.userTokenPolicy.policyId,
-                                (UA_String*)request.userIdentityToken.content.decoded.data);
+    /* Set the correct PolicyId from the endpoint */
+    UA_String_clear((UA_String*)request.userIdentityToken.content.decoded.data);
+    retval = UA_String_copy(&client->config.userTokenPolicy.policyId,
+                            (UA_String*)request.userIdentityToken.content.decoded.data);
 
-#ifdef UA_ENABLE_ENCRYPTION
     /* Encrypt the UserIdentityToken */
     const UA_String *userTokenPolicy = &client->channel.securityPolicy->policyUri;
     if(client->config.userTokenPolicy.securityPolicyUri.length > 0)
         userTokenPolicy = &client->config.userTokenPolicy.securityPolicyUri;
     retval |= encryptUserIdentityToken(client, userTokenPolicy, &request.userIdentityToken);
     retval |= signActivateSessionRequest(client, &client->channel, &request);
-#endif
 
     if(retval == UA_STATUSCODE_GOOD)
         retval = __Client_AsyncService(client, &request,
@@ -693,7 +824,7 @@ activateSessionAsync(UA_Client *client) {
     if(retval == UA_STATUSCODE_GOOD)
         client->sessionState = UA_SESSIONSTATE_ACTIVATE_REQUESTED;
     else
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "ActivateSession failed when sending the request with error code %s",
                      UA_StatusCode_name(retval));
 
@@ -708,6 +839,9 @@ responseGetEndpoints(UA_Client *client, void *userdata,
 
     client->endpointsHandshake = false;
 
+    UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                 "Received GetEndpointsResponse");
+
     UA_GetEndpointsResponse *resp = (UA_GetEndpointsResponse*)response;
 
     /* GetEndpoints not possible. Fail the connection */
@@ -718,7 +852,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
         if(UA_SecureChannel_isConnected(&client->channel)) {
            client->connectStatus = resp->responseHeader.serviceResult;
            closeSecureChannel(client);
-           UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+           UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                         "GetEndpointRequest failed with error code %s",
                         UA_StatusCode_name(client->connectStatus));
         }
@@ -729,18 +863,29 @@ responseGetEndpoints(UA_Client *client, void *userdata,
     }
 
     /* Warn if the Endpoints look incomplete / don't match the EndpointUrl */
-    Client_warnEndpointsResult(client, resp, &client->endpointUrl);
+    Client_warnEndpointsResult(client, resp, &client->discoveryUrl);
 
-    UA_Boolean endpointFound = false;
-    UA_Boolean tokenFound = false;
-    const UA_String binaryTransport = UA_STRING("http://opcfoundation.org/UA-Profile/"
-                                                "Transport/uatcp-uasc-uabinary");
+    const size_t notFound = (size_t)-1;
+    size_t bestEndpointIndex = notFound;
+    size_t bestTokenIndex = notFound;
+    UA_Byte bestEndpointLevel = 0;
+    const UA_String binaryTransport =
+        UA_STRING("http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary");
 
-    // TODO: compare endpoint information with client->endpointUri
-    UA_EndpointDescription* endpointArray = resp->endpoints;
-    size_t endpointArraySize = resp->endpointsSize;
-    for(size_t i = 0; i < endpointArraySize; ++i) {
-        UA_EndpointDescription* endpoint = &endpointArray[i];
+    /* Find a matching combination of Endpoint and UserTokenPolicy */
+    for(size_t i = 0; i < resp->endpointsSize; ++i) {
+        UA_EndpointDescription* endpoint = &resp->endpoints[i];
+
+        /* Do we already have a better candidate? */
+        if(endpoint->securityLevel < bestEndpointLevel)
+            continue;
+
+        /* Filter by the ApplicationURI if defined */
+        if(client->config.applicationUri.length > 0 &&
+           !UA_String_equal(&client->config.applicationUri,
+                            &endpoint->server.applicationUri))
+            continue;
+
         /* Look out for binary transport endpoints.
          * Note: Siemens returns empty ProfileUrl, we will accept it as binary. */
         if(endpoint->transportProfileUri.length != 0 &&
@@ -749,7 +894,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
 
         /* Valid SecurityMode? */
         if(endpoint->securityMode < 1 || endpoint->securityMode > 3) {
-            UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+            UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                         "Rejecting endpoint %lu: invalid security mode",
                         (long unsigned)i);
             continue;
@@ -758,7 +903,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
         /* Selected SecurityMode? */
         if(client->config.securityMode > 0 &&
            client->config.securityMode != endpoint->securityMode) {
-            UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+            UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                         "Rejecting endpoint %lu: security mode doesn't match",
                         (long unsigned)i);
             continue;
@@ -768,7 +913,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
         if(client->config.securityPolicyUri.length > 0 &&
            !UA_String_equal(&client->config.securityPolicyUri,
                             &endpoint->securityPolicyUri)) {
-            UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+            UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                         "Rejecting endpoint %lu: security policy doesn't match",
                         (long unsigned)i);
             continue;
@@ -776,15 +921,17 @@ responseGetEndpoints(UA_Client *client, void *userdata,
 
         /* SecurityPolicy available? */
         if(!getSecurityPolicy(client, endpoint->securityPolicyUri)) {
-            UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+            UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                         "Rejecting endpoint %lu: security policy not available",
                         (long unsigned)i);
             continue;
         }
 
-        endpointFound = true;
+        /* We have found a matching endpoint.
+         * But does it contain a matching user token policy? */
+        bestEndpointIndex = i;
 
-        /* Look for a user token policy with an anonymous token */
+        /* Look for a supported user token policy */
         for(size_t j = 0; j < endpoint->userIdentityTokensSize; ++j) {
             UA_UserTokenPolicy* tokenPolicy = &endpoint->userIdentityTokens[j];
             const UA_DataType *tokenType =
@@ -794,7 +941,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             if(tokenPolicy->tokenType != UA_USERTOKENTYPE_ANONYMOUS &&
                tokenPolicy->securityPolicyUri.length > 0 &&
                !getSecurityPolicy(client, tokenPolicy->securityPolicyUri)) {
-                UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                             "Rejecting UserTokenPolicy %lu in endpoint %lu: "
                             "security policy '%.*s' not available",
                             (long unsigned)j, (long unsigned)i,
@@ -804,7 +951,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             }
 
             if(tokenPolicy->tokenType > 3) {
-                UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                             "Rejecting UserTokenPolicy %lu in endpoint %lu: "
                             "invalid token type",
                             (long unsigned)j, (long unsigned)i);
@@ -814,7 +961,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             if(tokenPolicy->tokenType == UA_USERTOKENTYPE_ANONYMOUS &&
                tokenType != &UA_TYPES[UA_TYPES_ANONYMOUSIDENTITYTOKEN] &&
                tokenType != NULL) {
-                UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                             "Rejecting UserTokenPolicy %lu (anonymous) in endpoint %lu: "
                             "configuration doesn't match",
                             (long unsigned)j, (long unsigned)i);
@@ -822,7 +969,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             }
             if(tokenPolicy->tokenType == UA_USERTOKENTYPE_USERNAME &&
                tokenType != &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]) {
-                UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                             "Rejecting UserTokenPolicy %lu (username) in endpoint %lu: "
                             "configuration doesn't match",
                             (long unsigned)j, (long unsigned)i);
@@ -830,7 +977,7 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             }
             if(tokenPolicy->tokenType == UA_USERTOKENTYPE_CERTIFICATE &&
                tokenType != &UA_TYPES[UA_TYPES_X509IDENTITYTOKEN]) {
-                UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                             "Rejecting UserTokenPolicy %lu (certificate) in endpoint %lu: "
                             "configuration doesn't match",
                             (long unsigned)j, (long unsigned)i);
@@ -838,14 +985,14 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             }
             if(tokenPolicy->tokenType == UA_USERTOKENTYPE_ISSUEDTOKEN &&
                tokenType != &UA_TYPES[UA_TYPES_ISSUEDIDENTITYTOKEN]) {
-                UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+                UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
                             "Rejecting UserTokenPolicy %lu (token) in endpoint %lu: "
                             "configuration doesn't match",
                             (long unsigned)j, (long unsigned)i);
                 continue;
             }
 
-            /* Endpoint with matching usertokenpolicy found */
+            /* Endpoint with matching UserTokenPolicy found */
 
             /* If not explicit PolicyUri for authentication is configured, use
              * that from the TokenPolicy or (if that is not defined) from the
@@ -856,30 +1003,11 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             if(UA_String_isEmpty(&client->config.authSecurityPolicyUri))
                 UA_String_copy(securityPolicyUri, &client->config.authSecurityPolicyUri);
 
-#if UA_LOGLEVEL <= 300
-            const char *securityModeNames[3] = {"None", "Sign", "SignAndEncrypt"};
-            const char *userTokenTypeNames[4] = {"Anonymous", "UserName",
-                                                 "Certificate", "IssuedToken"};
-            /* Log the selected endpoint */
-            UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                        "Selected endpoint %lu in URL %.*s with SecurityMode "
-                        "%s and SecurityPolicy %.*s", (long unsigned)i,
-                        (int)endpoint->endpointUrl.length, endpoint->endpointUrl.data,
-                        securityModeNames[endpoint->securityMode - 1],
-                        (int)endpoint->securityPolicyUri.length,
-                        endpoint->securityPolicyUri.data);
-
-            /* Log the selected UserTokenPolicy */
-            UA_LOG_INFO(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                        "Selected UserTokenPolicy %.*s with UserTokenType %s "
-                        "and SecurityPolicy %.*s",
-                        (int)tokenPolicy->policyId.length, tokenPolicy->policyId.data,
-                        userTokenTypeNames[tokenPolicy->tokenType],
-                        (int)securityPolicyUri->length, securityPolicyUri->data);
-#endif
+            /* Update tracking */
+            bestEndpointLevel = endpoint->securityLevel;
+            bestTokenIndex = j;
 
             /* Move to the client config */
-            tokenFound = true;
             UA_EndpointDescription_clear(&client->config.endpoint);
             client->config.endpoint = *endpoint;
             UA_EndpointDescription_init(endpoint);
@@ -887,30 +1015,78 @@ responseGetEndpoints(UA_Client *client, void *userdata,
             client->config.userTokenPolicy = *tokenPolicy;
             UA_UserTokenPolicy_init(tokenPolicy);
 
+            /* Store the Server Description */
+            UA_ApplicationDescription_clear(&client->serverDescription);
+            UA_ApplicationDescription_copy(&endpoint->server,
+                                           &client->serverDescription);
+
             break;
         }
-
-        if(tokenFound)
-            break;
     }
 
-    if(!endpointFound) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+    if(bestEndpointIndex == notFound) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "No suitable endpoint found");
         client->connectStatus = UA_STATUSCODE_BADINTERNALERROR;
         closeSecureChannel(client);
-    } else if(!tokenFound) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_UNLOCK(&client->clientMutex);
+        return;
+    } else if(bestTokenIndex == notFound) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "No suitable UserTokenPolicy found for the possible endpoints");
-        client->connectStatus = UA_STATUSCODE_BADINTERNALERROR;
+        client->connectStatus = UA_STATUSCODE_BADIDENTITYTOKENINVALID;
         closeSecureChannel(client);
+        UA_UNLOCK(&client->clientMutex);
+        return;
     }
 
-    /* Close the SecureChannel if a different SecurityPolicy is defined by the Endpoint */
+    /* Log the selected Endpoint and UserTokenPolicy */
+#if UA_LOGLEVEL <= 300
+    UA_EndpointDescription *endpoint = &client->config.endpoint;
+    UA_UserTokenPolicy *tokenPolicy = &client->config.userTokenPolicy;
+    UA_String *securityPolicyUri = &tokenPolicy->securityPolicyUri;
+    const char *securityModeNames[3] = {"None", "Sign", "SignAndEncrypt"};
+    const char *userTokenTypeNames[4] =
+        {"Anonymous", "UserName", "Certificate", "IssuedToken"};
+
+    UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                "Selected endpoint %lu in URL %.*s with SecurityMode "
+                "%s and SecurityPolicy %.*s",
+                (long unsigned)bestEndpointIndex, (int)endpoint->endpointUrl.length,
+                endpoint->endpointUrl.data, securityModeNames[endpoint->securityMode - 1],
+                (int)endpoint->securityPolicyUri.length, endpoint->securityPolicyUri.data);
+
+    UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                "Selected UserTokenPolicy %.*s with UserTokenType %s "
+                "and SecurityPolicy %.*s",
+                (int)tokenPolicy->policyId.length, tokenPolicy->policyId.data,
+                userTokenTypeNames[tokenPolicy->tokenType],
+                (int)securityPolicyUri->length, securityPolicyUri->data);
+#endif
+
+    /* Close the SecureChannel -- a different SecurityMode or SecurityPolicy is
+     * defined by the Endpoint. */
     if(client->config.endpoint.securityMode != client->channel.securityMode ||
        !UA_String_equal(&client->config.endpoint.securityPolicyUri,
-                        &client->channel.securityPolicy->policyUri))
+                        &client->channel.securityPolicy->policyUri)) {
         closeSecureChannel(client);
+        UA_UNLOCK(&client->clientMutex);
+        return;
+    }
+
+    /* We were using a distinct discovery URL and we are switching away from it.
+     * Close the SecureChannel to reopen with the EndpointUrl. If an endpoint
+     * was selected, then we use the endpointUrl for the HEL message. */
+    if(client->discoveryUrl.length > 0 &&
+       !UA_String_equal(&client->discoveryUrl,
+                        &client->config.endpoint.endpointUrl)) {
+        closeSecureChannel(client);
+        UA_UNLOCK(&client->clientMutex);
+        return;
+    }
+
+    /* Nothing to do. We have selected an endpoint that we can use to open a
+     * Session on the current SecureChannel. */
     UA_UNLOCK(&client->clientMutex);
 }
 
@@ -920,23 +1096,145 @@ requestGetEndpoints(UA_Client *client) {
 
     UA_GetEndpointsRequest request;
     UA_GetEndpointsRequest_init(&request);
-    request.endpointUrl = client->endpointUrl;
+    request.endpointUrl = getEndpointUrl(client);
+
     UA_StatusCode retval =
         __Client_AsyncService(client, &request, &UA_TYPES[UA_TYPES_GETENDPOINTSREQUEST],
                               (UA_ClientAsyncServiceCallback) responseGetEndpoints,
                               &UA_TYPES[UA_TYPES_GETENDPOINTSRESPONSE], NULL, NULL);
-    if(retval == UA_STATUSCODE_GOOD)
-        client->endpointsHandshake = true;
-    else
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "RequestGetEndpoints failed when sending the request with error code %s",
                      UA_StatusCode_name(retval));
-    return retval;
+        return retval;
+    }
+
+    client->endpointsHandshake = true;
+    return UA_STATUSCODE_GOOD;
 }
 
 static void
-responseSessionCallback(UA_Client *client, void *userdata,
-                        UA_UInt32 requestId, void *response) {
+responseFindServers(UA_Client *client, void *userdata,
+                    UA_UInt32 requestId, void *response) {
+    client->findServersHandshake = false;
+
+    UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                 "Received FindServersResponse");
+
+    /* Error handling. Log the error but continue to connect with the current
+     * EndpointURL. */
+    UA_FindServersResponse *fsr = (UA_FindServersResponse*)response;
+    if(fsr->responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                       "FindServers failed with error code %s. Continue with the "
+                       "EndpointURL %.*s.",
+                       UA_StatusCode_name(fsr->responseHeader.serviceResult),
+                       (int)client->config.endpointUrl.length,
+                       client->config.endpointUrl.data);
+        UA_String_copy(&client->config.endpointUrl, &client->discoveryUrl);
+        return;
+    }
+
+    /* Check if one of the returned servers matches the EndpointURL already used */
+    for(size_t i = 0; i < fsr->serversSize; i++) {
+        UA_ApplicationDescription *server = &fsr->servers[i];
+
+        /* Filter by the ApplicationURI if defined */
+        if(client->config.applicationUri.length > 0 &&
+           !UA_String_equal(&client->config.applicationUri,
+                            &server->applicationUri))
+            continue;
+
+        for(size_t j = 0; j < server->discoveryUrlsSize; j++) {
+            if(UA_String_equal(&client->config.endpointUrl, &server->discoveryUrls[j])) {
+                UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                            "The initially defined EndpointURL %.*s "
+                            "is valid for the server",
+                            (int)client->config.endpointUrl.length,
+                            client->config.endpointUrl.data);
+                UA_String_copy(&client->config.endpointUrl, &client->discoveryUrl);
+                return;
+            }
+        }
+    }
+
+    /* The current EndpointURL is not usable. Pick the first "opc.tcp" DiscoveryUrl of a
+     * returned server. */
+    for(size_t i = 0; i < fsr->serversSize; i++) {
+        UA_ApplicationDescription *server = &fsr->servers[i];
+        if(server->applicationType != UA_APPLICATIONTYPE_SERVER &&
+            server->applicationType != UA_APPLICATIONTYPE_CLIENTANDSERVER &&
+            server->applicationType != UA_APPLICATIONTYPE_DISCOVERYSERVER)
+            continue;
+
+        /* Filter by the ApplicationURI if defined */
+        if(client->config.applicationUri.length > 0 &&
+           !UA_String_equal(&client->config.applicationUri,
+                            &server->applicationUri))
+            continue;
+
+        for(size_t j = 0; j < server->discoveryUrlsSize; j++) {
+            /* Try to parse the DiscoveryUrl. This weeds out http schemas (etc.)
+             * and invalid DiscoveryUrls in general. */
+            UA_String hostname, path;
+            UA_UInt16 port;
+            UA_StatusCode res =
+                UA_parseEndpointUrl(&server->discoveryUrls[j], &hostname,
+                                    &port, &path);
+            if(res != UA_STATUSCODE_GOOD)
+                continue;
+
+            /* Use this DiscoveryUrl in the client */
+            UA_String_clear(&client->discoveryUrl);
+            client->discoveryUrl = server->discoveryUrls[j];
+            UA_String_init(&server->discoveryUrls[j]);
+
+            UA_LOG_INFO(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                        "Use the EndpointURL %.*s returned from FindServers",
+                        (int)client->discoveryUrl.length, client->discoveryUrl.data);
+
+            /* Close the SecureChannel to build it up new with the correct
+             * EndpointURL in the HEL/ACK handshake */
+            closeSecureChannel(client);
+            return;
+        }
+    }
+
+    /* Could not find a suitable server. Try to continue with the
+     * original EndpointURL. */
+    UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                   "FindServers did not returned a suitable DiscoveryURL. "
+                   "Continue with the EndpointURL %.*s.",
+                   (int)client->config.endpointUrl.length,
+                   client->config.endpointUrl.data);
+    UA_String_clear(&client->discoveryUrl);
+    UA_String_copy(&client->config.endpointUrl, &client->discoveryUrl);
+}
+
+static UA_StatusCode
+requestFindServers(UA_Client *client) {
+    UA_FindServersRequest request;
+    UA_FindServersRequest_init(&request);
+    request.requestHeader.timeoutHint = 10000;
+    request.endpointUrl = client->config.endpointUrl;
+    UA_StatusCode retval =
+        __Client_AsyncService(client, &request, &UA_TYPES[UA_TYPES_FINDSERVERSREQUEST],
+                              (UA_ClientAsyncServiceCallback) responseFindServers,
+                              &UA_TYPES[UA_TYPES_FINDSERVERSRESPONSE], NULL, NULL);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "FindServers failed when sending the request with error code %s",
+                     UA_StatusCode_name(retval));
+        return retval;
+    }
+
+    client->findServersHandshake = true;
+    return UA_STATUSCODE_GOOD;
+}
+
+static void
+createSessionCallback(UA_Client *client, void *userdata,
+                      UA_UInt32 requestId, void *response) {
     UA_LOCK(&client->clientMutex);
 
     UA_CreateSessionResponse *sessionResponse = (UA_CreateSessionResponse*)response;
@@ -944,7 +1242,6 @@ responseSessionCallback(UA_Client *client, void *userdata,
     if(res != UA_STATUSCODE_GOOD)
         goto cleanup;
 
-#ifdef UA_ENABLE_ENCRYPTION
     if(client->channel.securityMode == UA_MESSAGESECURITYMODE_SIGN ||
        client->channel.securityMode == UA_MESSAGESECURITYMODE_SIGNANDENCRYPT) {
         /* Verify the session response was created with the same certificate as
@@ -960,12 +1257,12 @@ responseSessionCallback(UA_Client *client, void *userdata,
         if(res != UA_STATUSCODE_GOOD)
             goto cleanup;
     }
-#endif
 
     /* Copy nonce and AuthenticationToken */
-    UA_ByteString_clear(&client->remoteNonce);
+    UA_ByteString_clear(&client->serverSessionNonce);
     UA_NodeId_clear(&client->authenticationToken);
-    res |= UA_ByteString_copy(&sessionResponse->serverNonce, &client->remoteNonce);
+    res |= UA_ByteString_copy(&sessionResponse->serverNonce,
+                              &client->serverSessionNonce);
     res |= UA_NodeId_copy(&sessionResponse->authenticationToken,
                           &client->authenticationToken);
     if(res != UA_STATUSCODE_GOOD)
@@ -990,16 +1287,16 @@ createSessionAsync(UA_Client *client) {
     UA_StatusCode res = UA_STATUSCODE_GOOD;
     if(client->channel.securityMode == UA_MESSAGESECURITYMODE_SIGN ||
        client->channel.securityMode == UA_MESSAGESECURITYMODE_SIGNANDENCRYPT) {
-        if(client->localNonce.length != UA_SESSION_LOCALNONCELENGTH) {
-           UA_ByteString_clear(&client->localNonce);
-            res = UA_ByteString_allocBuffer(&client->localNonce,
+        if(client->clientSessionNonce.length != UA_SESSION_LOCALNONCELENGTH) {
+           UA_ByteString_clear(&client->clientSessionNonce);
+            res = UA_ByteString_allocBuffer(&client->clientSessionNonce,
                                             UA_SESSION_LOCALNONCELENGTH);
             if(res != UA_STATUSCODE_GOOD)
                 return res;
         }
         res = client->channel.securityPolicy->symmetricModule.
                  generateNonce(client->channel.securityPolicy->policyContext,
-                               &client->localNonce);
+                               &client->clientSessionNonce);
         if(res != UA_STATUSCODE_GOOD)
             return res;
     }
@@ -1007,11 +1304,12 @@ createSessionAsync(UA_Client *client) {
     /* Prepare and send the request */
     UA_CreateSessionRequest request;
     UA_CreateSessionRequest_init(&request);
-    request.clientNonce = client->localNonce;
+    request.clientNonce = client->clientSessionNonce;
     request.requestedSessionTimeout = client->config.requestedSessionTimeout;
     request.maxResponseMessageSize = UA_INT32_MAX;
     request.endpointUrl = client->config.endpoint.endpointUrl;
     request.clientDescription = client->config.clientDescription;
+    request.sessionName = client->config.sessionName;
     if(client->channel.securityMode == UA_MESSAGESECURITYMODE_SIGN ||
        client->channel.securityMode == UA_MESSAGESECURITYMODE_SIGNANDENCRYPT) {
         request.clientCertificate = client->channel.securityPolicy->localCertificate;
@@ -1019,29 +1317,22 @@ createSessionAsync(UA_Client *client) {
 
     res = __Client_AsyncService(client, &request,
                                 &UA_TYPES[UA_TYPES_CREATESESSIONREQUEST],
-                                (UA_ClientAsyncServiceCallback)responseSessionCallback,
+                                (UA_ClientAsyncServiceCallback)createSessionCallback,
                                 &UA_TYPES[UA_TYPES_CREATESESSIONRESPONSE], NULL, NULL);
 
     if(res == UA_STATUSCODE_GOOD)
         client->sessionState = UA_SESSIONSTATE_CREATE_REQUESTED;
     else
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "CreateSession failed when sending the request with "
                      "error code %s", UA_StatusCode_name(res));
 
     return res;
 }
 
-static void
+static UA_StatusCode
 initSecurityPolicy(UA_Client *client) {
-    /* Already initialized */
-    if(client->channel.securityPolicy)
-        return;
-
-    client->channel.securityMode = client->config.endpoint.securityMode;
-
-    if(client->channel.securityMode == UA_MESSAGESECURITYMODE_INVALID)
-        client->channel.securityMode = UA_MESSAGESECURITYMODE_NONE;
+    /* Find the SecurityPolicy */
     UA_SecurityPolicy *sp = NULL;
     if(client->config.endpoint.securityPolicyUri.length == 0) {
         sp = getSecurityPolicy(client,
@@ -1050,17 +1341,29 @@ initSecurityPolicy(UA_Client *client) {
         sp = getSecurityPolicy(client, client->config.endpoint.securityPolicyUri);
     }
 
-    client->connectStatus = UA_STATUSCODE_BADINTERNALERROR;
-    if(sp) {
-        client->connectStatus =
-            UA_SecureChannel_setSecurityPolicy(&client->channel, sp,
-                                               &client->config.endpoint.serverCertificate);
-    }
+    /* Unknown SecurityPolicy -- we would never select such an endpoint */
+    if(!sp)
+        return UA_STATUSCODE_BADINTERNALERROR;
+
+    /* Already initialized -- check we are using the configured SecurityPolicy */
+    if(client->channel.securityPolicy)
+        return (client->channel.securityPolicy == sp) ?
+            UA_STATUSCODE_GOOD : UA_STATUSCODE_BADINTERNALERROR;
+
+    /* Set the SecurityMode -- none if no endpoint is selected so far */
+    client->channel.securityMode = client->config.endpoint.securityMode;
+    if(client->channel.securityMode == UA_MESSAGESECURITYMODE_INVALID)
+        client->channel.securityMode = UA_MESSAGESECURITYMODE_NONE;
+
+    /* Instantiate the SecurityPolicy context with the remote certificate */
+    return UA_SecureChannel_setSecurityPolicy(&client->channel, sp,
+                                              &client->config.endpoint.serverCertificate);
 }
 
 static void
 connectActivity(UA_Client *client) {
-    UA_LOG_TRACE(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+    UA_LOCK_ASSERT(&client->clientMutex, 1);
+    UA_LOG_TRACE(client->config.logging, UA_LOGCATEGORY_CLIENT,
                  "Client connect iterate");
 
     /* Could not connect with an error that canot be recovered from */
@@ -1086,8 +1389,7 @@ connectActivity(UA_Client *client) {
 
         /* ACK receieved. Send OPN. */
     case UA_SECURECHANNELSTATE_ACK_RECEIVED:
-        if(client->connectStatus == UA_STATUSCODE_GOOD)
-            client->connectStatus = sendOPNAsync(client, false); /* Send OPN */
+        sendOPNAsync(client, false); /* Send OPN */
         return;
 
         /* The channel is open -> continue with the Session handling */
@@ -1097,7 +1399,10 @@ connectActivity(UA_Client *client) {
         /* The connection is closed. Reset the SecureChannel and open a new TCP
          * connection */
     case UA_SECURECHANNELSTATE_CLOSED:
-        client->connectStatus = initConnect(client);
+        if(client->config.noReconnect)
+            client->connectStatus = UA_STATUSCODE_BADNOTCONNECTED;
+        else
+            initConnect(client); /* Sets the connectStatus internally */
         return;
 
         /* These states should never occur for the client */
@@ -1108,18 +1413,28 @@ connectActivity(UA_Client *client) {
 
     /* <-- The SecureChannel is open --> */
 
-    /* Ongoing endpoints handshake? */
-    if(client->endpointsHandshake)
+    /* Ongoing handshake -> Waiting for a response */
+    if(client->endpointsHandshake || client->findServersHandshake)
         return;
 
-    /* Get the endpoints in order to reset the SecureChannel with encryption */
+    /* Call FindServers to see if we should reconnect with another EndpointUrl.
+     * This needs to be done before GetEndpoints, as the set of returned
+     * endpoints may depend on the EndpointUrl used during the initial HEL/ACK
+     * handshake. */
+    if(client->discoveryUrl.length == 0) {
+        client->connectStatus = requestFindServers(client);
+        return;
+    }
+
+    /* GetEndpoints to identify the remote side and/or reset the SecureChannel
+     * with encryption */
     if(endpointUnconfigured(client)) {
         client->connectStatus = requestGetEndpoints(client);
         return;
     }
 
-    /* Do we want to open a session? */
-    if(client->noSession)
+    /* Have the final SecureChannel but no session */
+    if(client->config.noSession)
         return;
 
     /* Create and Activate the Session */
@@ -1148,10 +1463,40 @@ connectActivity(UA_Client *client) {
 }
 
 static UA_StatusCode
-verifyClientSecurechannelHeader(void *application, UA_SecureChannel *channel,
+verifyClientSecureChannelHeader(void *application, UA_SecureChannel *channel,
                                 const UA_AsymmetricAlgorithmSecurityHeader *asymHeader) {
-    /* TODO: Verify if certificate is the same as configured in the client
-     * endpoint config */
+    UA_Client *client = (UA_Client*)application;
+    const UA_SecurityPolicy *sp = channel->securityPolicy;
+    UA_assert(sp != NULL);
+
+    /* Check the SecurityPolicyUri */
+    if(asymHeader->securityPolicyUri.length > 0 &&
+       !UA_String_equal(&sp->policyUri, &asymHeader->securityPolicyUri)) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "The server uses a different SecurityPolicy from the client");
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+    }
+
+    /* If encryption is used, check that the server certificate for the
+     * endpoint is used for the SecureChannel */
+    UA_ByteString serverCert = getLeafCertificate(asymHeader->senderCertificate);
+    if(client->config.endpoint.serverCertificate.length > 0 &&
+       !UA_String_equal(&client->config.endpoint.serverCertificate, &serverCert)) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "The server certificate is different from the EndpointDescription");
+        return UA_STATUSCODE_BADSECURITYCHECKSFAILED;
+    }
+
+    /* Verify the certificate the server assumes on our end */
+    UA_StatusCode res = sp->asymmetricModule.
+        compareCertificateThumbprint(sp, &asymHeader->receiverCertificateThumbprint);
+    if(res != UA_STATUSCODE_GOOD) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "The server does not use the client certificate "
+                     "used for the selected SecurityPolicy");
+        return res;
+    }
+
     return UA_STATUSCODE_GOOD;
 }
 
@@ -1159,23 +1504,21 @@ verifyClientSecurechannelHeader(void *application, UA_SecureChannel *channel,
  * SecurityPolicies */
 static void
 verifyClientApplicationURI(const UA_Client *client) {
-#if defined(UA_ENABLE_ENCRYPTION) && (UA_LOGLEVEL <= 400)
+#if UA_LOGLEVEL <= 400
     for(size_t i = 0; i < client->config.securityPoliciesSize; i++) {
         UA_SecurityPolicy *sp = &client->config.securityPolicies[i];
         if(!sp->localCertificate.data) {
-                UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                "skip verifying ApplicationURI for the SecurityPolicy %.*s",
-                (int)sp->policyUri.length, sp->policyUri.data);
-                continue;
+            UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                           "skip verifying ApplicationURI for the SecurityPolicy %.*s",
+                           (int)sp->policyUri.length, sp->policyUri.data);
+            continue;
         }
 
         UA_StatusCode retval =
-            client->config.certificateVerification.
-            verifyApplicationURI(&client->config.certificateVerification,
-                                 &sp->localCertificate,
-                                 &client->config.clientDescription.applicationUri);
+            UA_CertificateUtils_verifyApplicationURI(client->allowAllCertificateUris, &sp->localCertificate,
+                                                     &client->config.clientDescription.applicationUri);
         if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+            UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
                            "The configured ApplicationURI does not match the URI "
                            "specified in the certificate for the SecurityPolicy %.*s",
                            (int)sp->policyUri.length, sp->policyUri.data);
@@ -1193,51 +1536,34 @@ __Client_networkCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
     UA_Client *client = (UA_Client*)application;
     UA_LOCK(&client->clientMutex);
 
-    UA_LOG_TRACE(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                 "Client network callback");
+    UA_LOG_TRACE(client->config.logging, UA_LOGCATEGORY_CLIENT, "Client network callback");
 
-    /* A new connection is not yet registered */
+    /* A new connection with no context pointer attached */
     if(!*connectionContext) {
-        /* Opening the connection failed. The client cannot recover from this. */
-        if(state != UA_CONNECTIONSTATE_OPENING &&
-           state != UA_CONNECTIONSTATE_ESTABLISHED) {
-            goto refuse_connection;
-        }
-
         /* Inconsistent SecureChannel state. Has to be fresh for a new
          * connection. */
-        if(client->channel.state != UA_SECURECHANNELSTATE_FRESH &&
-                client->channel.state != UA_SECURECHANNELSTATE_REVERSE_LISTENING) {
-            UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                         "Cannot open a connection for SecureChannel that is already used");
+        if(client->channel.state != UA_SECURECHANNELSTATE_CLOSED &&
+           client->channel.state != UA_SECURECHANNELSTATE_REVERSE_LISTENING) {
+            UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                         "Cannot open a connection, the SecureChannel is already used");
             client->connectStatus = UA_STATUSCODE_BADINTERNALERROR;
-            goto refuse_connection;
+            notifyClientState(client);
+            UA_UNLOCK(&client->clientMutex);
+            return;
         }
 
         /* Initialize the client connection and attach to the EventLoop connection */
         client->channel.connectionManager = cm;
         client->channel.connectionId = connectionId;
         *connectionContext = &client->channel;
-
-        /* If the connection is not fully established we still save the
-         * connectionId in the client now so that the connection can be closed
-         * before it fully opens. Wait for the connection to be established
-         * before sending the HEL message. */
-        if(state == UA_CONNECTIONSTATE_OPENING)
-            client->channel.state = UA_SECURECHANNELSTATE_CONNECTING;
-        else {
-            if (client->channel.state == UA_SECURECHANNELSTATE_REVERSE_LISTENING)
-                client->channel.state = UA_SECURECHANNELSTATE_REVERSE_CONNECTED;
-            else /* state == UA_CONNECTIONSTATE_ESTABLISHED */
-                client->channel.state = UA_SECURECHANNELSTATE_CONNECTED;
-        }
-        
-        goto continue_connect;
     }
 
     /* The connection is closing in the EventLoop. This is the last callback
      * from that connection. Clean up the SecureChannel in the client. */
     if(state == UA_CONNECTIONSTATE_CLOSING) {
+        UA_LOG_INFO_CHANNEL(client->config.logging, &client->channel,
+                            "SecureChannel closed");
+
         /* Set to closing (could be done already in UA_SecureChannel_shutdown).
          * This impacts the handling of cancelled requests below. */
         UA_SecureChannelState oldState = client->channel.state;
@@ -1256,39 +1582,46 @@ __Client_networkCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
         UA_SecureChannel_clear(&client->channel);
 
         /* The connection closed before it actually opened. Since we are
-         * connecting asynchronously, this happens when the server does not
-         * exist or is unresponsive. */
-        if(oldState == UA_SECURECHANNELSTATE_CONNECTING) {
-            UA_LOG_INFO_CHANNEL(&client->config.logger, &client->channel,
-                                "Could not open the connection");
-            goto refuse_connection; /* The client cannot recover from this */
-        }
-
-        UA_LOG_INFO_CHANNEL(&client->config.logger, &client->channel,
-                            "Closed the SecureChannel");
+         * connecting asynchronously, this happens when the TCP connection
+         * fails. Try to fall back on the initial EndpointUrl. */
+        if(oldState == UA_SECURECHANNELSTATE_CONNECTING &&
+           client->connectStatus == UA_STATUSCODE_GOOD)
+            client->connectStatus = fallbackEndpointUrl(client);
 
         /* Try to reconnect */
         goto continue_connect;
     }
 
-    /* The connection has opened on the TCP level. Set the SecureChannel state
-     * to reflect this. Otherwise later consistency checks for the received
-     * messages fail. */
-    if(client->channel.state < UA_SECURECHANNELSTATE_CONNECTED)
-        client->channel.state = UA_SECURECHANNELSTATE_CONNECTED;
+    /* Update the SecureChannel state */
+    if(UA_LIKELY(state == UA_CONNECTIONSTATE_ESTABLISHED)) {
+        /* The connection is now open on the TCP level. Set the SecureChannel
+         * state to reflect this. Otherwise later consistency checks for the
+         * received messages fail. */
+        if(client->channel.state == UA_SECURECHANNELSTATE_REVERSE_LISTENING)
+            client->channel.state = UA_SECURECHANNELSTATE_REVERSE_CONNECTED;
+        if(client->channel.state < UA_SECURECHANNELSTATE_CONNECTED)
+            client->channel.state = UA_SECURECHANNELSTATE_CONNECTED;
+    } else /* state == UA_CONNECTIONSTATE_OPENING */ {
+        /* The connection was opened on our end only. Waiting for the TCP handshake
+         * to complete. */
+        client->channel.state = UA_SECURECHANNELSTATE_CONNECTING;
+    }
 
     /* Received a message. Process the message with the SecureChannel. */
+    UA_EventLoop *el = client->config.eventLoop;
+    UA_DateTime nowMonotonic = el->dateTime_nowMonotonic(el);
     UA_StatusCode res =
         UA_SecureChannel_processBuffer(&client->channel, client,
-                                       processServiceResponse, &msg);
+                                       processServiceResponse,
+                                       &msg, nowMonotonic);
     if(res != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "Processing the message returned the error code %s",
                      UA_StatusCode_name(res));
 
-        /* If connecting has failed before the SecureChannel has opened, then
-         * the client cannot recover. Set the connectStatus to reflect this. The
-         * application is notified when the socket has closed. */
+        /* If processing the buffer fails before the SecureChannel has opened,
+         * then the client cannot recover. Set the connectStatus to reflect
+         * this. The application is notified when the socket has closed. */
         if(client->channel.state != UA_SECURECHANNELSTATE_OPEN)
             client->connectStatus = res;
 
@@ -1304,74 +1637,60 @@ __Client_networkCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
         return;
     }
 
-    /* Trigger the next action from our end to fully open up the connection */
  continue_connect:
-    if(client->connectStatus == UA_STATUSCODE_GOOD &&
-       ((client->noSession && client->channel.state != UA_SECURECHANNELSTATE_OPEN) ||
-        client->sessionState < UA_SESSIONSTATE_ACTIVATED)) {
+    /* Trigger the next action from our end to fully open up the connection */
+    if(!isFullyConnected(client))
         connectActivity(client);
-    }
-
-    /* Notify the application if the client state has changed */
-    notifyClientState(client);
-    UA_UNLOCK(&client->clientMutex);
-    return;
-
- refuse_connection:
-    client->connectStatus = UA_STATUSCODE_BADCONNECTIONREJECTED;
     notifyClientState(client);
     UA_UNLOCK(&client->clientMutex);
 }
 
 /* Initialize a TCP connection. Writes the result to client->connectStatus. */
-static UA_StatusCode
+static void
 initConnect(UA_Client *client) {
-    if(client->noReconnect)
-        return UA_STATUSCODE_BADNOTCONNECTED;
-
-    if(client->channel.state != UA_SECURECHANNELSTATE_FRESH &&
-       client->channel.state != UA_SECURECHANNELSTATE_CLOSED) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+    UA_LOCK_ASSERT(&client->clientMutex, 1);
+    if(client->channel.state != UA_SECURECHANNELSTATE_CLOSED) {
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
                        "Client connection already initiated");
-        return UA_STATUSCODE_GOOD;
+        return;
     }
 
     /* Start the EventLoop if not already started */
-    UA_StatusCode res = __UA_Client_startup(client);
-    UA_CHECK_STATUS(res, return res);
+    client->connectStatus = __UA_Client_startup(client);
+    UA_CHECK_STATUS(client->connectStatus, return);
 
-    /* Consistency check the client's own ApplicationURI */
+    /* Consistency check the client's own ApplicationURI.
+     * Problems are only logged. */
     verifyClientApplicationURI(client);
 
-    /* Reset the connect status */
-    client->connectStatus = UA_STATUSCODE_GOOD;
-    client->channel.renewState = UA_SECURECHANNELRENEWSTATE_NORMAL;
-
     /* Initialize the SecureChannel */
-    UA_SecureChannel_init(&client->channel);
+    UA_SecureChannel_clear(&client->channel);
     client->channel.config = client->config.localConnectionConfig;
     client->channel.certificateVerification = &client->config.certificateVerification;
-    client->channel.processOPNHeader = verifyClientSecurechannelHeader;
+    client->channel.processOPNHeader = verifyClientSecureChannelHeader;
 
     /* Initialize the SecurityPolicy */
-    initSecurityPolicy(client);
+    client->connectStatus = initSecurityPolicy(client);
+    if(client->connectStatus != UA_STATUSCODE_GOOD)
+        return;
 
     /* Extract hostname and port from the URL */
     UA_String hostname = UA_STRING_NULL;
     UA_String path = UA_STRING_NULL;
     UA_UInt16 port = 4840;
 
-    res = UA_parseEndpointUrl(&client->endpointUrl, &hostname, &port, &path);
-    if(res != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_NETWORK,
+    client->connectStatus =
+        UA_parseEndpointUrl(&client->config.endpointUrl, &hostname, &port, &path);
+    if(client->connectStatus != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_NETWORK,
                        "OPC UA URL is invalid: %.*s",
-                       (int)client->endpointUrl.length, client->endpointUrl.data);
-        return res;
+                       (int)client->config.endpointUrl.length,
+                       client->config.endpointUrl.data);
+        return;
     }
 
     /* Initialize the TCP connection */
     UA_String tcpString = UA_STRING("tcp");
-    res = UA_STATUSCODE_BADINTERNALERROR;
     for(UA_EventSource *es = client->config.eventLoop->eventSources;
         es != NULL; es = es->next) {
         /* Is this a usable connection manager? */
@@ -1382,118 +1701,75 @@ initConnect(UA_Client *client) {
             continue;
 
         /* Set up the parameters */
-        UA_KeyValuePair params[2];
+        UA_KeyValuePair params[3];
         params[0].key = UA_QUALIFIEDNAME(0, "port");
         UA_Variant_setScalar(&params[0].value, &port, &UA_TYPES[UA_TYPES_UINT16]);
         params[1].key = UA_QUALIFIEDNAME(0, "address");
         UA_Variant_setScalar(&params[1].value, &hostname, &UA_TYPES[UA_TYPES_STRING]);
+        params[2].key = UA_QUALIFIEDNAME(0, "reuse");
+        UA_Variant_setScalar(&params[2].value, &client->config.tcpReuseAddr,
+                             &UA_TYPES[UA_TYPES_BOOLEAN]);
 
         UA_KeyValueMap paramMap;
         paramMap.map = params;
-        paramMap.mapSize = 2;
+        paramMap.mapSize = 3;
 
         /* Open the client TCP connection */
         UA_UNLOCK(&client->clientMutex);
-        res = cm->openConnection(cm, &paramMap, client, NULL, __Client_networkCallback);
+        UA_StatusCode res =
+            cm->openConnection(cm, &paramMap, client, NULL, __Client_networkCallback);
         UA_LOCK(&client->clientMutex);
         if(res == UA_STATUSCODE_GOOD)
             break;
     }
 
+    /* The channel has not opened */
+    if(client->channel.state == UA_SECURECHANNELSTATE_CLOSED)
+        client->connectStatus = UA_STATUSCODE_BADINTERNALERROR;
+
     /* Opening the TCP connection failed */
-    if(res != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+    if(client->connectStatus != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
                        "Could not open a TCP connection to %.*s",
-                       (int)client->endpointUrl.length, client->endpointUrl.data);
-        res = UA_STATUSCODE_BADCONNECTIONCLOSED;
+                       (int)client->config.endpointUrl.length,
+                       client->config.endpointUrl.data);
+        client->connectStatus = UA_STATUSCODE_BADCONNECTIONCLOSED;
     }
-    return res;
-}
-
-UA_StatusCode
-UA_Client_connectAsync(UA_Client *client, const char *endpointUrl) {
-    UA_LOCK(&client->clientMutex);
-    client->noReconnect = false;
-
-    /* Set the endpoint URL the client connects to */
-    UA_String_clear(&client->endpointUrl);
-    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
-
-    /* Open a Session when possible */
-    client->noSession = false;
-
-    /* Connect Async */
-    client->connectStatus = initConnect(client);
-    notifyClientState(client);
-
-    UA_UNLOCK(&client->clientMutex);
-    return client->connectStatus;
-}
-
-UA_StatusCode
-UA_Client_connectSecureChannelAsync(UA_Client *client, const char *endpointUrl) {
-    UA_LOCK(&client->clientMutex);
-    client->noReconnect = false;
-
-    /* Set the endpoint URL the client connects to */
-    UA_String_clear(&client->endpointUrl);
-    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
-
-    /* Don't open a Session */
-    client->noSession = true;
-
-    /* Connect Async */
-    client->connectStatus = initConnect(client);
-    notifyClientState(client);
-
-    UA_UNLOCK(&client->clientMutex);
-    return client->connectStatus;
 }
 
 void
 connectSync(UA_Client *client) {
     UA_LOCK_ASSERT(&client->clientMutex, 1);
 
-    UA_DateTime now = UA_DateTime_nowMonotonic();
-    UA_DateTime maxDate = now + ((UA_DateTime)client->config.timeout * UA_DATETIME_MSEC);
-
-    /* Initialize the connection */
-    client->connectStatus = initConnect(client);
-    notifyClientState(client);
-    if(client->connectStatus != UA_STATUSCODE_GOOD)
-        return;
-
     /* EventLoop is started. Otherwise initConnect would have failed. */
     UA_EventLoop *el = client->config.eventLoop;
     UA_assert(el);
 
+    UA_DateTime now = el->dateTime_nowMonotonic(el);
+    UA_DateTime maxDate = now + ((UA_DateTime)client->config.timeout * UA_DATETIME_MSEC);
+
+    /* Initialize the connection */
+    initConnect(client);
+    notifyClientState(client);
+    if(client->connectStatus != UA_STATUSCODE_GOOD)
+        return;
+
     /* Run the EventLoop until connected, connect fail or timeout. Write the
      * iterate result to the connectStatus. So we do not attempt to restore a
      * failed connection during the sync connect. */
-    while(true) {
-        /* If the connection has aborted (bad connectStatus), wait until the
-         * channel is truly closed */
-        if(client->connectStatus != UA_STATUSCODE_GOOD &&
-           client->channel.state == UA_SECURECHANNELSTATE_CLOSED)
-            break;
-
-        /* Sufficiently connected? */
-        if(client->sessionState == UA_SESSIONSTATE_ACTIVATED)
-            break;
-        if(client->noSession && client->channel.state == UA_SECURECHANNELSTATE_OPEN)
-            break;
+    while(client->connectStatus == UA_STATUSCODE_GOOD &&
+          !isFullyConnected(client)) {
 
         /* Timeout -> abort */
-        now = UA_DateTime_nowMonotonic();
+        now = el->dateTime_nowMonotonic(el);
         if(maxDate < now) {
-            if(client->connectStatus == UA_STATUSCODE_GOOD)
-                client->connectStatus = UA_STATUSCODE_BADTIMEOUT;
+            UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                         "The connection has timed out before it could be fully opened");
+            client->connectStatus = UA_STATUSCODE_BADTIMEOUT;
             closeSecureChannel(client);
+            /* Continue to run. So the SecureChannel is fully closed in the next
+             * EventLoop iteration. */
         }
-
-        /* Aborting. Run the EventLoop with a zero timeout. */
-        if(client->connectStatus != UA_STATUSCODE_GOOD)
-            maxDate = now;
 
         /* Drop into the EventLoop */
         UA_UNLOCK(&client->clientMutex);
@@ -1503,46 +1779,184 @@ connectSync(UA_Client *client) {
             client->connectStatus = res;
             closeSecureChannel(client);
         }
+
+        notifyClientState(client);
     }
 }
 
 UA_StatusCode
-UA_Client_connect(UA_Client *client, const char *endpointUrl) {
-    UA_LOCK(&client->clientMutex);
-    client->noReconnect = false;
+connectInternal(UA_Client *client, UA_Boolean async) {
+    UA_LOCK_ASSERT(&client->clientMutex, 1);
 
-    /* Set the endpoint URL the client connects to */
-    UA_String_clear(&client->endpointUrl);
-    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
+    /* Reset the connectStatus. This should be the only place where we can
+     * recover from a bad connectStatus. */
+    client->connectStatus = UA_STATUSCODE_GOOD;
 
-    /* Open a Session when possible */
-    client->noSession = false;
-
-    /* Connect Synchronous */
-    connectSync(client);
-
-    UA_UNLOCK(&client->clientMutex);
+    if(async)
+        initConnect(client);
+    else
+        connectSync(client);
+    notifyClientState(client);
     return client->connectStatus;
 }
 
 UA_StatusCode
-UA_Client_connectSecureChannel(UA_Client *client, const char *endpointUrl) {
+connectSecureChannel(UA_Client *client, const char *endpointUrl) {
+    UA_LOCK_ASSERT(&client->clientMutex, 1);
+
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+    cc->noSession = true;
+    UA_String_clear(&cc->endpointUrl);
+    cc->endpointUrl = UA_STRING_ALLOC(endpointUrl);
+    return connectInternal(client, false);
+}
+
+UA_StatusCode
+__UA_Client_connect(UA_Client *client, UA_Boolean async) {
     UA_LOCK(&client->clientMutex);
-
-    client->noReconnect = false;
-
-    /* Set the endpoint URL the client connects to */
-    UA_String_clear(&client->endpointUrl);
-    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
-
-    /* Don't open a Session */
-    client->noSession = true;
-
-    /* Connect Synchronous */
-    connectSync(client);
-
+    connectInternal(client, async);
     UA_UNLOCK(&client->clientMutex);
     return client->connectStatus;
+}
+
+static UA_StatusCode
+activateSessionSync(UA_Client *client) {
+    UA_LOCK_ASSERT(&client->clientMutex, 1);
+
+    /* EventLoop is started. Otherwise activateSessionAsync would have failed. */
+    UA_EventLoop *el = client->config.eventLoop;
+    UA_assert(el);
+
+    UA_DateTime now = el->dateTime_nowMonotonic(el);
+    UA_DateTime maxDate = now + ((UA_DateTime)client->config.timeout * UA_DATETIME_MSEC);
+
+    /* Try to activate */
+    UA_StatusCode res = activateSessionAsync(client);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+
+    while(client->sessionState != UA_SESSIONSTATE_ACTIVATED &&
+          client->connectStatus == UA_STATUSCODE_GOOD) {
+
+        /* Timeout -> abort */
+        now = el->dateTime_nowMonotonic(el);
+        if(maxDate < now) {
+            UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                         "The connection has timed out before it could be fully opened");
+            client->connectStatus = UA_STATUSCODE_BADTIMEOUT;
+            closeSecureChannel(client);
+            /* Continue to run. So the SecureChannel is fully closed in the next
+             * EventLoop iteration. */
+        }
+
+        /* Drop into the EventLoop */
+        UA_UNLOCK(&client->clientMutex);
+        res = el->run(el, (UA_UInt32)((maxDate - now) / UA_DATETIME_MSEC));
+        UA_LOCK(&client->clientMutex);
+        if(res != UA_STATUSCODE_GOOD) {
+            client->connectStatus = res;
+            closeSecureChannel(client);
+        }
+
+        notifyClientState(client);
+    }
+
+    return client->connectStatus;
+}
+
+UA_StatusCode
+UA_Client_activateCurrentSession(UA_Client *client) {
+    UA_LOCK(&client->clientMutex);
+    UA_StatusCode res = activateSessionSync(client);
+    notifyClientState(client);
+    UA_UNLOCK(&client->clientMutex);
+    return res != UA_STATUSCODE_GOOD ? res : client->connectStatus;
+}
+
+UA_StatusCode
+UA_Client_activateCurrentSessionAsync(UA_Client *client) {
+    UA_LOCK(&client->clientMutex);
+    UA_StatusCode res = activateSessionAsync(client);
+    notifyClientState(client);
+    UA_UNLOCK(&client->clientMutex);
+    return res != UA_STATUSCODE_GOOD ? res : client->connectStatus;
+}
+
+UA_StatusCode
+UA_Client_getSessionAuthenticationToken(UA_Client *client, UA_NodeId *authenticationToken,
+                                        UA_ByteString *serverNonce) {
+    UA_LOCK(&client->clientMutex);
+    if(client->sessionState != UA_SESSIONSTATE_CREATED &&
+       client->sessionState != UA_SESSIONSTATE_ACTIVATED) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "There is no current session");
+        UA_UNLOCK(&client->clientMutex);
+        return UA_STATUSCODE_BADSESSIONCLOSED;
+    }
+
+    UA_StatusCode res = UA_NodeId_copy(&client->authenticationToken, authenticationToken);
+    res |= UA_ByteString_copy(&client->serverSessionNonce, serverNonce);
+    UA_UNLOCK(&client->clientMutex);
+    return res;
+}
+
+static UA_StatusCode
+switchSession(UA_Client *client,
+              const UA_NodeId authenticationToken,
+              const UA_ByteString serverNonce) {
+    /* Check that there is no pending session in the client */
+    if(client->sessionState != UA_SESSIONSTATE_CLOSED) {
+        UA_LOG_ERROR(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                     "Cannot activate a session with a different AuthenticationToken "
+                     "when the client already has a Session.");
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    /* Replace token and nonce */
+    UA_NodeId_clear(&client->authenticationToken);
+    UA_ByteString_clear(&client->serverSessionNonce);
+    UA_StatusCode res = UA_NodeId_copy(&authenticationToken, &client->authenticationToken);
+    res |= UA_ByteString_copy(&serverNonce, &client->serverSessionNonce);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+
+    /* Notify that we have now a created session */
+    client->sessionState = UA_SESSIONSTATE_CREATED;
+    notifyClientState(client);
+
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_Client_activateSession(UA_Client *client,
+                          const UA_NodeId authenticationToken,
+                          const UA_ByteString serverNonce) {
+    UA_LOCK(&client->clientMutex);
+    UA_StatusCode res = switchSession(client, authenticationToken, serverNonce);
+    if(res != UA_STATUSCODE_GOOD) {
+        UA_UNLOCK(&client->clientMutex);
+        return res;
+    }
+    res = activateSessionSync(client);
+    notifyClientState(client);
+    UA_UNLOCK(&client->clientMutex);
+    return res != UA_STATUSCODE_GOOD ? res : client->connectStatus;
+}
+
+UA_StatusCode
+UA_Client_activateSessionAsync(UA_Client *client,
+                               const UA_NodeId authenticationToken,
+                               const UA_ByteString serverNonce) {
+    UA_LOCK(&client->clientMutex);
+    UA_StatusCode res = switchSession(client, authenticationToken, serverNonce);
+    if(res != UA_STATUSCODE_GOOD) {
+        UA_UNLOCK(&client->clientMutex);
+        return res;
+    }
+    res = activateSessionAsync(client);
+    notifyClientState(client);
+    UA_UNLOCK(&client->clientMutex);
+    return res != UA_STATUSCODE_GOOD ? res : client->connectStatus;
 }
 
 static void
@@ -1555,17 +1969,19 @@ __Client_reverseConnectCallback(UA_ConnectionManager *cm, uintptr_t connectionId
 
     UA_LOCK(&client->clientMutex);
 
-    /* This is the first call for the listening socket, attach the REVERSE_CONNECT_INDICATOR marker
-     * and set the ID to the channel */
-    if (!client->channel.connectionId) {
+    /* This is the first call for the listening socket, attach the
+     * REVERSE_CONNECT_INDICATOR marker and set the ID to the channel */
+    if(!client->channel.connectionId) {
         client->channel.connectionId = connectionId;
         *connectionContext = REVERSE_CONNECT_INDICATOR;
     }
 
-    /* Last call for the listening connection while it is being closed.
-     * Only notify a state change if no reverse connection is being or has been established by now */
-    if (*connectionContext == REVERSE_CONNECT_INDICATOR && state == UA_CONNECTIONSTATE_CLOSING) {
-        if (client->channel.connectionId == connectionId) {
+    /* Last call for the listening connection while it is being closed. Only
+     * notify a state change if no reverse connection is being or has been
+     * established by now */
+    if(*connectionContext == REVERSE_CONNECT_INDICATOR &&
+       state == UA_CONNECTIONSTATE_CLOSING) {
+        if(client->channel.connectionId == connectionId) {
             client->channel.state = UA_SECURECHANNELSTATE_CLOSED;
             notifyClientState(client);
         }
@@ -1573,37 +1989,45 @@ __Client_reverseConnectCallback(UA_ConnectionManager *cm, uintptr_t connectionId
         return;
     }
 
-    /* Second callback for the listening socket, it is now listening for incoming connections */
-    if (client->channel.connectionId == connectionId &&  *connectionContext == REVERSE_CONNECT_INDICATOR) {
+    /* Second callback for the listening socket, it is now listening for
+     * incoming connections */
+    if(client->channel.connectionId == connectionId &&
+       *connectionContext == REVERSE_CONNECT_INDICATOR) {
         client->channel.state = UA_SECURECHANNELSTATE_REVERSE_LISTENING;
         notifyClientState(client);
     }
 
-    /* This is a connection initiated by a server, disconnect the listener and reset secure channel information */
-    if (client->channel.connectionId != connectionId) {
+    /* This is a connection initiated by a server, disconnect the listener and
+     * reset secure channel information */
+    if(client->channel.connectionId != connectionId) {
         cm->closeConnection(cm, client->channel.connectionId);
         client->channel.connectionId = 0;
         *connectionContext = NULL;
     }
 
-    /* Forward all calls belonging to the reverse connection estblished by the server to the regular network callback */
-    if (*connectionContext != REVERSE_CONNECT_INDICATOR) {
+    /* Forward all calls belonging to the reverse connection estblished by the
+     * server to the regular network callback */
+    if(*connectionContext != REVERSE_CONNECT_INDICATOR) {
         UA_UNLOCK(&client->clientMutex);
-        __Client_networkCallback(cm, connectionId, application, connectionContext, state, params, msg);
+        __Client_networkCallback(cm, connectionId, application,
+                                 connectionContext, state, params, msg);
         return;
     }
 
     UA_UNLOCK(&client->clientMutex);
 }
 
-UA_StatusCode UA_Client_startListeningForReverseConnect(UA_Client *client, const UA_String *listenHostnames,
-                                                        size_t listenHostnamesLength,
-                                                        UA_UInt16 port) {
+UA_StatusCode
+UA_Client_startListeningForReverseConnect(UA_Client *client,
+                                          const UA_String *listenHostnames,
+                                          size_t listenHostnamesLength,
+                                          UA_UInt16 port) {
     UA_LOCK(&client->clientMutex);
 
-    if (client->channel.state > UA_SECURECHANNELSTATE_FRESH && client->channel.state < UA_SECURECHANNELSTATE_CLOSED) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                       "Unable to listen for reverse connect while the client is connected or already listening");
+    if(client->channel.state != UA_SECURECHANNELSTATE_CLOSED) {
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                       "Unable to listen for reverse connect while the client "
+                       "is connected or already listening");
         UA_UNLOCK(&client->clientMutex);
         return UA_STATUSCODE_BADINVALIDSTATE;
     }
@@ -1611,21 +2035,22 @@ UA_StatusCode UA_Client_startListeningForReverseConnect(UA_Client *client, const
     const UA_String tcpString = UA_STRING_STATIC("tcp");
     UA_StatusCode res = UA_STATUSCODE_BADINTERNALERROR;
 
-    client->noReconnect = true;
     client->connectStatus = UA_STATUSCODE_GOOD;
     client->channel.renewState = UA_SECURECHANNELRENEWSTATE_NORMAL;
 
     UA_SecureChannel_init(&client->channel);
     client->channel.config = client->config.localConnectionConfig;
     client->channel.certificateVerification = &client->config.certificateVerification;
-    client->channel.processOPNHeader = verifyClientSecurechannelHeader;
+    client->channel.processOPNHeader = verifyClientSecureChannelHeader;
     client->channel.connectionId = 0;
 
-    initSecurityPolicy(client);
+    client->connectStatus = initSecurityPolicy(client);
+    if(client->connectStatus != UA_STATUSCODE_GOOD)
+        return client->connectStatus;
 
     UA_EventLoop *el = client->config.eventLoop;
     if(!el) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
                        "No EventLoop configured");
         UA_UNLOCK(&client->clientMutex);
         return UA_STATUSCODE_BADINTERNALERROR;
@@ -1636,27 +2061,27 @@ UA_StatusCode UA_Client_startListeningForReverseConnect(UA_Client *client, const
         UA_CHECK_STATUS(res, UA_UNLOCK(&client->clientMutex); return res);
     }
 
-    for(UA_EventSource *es = client->config.eventLoop->eventSources; es != NULL; es = es->next) {
-
+    UA_ConnectionManager *cm = NULL;
+    for(UA_EventSource *es = el->eventSources; es != NULL; es = es->next) {
         if(es->eventSourceType != UA_EVENTSOURCETYPE_CONNECTIONMANAGER)
             continue;
-
-        UA_ConnectionManager *cm = (UA_ConnectionManager*)es;
-        if(!UA_String_equal(&tcpString, &cm->protocol))
-            continue;
-
-        client->channel.connectionManager = cm;
-        break;
+        cm = (UA_ConnectionManager*)es;
+        if(UA_String_equal(&tcpString, &cm->protocol))
+            break;
+        cm = NULL;
     }
 
-    if (!client->channel.connectionManager) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
-                       "Could not find a TCP connection manager, unable to listen for reverse connect");
+    if(!cm) {
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                       "Could not find a TCP connection manager, unable to "
+                       "listen for reverse connect");
         UA_UNLOCK(&client->clientMutex);
         return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    UA_KeyValuePair params[3];
+    client->channel.connectionManager = cm;
+
+    UA_KeyValuePair params[4];
     bool booleanTrue = true;
     params[0].key = UA_QUALIFIEDNAME(0, "port");
     UA_Variant_setScalar(&params[0].value, &port, &UA_TYPES[UA_TYPES_UINT16]);
@@ -1665,25 +2090,26 @@ UA_StatusCode UA_Client_startListeningForReverseConnect(UA_Client *client, const
             listenHostnamesLength, &UA_TYPES[UA_TYPES_STRING]);
     params[2].key = UA_QUALIFIEDNAME(0, "listen");
     UA_Variant_setScalar(&params[2].value, &booleanTrue, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    params[3].key = UA_QUALIFIEDNAME(0, "reuse");
+    UA_Variant_setScalar(&params[3].value, &client->config.tcpReuseAddr,
+                         &UA_TYPES[UA_TYPES_BOOLEAN]);
 
     UA_KeyValueMap paramMap;
     paramMap.map = params;
-    paramMap.mapSize = 3;
+    paramMap.mapSize = 4;
 
     UA_UNLOCK(&client->clientMutex);
-    res = client->channel.connectionManager->openConnection(client->channel.connectionManager, &paramMap,
-                                                            client, NULL, __Client_reverseConnectCallback);
+    res = cm->openConnection(cm, &paramMap, client, NULL, __Client_reverseConnectCallback);
     UA_LOCK(&client->clientMutex);
 
     /* Opening the TCP connection failed */
     if(res != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
                        "Failed to open a listening TCP socket for reverse connect");
         res = UA_STATUSCODE_BADCONNECTIONCLOSED;
     }
 
     UA_UNLOCK(&client->clientMutex);
-
     return res;
 }
 
@@ -1693,24 +2119,32 @@ UA_StatusCode UA_Client_startListeningForReverseConnect(UA_Client *client, const
 
 void
 closeSecureChannel(UA_Client *client) {
+    /* If we close SecureChannel when the Session is still active, set to
+     * created. Otherwise the Session would remain active until the connection
+     * callback is called for the closing connection. */
+    if(client->sessionState == UA_SESSIONSTATE_ACTIVATED)
+        client->sessionState = UA_SESSIONSTATE_CREATED;
+
     /* Prevent recursion */
     if(client->channel.state == UA_SECURECHANNELSTATE_CLOSING ||
        client->channel.state == UA_SECURECHANNELSTATE_CLOSED)
         return;
 
-    UA_LOG_DEBUG_CHANNEL(&client->config.logger, &client->channel,
+    UA_LOG_DEBUG_CHANNEL(client->config.logging, &client->channel,
                          "Closing the channel");
 
     /* Send CLO if the SecureChannel is open */
     if(client->channel.state == UA_SECURECHANNELSTATE_OPEN) {
-        UA_LOG_DEBUG_CHANNEL(&client->config.logger, &client->channel,
+        UA_LOG_DEBUG_CHANNEL(client->config.logging, &client->channel,
                              "Sending the CLO message");
+
+        UA_EventLoop *el = client->config.eventLoop;
 
         /* Manually set up the header (otherwise done in sendRequest) */
         UA_CloseSecureChannelRequest request;
         UA_CloseSecureChannelRequest_init(&request);
         request.requestHeader.requestHandle = ++client->requestHandle;
-        request.requestHeader.timestamp = UA_DateTime_now();
+        request.requestHeader.timestamp = el->dateTime_now(el);
         request.requestHeader.timeoutHint = client->config.timeout;
         request.requestHeader.authenticationToken = client->authenticationToken;
         UA_SecureChannel_sendSymmetricMessage(&client->channel, ++client->requestId,
@@ -1721,7 +2155,7 @@ closeSecureChannel(UA_Client *client) {
     /* The connection is eventually closed in the next callback from the
      * ConnectionManager with the appropriate status code. Don't set the
      * connection closed right away! */
-    UA_SecureChannel_shutdown(&client->channel);
+    UA_SecureChannel_shutdown(&client->channel, UA_SHUTDOWNREASON_CLOSE);
 }
 
 static void
@@ -1747,11 +2181,8 @@ cleanupSession(UA_Client *client) {
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS
     /* We need to clean up the subscriptions */
-    __Client_Subscriptions_clean(client);
+    __Client_Subscriptions_clear(client);
 #endif
-
-    /* Reset so the next async connect creates a session by default */
-    client->noSession = false;
 
     /* Delete outstanding async services */
     __Client_AsyncService_removeAll(client, UA_STATUSCODE_BADSESSIONCLOSED);
@@ -1764,11 +2195,65 @@ cleanupSession(UA_Client *client) {
 }
 
 static void
+disconnectSecureChannel(UA_Client *client, UA_Boolean sync) {
+    /* Clean the DiscoveryUrl when the connection is explicitly closed */
+    UA_String_clear(&client->discoveryUrl);
+
+    /* Close the SecureChannel */
+    closeSecureChannel(client);
+
+    /* Manually set the status to closed to prevent an automatic reconnection */
+    if(client->connectStatus == UA_STATUSCODE_GOOD)
+        client->connectStatus = UA_STATUSCODE_BADCONNECTIONCLOSED;
+
+    /* In the synchronous case, loop until the client has actually closed. */
+    UA_EventLoop *el = client->config.eventLoop;
+    if(sync && el &&
+       el->state != UA_EVENTLOOPSTATE_FRESH &&
+       el->state != UA_EVENTLOOPSTATE_STOPPED) {
+        UA_UNLOCK(&client->clientMutex);
+        while(client->channel.state != UA_SECURECHANNELSTATE_CLOSED) {
+            el->run(el, 100);
+        }
+        UA_LOCK(&client->clientMutex);
+    }
+
+    notifyClientState(client);
+}
+
+UA_StatusCode
+UA_Client_disconnectSecureChannel(UA_Client *client) {
+    UA_LOCK(&client->clientMutex);
+    disconnectSecureChannel(client, true);
+    UA_UNLOCK(&client->clientMutex);
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_Client_disconnectSecureChannelAsync(UA_Client *client) {
+    UA_LOCK(&client->clientMutex);
+    disconnectSecureChannel(client, false);
+    UA_UNLOCK(&client->clientMutex);
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_Client_disconnect(UA_Client *client) {
+    UA_LOCK(&client->clientMutex);
+    if(client->sessionState == UA_SESSIONSTATE_ACTIVATED)
+        sendCloseSession(client);
+    cleanupSession(client);
+    disconnectSecureChannel(client, true);
+    UA_UNLOCK(&client->clientMutex);
+    return UA_STATUSCODE_GOOD;
+}
+
+static void
 closeSessionCallback(UA_Client *client, void *userdata,
                      UA_UInt32 requestId, void *response) {
     UA_LOCK(&client->clientMutex);
     cleanupSession(client);
-    closeSecureChannel(client);
+    disconnectSecureChannel(client, false);
     notifyClientState(client);
     UA_UNLOCK(&client->clientMutex);
 }
@@ -1777,11 +2262,10 @@ UA_StatusCode
 UA_Client_disconnectAsync(UA_Client *client) {
     UA_LOCK(&client->clientMutex);
 
-    client->noReconnect = true;
-
     if(client->sessionState == UA_SESSIONSTATE_CLOSED ||
        client->sessionState == UA_SESSIONSTATE_CLOSING) {
-        closeSecureChannel(client);
+        disconnectSecureChannel(client, false);
+        notifyClientState(client);
         UA_UNLOCK(&client->clientMutex);
         return UA_STATUSCODE_GOOD;
     }
@@ -1800,53 +2284,10 @@ UA_Client_disconnectAsync(UA_Client *client) {
         /* Sending the close request failed. Continue to close the connection
          * anyway. */
         cleanupSession(client);
-        closeSecureChannel(client);
-    }
-    notifyClientState(client);
-
-    UA_UNLOCK(&client->clientMutex);
-    return res;
-}
-
-UA_StatusCode
-UA_Client_disconnectSecureChannel(UA_Client *client) {
-    UA_LOCK(&client->clientMutex);
-
-    client->noReconnect = true;
-    closeSecureChannel(client);
-
-    /* Manually set the status to closed to prevent an automatic reconnection */
-    if(client->connectStatus == UA_STATUSCODE_GOOD)
-        client->connectStatus = UA_STATUSCODE_BADCONNECTIONCLOSED;
-
-    /* Closing is async. Loop until the client has actually closed. */
-    UA_EventLoop *el = client->config.eventLoop;
-    if(el &&
-       el->state != UA_EVENTLOOPSTATE_FRESH &&
-       el->state != UA_EVENTLOOPSTATE_STOPPED) {
-        UA_UNLOCK(&client->clientMutex);
-        while(client->channel.state != UA_SECURECHANNELSTATE_CLOSED &&
-              client->channel.state != UA_SECURECHANNELSTATE_FRESH) {
-            el->run(el, 100);
-        }
-        UA_LOCK(&client->clientMutex);
+        disconnectSecureChannel(client, false);
     }
 
     notifyClientState(client);
-
     UA_UNLOCK(&client->clientMutex);
-    return UA_STATUSCODE_GOOD;
-}
-
-UA_StatusCode
-UA_Client_disconnect(UA_Client *client) {
-    UA_LOCK(&client->clientMutex);        
-
-    client->noReconnect = true;
-    if(client->sessionState == UA_SESSIONSTATE_ACTIVATED)
-        sendCloseSession(client);
-    cleanupSession(client);
-    UA_UNLOCK(&client->clientMutex);
-    UA_StatusCode res = UA_Client_disconnectSecureChannel(client);
     return res;
 }

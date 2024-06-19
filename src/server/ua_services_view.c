@@ -167,12 +167,12 @@ isNodeInTree(UA_Server *server, const UA_NodeId *leafNode,
              const UA_NodeId *nodeToFind,
              const UA_ReferenceTypeSet *relevantRefs) {
     struct IsNodeInTreeContext ctx;
+    memset(&ctx, 0, sizeof(struct IsNodeInTreeContext));
     ctx.server = server;
     ctx.nodeToFind = UA_NodePointer_fromNodeId(nodeToFind);
-    ctx.parents.root = NULL;
     ctx.relevantRefs = *relevantRefs;
-    ctx.depth = 0;
     UA_ReferenceTarget tmpTarget;
+    memset(&tmpTarget, 0, sizeof(UA_ReferenceTarget));
     tmpTarget.targetId = UA_NodePointer_fromNodeId(leafNode);
     return (isNodeInTreeIterateCallback(&ctx, &tmpTarget) != NULL);
 }
@@ -508,6 +508,7 @@ struct ContinuationPoint {
      * between the calls to Browse/BrowseNext. */
     UA_NodePointer lastTarget;
     UA_Byte lastRefKindIndex;
+    UA_Boolean lastRefInverse;
 };
 
 ContinuationPoint *
@@ -639,9 +640,15 @@ browseReferencTargetCallback(void *context, UA_ReferenceTarget *t) {
     /* Store as last target. The itarget-id is a shallow copy for now. */
     cp->lastTarget = t->targetId;
     cp->lastRefKindIndex = bc->rk->referenceTypeIndex;
+    cp->lastRefInverse = bc->rk->isInverse;
 
-    /* Abort the iteration if the status is not good */
-    return (bc->status == UA_STATUSCODE_GOOD) ? NULL : (void*)0x01;
+    /* Abort if the status is not good. Also doesn't make a deep-copy of
+     * cp->lastTarget after returning from here. */
+    if(bc->status != UA_STATUSCODE_GOOD) {
+        UA_NodePointer_init(&cp->lastTarget);
+        return (void*)0x01;
+    }
+    return NULL;
 }
 
 /* Returns whether the node / continuationpoint is done */
@@ -657,6 +664,8 @@ browseWithNode(struct BrowseContext *bc, const UA_NodeHead *head ) {
         /* If the continuation point was previously used, skip forward to the
          * last ReferenceType that was transmitted */
         if(bc->activeCP && rk->referenceTypeIndex != cp->lastRefKindIndex)
+            continue;
+        if(bc->activeCP && rk->isInverse != cp->lastRefInverse)
             continue;
 
         /* Reference in the right direction? */
@@ -685,9 +694,10 @@ browseWithNode(struct BrowseContext *bc, const UA_NodeHead *head ) {
                 UA_ReferenceTargetTreeElem key;
                 key.target.targetId = cp->lastTarget;
                 key.targetIdHash = UA_ExpandedNodeId_hash(&lastEn);
-                ZIP_UNZIP(UA_ReferenceIdTree, &rk->targets.tree.idTree,
+                ZIP_UNZIP(UA_ReferenceIdTree,
+                          (UA_ReferenceIdTree*)&rk->targets.tree.idRoot,
                           &key, &left, &right);
-                rk->targets.tree.idTree = right;
+                rk->targets.tree.idRoot = right.root;
             } else {
                 /* Iterate over the array to find the match */
                 for(; nextTargetIndex < rk->targetsSize; nextTargetIndex++) {
@@ -704,6 +714,10 @@ browseWithNode(struct BrowseContext *bc, const UA_NodeHead *head ) {
                 rk->targets.array = &rk->targets.array[nextTargetIndex];
                 rk->targetsSize -= nextTargetIndex;
             }
+
+            /* Clear cp->lastTarget before it gets overwritten in the following
+             * browse steps. */
+            UA_NodePointer_clear(&cp->lastTarget);
         }
 
         /* Iterate over all reference targets */
@@ -713,7 +727,7 @@ browseWithNode(struct BrowseContext *bc, const UA_NodeHead *head ) {
         /* Undo the "skipping ahead" for the continuation point */
         if(bc->activeCP) {
             if(rk->hasRefTree) {
-                rk->targets.tree.idTree.root =
+                rk->targets.tree.idRoot =
                     ZIP_ZIP(UA_ReferenceIdTree, left.root, right.root);
             } else {
                 /* rk->targets.array = rk->targets.array[-nextTargetIndex]; */
@@ -726,13 +740,17 @@ browseWithNode(struct BrowseContext *bc, const UA_NodeHead *head ) {
 
         /* The iteration was aborted */
         if(res != NULL) {
-            /* Aborted with status code good. The continuation point picks up
-             * from the last target. Make a deep copy of the last target. */
+            /* Aborted with status code good -> the maximum number of browse
+             * results was reached. Make a deep copy of the last target for the
+             * continuation point. */
             if(bc->status == UA_STATUSCODE_GOOD)
                 bc->status = UA_NodePointer_copy(cp->lastTarget, &cp->lastTarget);
             return;
         }
     }
+
+    /* Reset last-target to prevent clearing it up */
+    UA_NodePointer_init(&cp->lastTarget);
 
     /* Browsing the node is done */
     bc->done = true;
@@ -765,14 +783,19 @@ browse(struct BrowseContext *bc) {
     }
 
     /* Check AccessControl rights */
-    if(bc->session != &bc->server->adminSession &&
-       !bc->server->config.accessControl.
-         allowBrowseNode(bc->server, &bc->server->config.accessControl,
-                         &bc->session->sessionId, bc->session->sessionHandle,
-                         &descr->nodeId, node->head.context)) {
-        UA_NODESTORE_RELEASE(bc->server, node);
-        bc->status = UA_STATUSCODE_BADUSERACCESSDENIED;
-        return;
+    if(bc->session != &bc->server->adminSession) {
+        UA_LOCK_ASSERT(&bc->server->serviceMutex, 1);
+        UA_UNLOCK(&bc->server->serviceMutex);
+        if(!bc->server->config.accessControl.
+           allowBrowseNode(bc->server, &bc->server->config.accessControl,
+                           &bc->session->sessionId, bc->session->context,
+                           &descr->nodeId, node->head.context)) {
+            UA_LOCK(&bc->server->serviceMutex);
+            UA_NODESTORE_RELEASE(bc->server, node);
+            bc->status = UA_STATUSCODE_BADUSERACCESSDENIED;
+            return;
+        }
+        UA_LOCK(&bc->server->serviceMutex);
     }
 
     /* Browse the node */
@@ -898,8 +921,10 @@ Operation_Browse(UA_Server *server, UA_Session *session, const UA_UInt32 *maxref
         goto cleanup;
     cp2->maxReferences = cp.maxReferences;
     cp2->relevantReferences = cp.relevantReferences;
-    cp2->lastTarget = cp.lastTarget;
+    cp2->lastTarget = cp.lastTarget; /* Move the (deep) copy */
+    UA_NodePointer_init(&cp.lastTarget); /* No longer clear below (cleanup) */
     cp2->lastRefKindIndex = cp.lastRefKindIndex;
+    cp2->lastRefInverse = cp.lastRefInverse;
 
     /* Create a random bytestring via a Guid */
     ident = UA_Guid_new();
@@ -927,13 +952,14 @@ Operation_Browse(UA_Server *server, UA_Session *session, const UA_UInt32 *maxref
         ContinuationPoint_clear(cp2);
         UA_free(cp2);
     }
+    UA_NodePointer_clear(&cp.lastTarget);
     UA_BrowseResult_clear(result);
     result->statusCode = retval;
 }
 
 void Service_Browse(UA_Server *server, UA_Session *session,
                     const UA_BrowseRequest *request, UA_BrowseResponse *response) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, session, "Processing BrowseRequest");
+    UA_LOG_DEBUG_SESSION(server->config.logging, session, "Processing BrowseRequest");
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     /* Test the number of operations in the request */
@@ -1052,7 +1078,7 @@ void
 Service_BrowseNext(UA_Server *server, UA_Session *session,
                    const UA_BrowseNextRequest *request,
                    UA_BrowseNextResponse *response) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, session,
+    UA_LOG_DEBUG_SESSION(server->config.logging, session,
                          "Processing BrowseNextRequest");
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
@@ -1180,7 +1206,7 @@ walkBrowsePathElement(UA_Server *server, UA_Session *session,
             if(rk->hasRefTree) {
                 res = (UA_StatusCode)(uintptr_t)
                     ZIP_ITER_KEY(UA_ReferenceNameTree,
-                                 &rk->targets.tree.nameTree,
+                                 (UA_ReferenceNameTree*)&rk->targets.tree.nameRoot,
                                  &targetHashKey, addBrowseHashTarget, next);
                 if(res != UA_STATUSCODE_GOOD)
                     break;
@@ -1359,7 +1385,7 @@ void
 Service_TranslateBrowsePathsToNodeIds(UA_Server *server, UA_Session *session,
                                       const UA_TranslateBrowsePathsToNodeIdsRequest *request,
                                       UA_TranslateBrowsePathsToNodeIdsResponse *response) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, session,
+    UA_LOG_DEBUG_SESSION(server->config.logging, session,
                          "Processing TranslateBrowsePathsToNodeIdsRequest");
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
@@ -1387,7 +1413,7 @@ browseSimplifiedBrowsePath(UA_Server *server, const UA_NodeId origin,
     UA_BrowsePathResult bpr;
     UA_BrowsePathResult_init(&bpr);
     if(browsePathSize > UA_MAX_TREE_RECURSE) {
-        UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
                        "Simplified Browse Path too long");
         bpr.statusCode = UA_STATUSCODE_BADINTERNALERROR;
         return bpr;
@@ -1431,7 +1457,7 @@ UA_Server_browseSimplifiedBrowsePath(UA_Server *server, const UA_NodeId origin,
 void Service_RegisterNodes(UA_Server *server, UA_Session *session,
                            const UA_RegisterNodesRequest *request,
                            UA_RegisterNodesResponse *response) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, session,
+    UA_LOG_DEBUG_SESSION(server->config.logging, session,
                          "Processing RegisterNodesRequest");
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
@@ -1458,7 +1484,7 @@ void Service_RegisterNodes(UA_Server *server, UA_Session *session,
 void Service_UnregisterNodes(UA_Server *server, UA_Session *session,
                              const UA_UnregisterNodesRequest *request,
                              UA_UnregisterNodesResponse *response) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, session,
+    UA_LOG_DEBUG_SESSION(server->config.logging, session,
                          "Processing UnRegisterNodesRequest");
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 

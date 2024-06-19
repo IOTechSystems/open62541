@@ -6,14 +6,17 @@
  */
 
 #include <open62541/server.h>
+#include <open62541/server_pubsub.h>
 #include <open62541/server_config_default.h>
-#include <open62541/plugin/pubsub_udp.h>
 
 #include "ua_pubsub.h"
 #include "ua_pubsub_networkmessage.h"
+#include "testing_clock.h"
+#include "test_helpers.h"
 
 #include <check.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 UA_Server *server = NULL;
 UA_NodeId connectionIdentifier, publishedDataSetIdent, writerGroupIdent, writerGroupIdent1, dataSetWriterIdent, dataSetWriterIdent1, dataSetFieldIdent, readerGroupIdentifier, readerIdentifier;
@@ -33,8 +36,8 @@ addMinimalPubSubConfiguration(void){
     connectionConfig.enabled = UA_TRUE;
     UA_NetworkAddressUrlDataType networkAddressUrl = {UA_STRING_NULL , UA_STRING("opc.udp://224.0.0.22:4840/")};
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl, &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
-    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT16;
-    connectionConfig.publisherId.uint16 = 2234;
+    connectionConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT16;
+    connectionConfig.publisherId.id.uint16 = 2234;
     retVal = UA_Server_addPubSubConnection(server, &connectionConfig, &connectionIdentifier);
     if(retVal != UA_STATUSCODE_GOOD)
         return retVal;
@@ -50,107 +53,14 @@ addMinimalPubSubConfiguration(void){
 }
 
 static void setup(void) {
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
-    UA_ServerConfig *config = UA_Server_getConfig(server);
-    UA_ServerConfig_setDefault(config);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDPMP());
     UA_Server_run_startup(server);
 }
 
 static void teardown(void) {
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
-}
-
-typedef struct {
-    UA_ByteString *buffer;
-    size_t offset;
-} UA_ReceiveContext;
-
-static UA_StatusCode
-recvTestFun(UA_PubSubChannel *channel, void *context, const UA_ByteString *buffer) {
-    UA_ReceiveContext *ctx = (UA_ReceiveContext*)context;
-    memcpy(ctx->buffer->data + ctx->offset, buffer->data, buffer->length);
-    ctx->offset += buffer->length;
-    ctx->buffer->length = ctx->offset;
-    return UA_STATUSCODE_GOOD;
-}
-
-static void
-receiveMultipleMessageRT(UA_PubSubConnection *connection, UA_DataSetReader *dataSetReader) {
-    UA_ByteString buffer;
-    if (UA_ByteString_allocBuffer(&buffer, 4096) != UA_STATUSCODE_GOOD) {
-        ck_abort_msg("Message buffer allocation failed!");
-    }
-
-    UA_ReceiveContext testCtx = {&buffer, 0};
-    connection->channel->receive(connection->channel, NULL, recvTestFun, &testCtx, 1000000);
-    if(buffer.length > 0) {
-        size_t currentPosition = 0;
-        UA_UInt16  rcvCount    = 0;
-        do {
-            /* Decode only the necessary offset and update the networkMessage */
-            if(UA_NetworkMessage_updateBufferedNwMessage(&dataSetReader->bufferedMessage, &buffer, &currentPosition) != UA_STATUSCODE_GOOD) {
-                ck_abort_msg("PubSub receive. Unknown field type!");
-            }
-
-            /* Check the decoded message is the expected one */
-            if((dataSetReader->bufferedMessage.nm->groupHeader.writerGroupId != dataSetReader->config.writerGroupId) ||
-               (*dataSetReader->bufferedMessage.nm->payloadHeader.dataSetPayloadHeader.dataSetWriterIds != dataSetReader->config.dataSetWriterId)) {
-                ck_abort_msg("PubSub receive. Unknown message received. Will not be processed.");
-            }
-
-            UA_ReaderGroup *rg =
-                UA_ReaderGroup_findRGbyId(server, dataSetReader->linkedReaderGroup);
-
-            UA_DataSetReader_process(server, rg, dataSetReader,
-                                     dataSetReader->bufferedMessage.nm->payload.dataSetPayload.dataSetMessages);
-
-            /* Delete the payload value of every dsf's decoded */
-            UA_DataSetMessage *dsm = dataSetReader->bufferedMessage.nm->payload.dataSetPayload.dataSetMessages;
-            if(dsm->header.fieldEncoding == UA_FIELDENCODING_VARIANT) {
-                for(UA_UInt16 i = 0; i < dsm->data.keyFrameData.fieldCount; i++) {
-                    UA_Variant_clear(&dsm->data.keyFrameData.dataSetFields[i].value);
-                }
-            }
-            rcvCount++;
-        } while((buffer.length) > currentPosition);
-
-        ck_assert_int_eq(rcvCount, 2);
-        UA_ByteString_clear(&buffer);
-    }
-}
-
-static void receiveSingleMessage(UA_PubSubConnection *connection) {
-    UA_ByteString buffer;
-    if (UA_ByteString_allocBuffer(&buffer, 4096) != UA_STATUSCODE_GOOD) {
-        ck_abort_msg("Message buffer allocation failed!");
-    }
-
-    UA_ReceiveContext testCtx = {&buffer, 0};
-    UA_StatusCode retval =
-        connection->channel->receive(connection->channel, NULL, recvTestFun,
-                                     &testCtx, 1000000);
-    if(retval != UA_STATUSCODE_GOOD || buffer.length == 0) {
-        buffer.length = 4096;
-        UA_ByteString_clear(&buffer);
-        ck_abort_msg("Expected message not received!");
-    }
-
-    size_t currentPosition = 0;
-    UA_UInt16 rcvCount    = 0;
-    do {
-        UA_NetworkMessage currentNetworkMessage;
-        memset(&currentNetworkMessage, 0, sizeof(UA_NetworkMessage));
-        UA_NetworkMessage_decodeBinary(&buffer, &currentPosition, &currentNetworkMessage);
-        ck_assert((*((UA_UInt32 *)currentNetworkMessage.payload.dataSetPayload.dataSetMessages->data.keyFrameData.dataSetFields->value.data)) == 1000);
-        UA_NetworkMessage_clear(&currentNetworkMessage);
-        rcvCount++;
-    } while((buffer.length) > currentPosition);
-
-    ck_assert_int_eq(rcvCount, 2);
-    UA_ByteString_clear(&buffer);
 }
 
 /* If the external data source is written over the information model, the
@@ -256,8 +166,8 @@ START_TEST(SubscribeMultipleMessagesRT) {
     memset (&readerConfig, 0, sizeof (UA_DataSetReaderConfig));
     readerConfig.name = UA_STRING ("DataSetReader Test");
     UA_UInt16 publisherIdentifier = 2234;
-    readerConfig.publisherId.type = &UA_TYPES[UA_TYPES_UINT16];
-    readerConfig.publisherId.data = &publisherIdentifier;
+    readerConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT16;
+    readerConfig.publisherId.id.uint16 = publisherIdentifier;
     readerConfig.writerGroupId    = 100;
     readerConfig.dataSetWriterId  = 62541;
     readerConfig.messageSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
@@ -301,11 +211,12 @@ START_TEST(SubscribeMultipleMessagesRT) {
         folderBrowseName = UA_QUALIFIEDNAME (1, "Subscribed Variables");
     }
 
-    UA_Server_addObjectNode (server, UA_NODEID_NULL,
+    retVal = UA_Server_addObjectNode (server, UA_NODEID_NULL,
                              UA_NODEID_NUMERIC (0, UA_NS0ID_OBJECTSFOLDER),
                              UA_NODEID_NUMERIC (0, UA_NS0ID_ORGANIZES),
                              folderBrowseName, UA_NODEID_NUMERIC (0,
                              UA_NS0ID_BASEOBJECTTYPE), oAttr, NULL, &folderId);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
     /* Variable to subscribe data */
     UA_VariableAttributes vAttr = UA_VariableAttributes_default;
     vAttr.description = UA_LOCALIZEDTEXT ("en-US", "Subscribed UInt32");
@@ -352,24 +263,28 @@ START_TEST(SubscribeMultipleMessagesRT) {
     ck_assert(UA_Server_freezeReaderGroupConfiguration(server, readerGroupIdentifier) == UA_STATUSCODE_GOOD);
     ck_assert(UA_Server_freezeWriterGroupConfiguration(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
     ck_assert(UA_Server_freezeWriterGroupConfiguration(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
-    ck_assert(UA_Server_setWriterGroupOperational(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
-    ck_assert(UA_Server_setWriterGroupOperational(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
+    ck_assert(UA_Server_enableWriterGroup(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
+    ck_assert(UA_Server_enableWriterGroup(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
 
     ck_assert(UA_Server_unfreezeReaderGroupConfiguration(server, readerGroupIdentifier) == UA_STATUSCODE_GOOD);
     ck_assert(UA_Server_freezeReaderGroupConfiguration(server, readerGroupIdentifier) == UA_STATUSCODE_GOOD);
+    ck_assert_int_eq(UA_STATUSCODE_GOOD, UA_Server_enableReaderGroup(server, readerGroupIdentifier));
 
-    UA_DataSetReader *dataSetReader = UA_ReaderGroup_findDSRbyId(server, readerIdentifier);
-    receiveMultipleMessageRT(connection, dataSetReader);
+    while(true) {
+        UA_fakeSleep(50);
+        UA_Server_run_iterate(server, false);
 
-    /* Read data received by the Subscriber */
-    UA_Variant *subscribedNodeData = UA_Variant_new();
-    retVal = UA_Server_readValue(server, UA_NODEID_NUMERIC(1, 50002), subscribedNodeData);
-    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
+        /* Read data received by the Subscriber */
+        UA_Variant *subscribedNodeData = UA_Variant_new();
+        retVal = UA_Server_readValue(server, UA_NODEID_NUMERIC(1, 50002), subscribedNodeData);
+        ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 
-    ck_assert((*(UA_Int32 *)subscribedNodeData->data) == 1000);
+        UA_Boolean eq = ((*(UA_Int32 *)subscribedNodeData->data) == 1000);
+        UA_Variant_delete(subscribedNodeData);
+        if(eq)
+            break;
+    }
 
-    UA_Variant_clear(subscribedNodeData);
-    UA_free(subscribedNodeData);
     ck_assert(UA_Server_unfreezeReaderGroupConfiguration(server, readerGroupIdentifier) == UA_STATUSCODE_GOOD);
     ck_assert(UA_Server_unfreezeWriterGroupConfiguration(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
     ck_assert(UA_Server_unfreezeWriterGroupConfiguration(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
@@ -458,8 +373,8 @@ START_TEST(SubscribeMultipleMessagesWithoutRT) {
     memset (&readerConfig, 0, sizeof (UA_DataSetReaderConfig));
     readerConfig.name = UA_STRING ("DataSetReader Test");
     UA_UInt16 publisherIdentifier = 2234;
-    readerConfig.publisherId.type = &UA_TYPES[UA_TYPES_UINT16];
-    readerConfig.publisherId.data = &publisherIdentifier;
+    readerConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT16;
+    readerConfig.publisherId.id.uint16 = publisherIdentifier;
     readerConfig.writerGroupId    = 100;
     readerConfig.dataSetWriterId  = 62541;
     readerConfig.messageSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
@@ -504,11 +419,12 @@ START_TEST(SubscribeMultipleMessagesWithoutRT) {
         folderBrowseName = UA_QUALIFIEDNAME (1, "Subscribed Variables");
     }
 
-    UA_Server_addObjectNode (server, UA_NODEID_NULL,
+    retVal = UA_Server_addObjectNode (server, UA_NODEID_NULL,
                              UA_NODEID_NUMERIC (0, UA_NS0ID_OBJECTSFOLDER),
                              UA_NODEID_NUMERIC (0, UA_NS0ID_ORGANIZES),
                              folderBrowseName, UA_NODEID_NUMERIC (0,
                              UA_NS0ID_BASEOBJECTTYPE), oAttr, NULL, &folderId);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
     /* Variable to subscribe data */
     UA_VariableAttributes vAttr = UA_VariableAttributes_default;
     vAttr.description = UA_LOCALIZEDTEXT ("en-US", "Subscribed UInt32");
@@ -539,9 +455,9 @@ START_TEST(SubscribeMultipleMessagesWithoutRT) {
 
     ck_assert(UA_Server_freezeWriterGroupConfiguration(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
     ck_assert(UA_Server_freezeWriterGroupConfiguration(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
-    ck_assert(UA_Server_setWriterGroupOperational(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
-    ck_assert(UA_Server_setWriterGroupOperational(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
-    receiveSingleMessage(connection);
+    ck_assert(UA_Server_enableWriterGroup(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
+    ck_assert(UA_Server_enableWriterGroup(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
+    UA_Server_run_iterate(server, false);
     ck_assert(UA_Server_unfreezeWriterGroupConfiguration(server, writerGroupIdent) == UA_STATUSCODE_GOOD);
     ck_assert(UA_Server_unfreezeWriterGroupConfiguration(server, writerGroupIdent1) == UA_STATUSCODE_GOOD);
     UA_DataValue_delete(dataValue);
@@ -584,10 +500,11 @@ START_TEST(SetupInvalidPubSubConfig) {
     memset(&variant, 0, sizeof(UA_Variant));
     UA_Variant_setScalar(&variant, intValue, &UA_TYPES[UA_TYPES_UINT32]);
     attributes.value = variant;
-    UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1,  1000),
+    retVal = UA_Server_addVariableNode(server, UA_NODEID_NUMERIC(1,  1000),
                               UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER), UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
                               UA_QUALIFIEDNAME(1, "variable"), UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
                               attributes, NULL, NULL);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
     dsfConfig.field.variable.publishParameters.publishedVariable = UA_NODEID_NUMERIC(1, 1000);
     dsfConfig.field.variable.publishParameters.attributeId = UA_ATTRIBUTEID_VALUE;
     /* Not using static value source */
@@ -606,8 +523,8 @@ START_TEST(SetupInvalidPubSubConfig) {
     memset (&readerConfig, 0, sizeof (UA_DataSetReaderConfig));
     readerConfig.name = UA_STRING ("DataSetReader Test");
     UA_UInt16 publisherIdentifier = 2234;
-    readerConfig.publisherId.type = &UA_TYPES[UA_TYPES_UINT16];
-    readerConfig.publisherId.data = &publisherIdentifier;
+    readerConfig.publisherId.idType = UA_PUBLISHERIDTYPE_UINT16;
+    readerConfig.publisherId.id.uint16 = publisherIdentifier;
     readerConfig.writerGroupId    = 100;
     readerConfig.dataSetWriterId  = 62541;
     readerConfig.messageSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
@@ -652,11 +569,12 @@ START_TEST(SetupInvalidPubSubConfig) {
         folderBrowseName = UA_QUALIFIEDNAME (1, "Subscribed Variables");
     }
 
-    UA_Server_addObjectNode (server, UA_NODEID_NULL,
+    retVal = UA_Server_addObjectNode (server, UA_NODEID_NULL,
                              UA_NODEID_NUMERIC (0, UA_NS0ID_OBJECTSFOLDER),
                              UA_NODEID_NUMERIC (0, UA_NS0ID_ORGANIZES),
                              folderBrowseName, UA_NODEID_NUMERIC (0,
                              UA_NS0ID_BASEOBJECTTYPE), oAttr, NULL, &folderId);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
     /* Variable to subscribe data */
     UA_VariableAttributes vAttr = UA_VariableAttributes_default;
     vAttr.description = UA_LOCALIZEDTEXT ("en-US", "Subscribed DateTime");

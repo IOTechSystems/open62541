@@ -11,7 +11,7 @@
 #include <open62541/client.h>
 #include <open62541/client_highlevel.h>
 #include <open62541/plugin/securitypolicy.h>
-#include <open62541/plugin/pki_default.h>
+#include <open62541/plugin/certificategroup_default.h>
 #include <open62541/plugin/accesscontrol_default.h>
 #include <open62541/server.h>
 
@@ -21,6 +21,7 @@
 #include <check.h>
 #include <stdlib.h>
 
+#include "test_helpers.h"
 #include "certificates.h"
 #include "testing_clock.h"
 #include "thread_wrapper.h"
@@ -48,29 +49,27 @@ static void setup(void) {
     privateKey.data = SERVER_KEY_DER_DATA;
 
     /* Load client certificate for authentication */
-    UA_ByteString certificate_client;
-    certificate_client.length = CLIENT_CERT_AUTH_DER_LENGTH;
-    certificate_client.data = CLIENT_CERT_AUTH_DER_DATA;
+    UA_ByteString certificate_client_auth;
+    certificate_client_auth.length = CLIENT_CERT_AUTH_DER_LENGTH;
+    certificate_client_auth.data = CLIENT_CERT_AUTH_DER_DATA;
 
     /* Add client certificate to the trust list */
     size_t trustListSize = 1;
     UA_STACKARRAY(UA_ByteString, trustList, trustListSize);
-    trustList[0] = certificate_client;
+    trustList[0] = certificate_client_auth;
     size_t issuerListSize = 0;
     UA_ByteString *issuerList = NULL;
     UA_ByteString *revocationList = NULL;
     size_t revocationListSize = 0;
 
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTestWithSecurityPolicies(4840, &certificate, &privateKey,
+                                                          trustList, trustListSize,
+                                                          issuerList, issuerListSize,
+                                                          revocationList, revocationListSize);
     ck_assert(server != NULL);
-    UA_ServerConfig *config = UA_Server_getConfig(server);
-    UA_ServerConfig_setDefaultWithSecurityPolicies(config, 4840, &certificate, &privateKey,
-                                                   trustList, trustListSize,
-                                                   issuerList, issuerListSize,
-                                                   revocationList, revocationListSize);
 
-    config->certificateVerification.clear(&config->certificateVerification);
-    UA_CertificateVerification_AcceptAll(&config->certificateVerification);
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    UA_CertificateGroup_AcceptAll(&config->secureChannelPKI);
 
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
@@ -102,7 +101,7 @@ START_TEST(Client_connect_certificate) {
     privateKeyAuth.length = CLIENT_KEY_AUTH_DER_LENGTH;
     privateKeyAuth.data = CLIENT_KEY_AUTH_DER_DATA;
 
-    UA_Client *client = UA_Client_new();
+    UA_Client *client = UA_Client_newForUnitTest();
     UA_ClientConfig *cc = UA_Client_getConfig(client);
 
     /* Set securityMode and securityPolicyUri */
@@ -111,12 +110,11 @@ START_TEST(Client_connect_certificate) {
 
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          NULL, 0, NULL, 0);
-    UA_CertificateVerification_AcceptAll(&cc->certificateVerification);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
 
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&cc->clientDescription.applicationUri);
-    //cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
-    cc->clientDescription.applicationUri = UA_STRING_ALLOC("http://test.de/root");
+    cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
 
     UA_ClientConfig_setAuthenticationCert(cc, certificateAuth, privateKeyAuth);
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
@@ -147,7 +145,7 @@ START_TEST(Client_connect_invalid_certificate) {
         privateKeyAuth.length = CLIENT_KEY_DER_LENGTH;
         privateKeyAuth.data = CLIENT_KEY_DER_DATA;
 
-        UA_Client *client = UA_Client_new();
+        UA_Client *client = UA_Client_newForUnitTest();
         UA_ClientConfig *cc = UA_Client_getConfig(client);
 
         /* Set securityMode and securityPolicyUri */
@@ -156,7 +154,7 @@ START_TEST(Client_connect_invalid_certificate) {
 
         UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                              NULL, 0, NULL, 0);
-        UA_CertificateVerification_AcceptAll(&cc->certificateVerification);
+        UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
 
         /* Set the ApplicationUri used in the certificate */
         UA_String_clear(&cc->clientDescription.applicationUri);
