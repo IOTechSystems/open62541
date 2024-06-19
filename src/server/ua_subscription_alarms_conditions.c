@@ -10,6 +10,87 @@
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
+
+typedef struct UA_AlarmConditionProperties
+{
+    UA_Duration on_delay;
+    UA_Duration off_delay;
+    UA_Duration re_alarm_time;
+    UA_UInt16 re_alarm_repeat_count;
+} UA_AlarmConditionProperties;
+
+
+typedef struct UA_DiscrepancyAlarmProperties
+{
+    UA_AlarmConditionProperties properties;
+    UA_Variant target_value;
+    UA_Duration expected_time;
+    UA_Double tolerance;
+    UA_Boolean has_tolerance;
+} UA_DiscrepancyAlarmProperties
+
+typedef struct UA_OffNormalAlarmProperties
+{
+    UA_AlarmConditionProperties properties;
+    //TODO UA_NodeId normal_state;
+} UA_OffNormalAlarmProperties;
+
+typedef struct UA_LimitAlarmProperties
+{
+    UA_AlarmConditionProperties properties;
+    UA_Double high_high_limit;
+    UA_Boolean has_high_high_limit;
+    UA_Double high_limit;
+    UA_Boolean has_high_limit;
+    UA_Double low_limit;
+    UA_Boolean has_low_limit;
+    UA_Double low_low_limit;
+    UA_Boolean has_low_low_limit;
+
+    UA_Double base_high_high_limit;
+    UA_Boolean has_base_high_high_limit;
+    UA_Double base_high_limit;
+    UA_Boolean has_base_high_limit;
+    UA_Double base_low_limit;
+    UA_Boolean has_base_low_limit;
+    UA_Double base_low_low_limit;
+    UA_Boolean has_base_low_low_limit;
+
+    UA_Double severity_high_high;
+    UA_Boolean has_severity_high_high;
+    UA_Double severity_high;
+    UA_Boolean has_severity_high;
+    UA_Double severity_low;
+    UA_Boolean has_severity_low;
+    UA_Double severity_low_low;
+    UA_Boolean has_severity_low_low;
+
+    UA_Double high_high_deadband;
+    UA_Double high_deadband;
+    UA_Double low_deadband;
+    UA_Double low_low_deadband;
+} limit_alarm_properties_t;
+
+typedef struct deviation_alarm_properties_t
+{
+    limit_alarm_properties_t base;
+    UA_Double setpoint;
+} deviation_alarm_properties_t;
+
+
+typedef struct UA_EventConfigMetaData
+{
+    UA_NodeId type_id;
+    UA_StatusCode (*setFields)(UA_Server *server, const UA_NodeId *condition_type, const void *configuration);
+    UA_StatusCode (*setTwoStateVariableCallbacks)(UA_Server *server, const UA_NodeId *condition_type, const void *configuration);
+    UA_StatusCode (*setVariableCallbacks)(UA_Server *server, const UA_NodeId *condition_type, const void *configuration);
+} UA_EventConfigMetaData;
+
+
+
+
+
+
 typedef enum {
     UA_INACTIVE = 0,
     UA_ACTIVE,
@@ -2154,6 +2235,9 @@ setStandardConditionFields(UA_Server *server, const UA_NodeId* condition,
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Severity Field failed",);
 
     /* Check subTypes of ConditionType to set further Fields*/
+
+
+    ---------------------------
 
     /* 1. Check if ConditionType is subType of AcknowledgeableConditionType */
     UA_NodeId acknowledgeableConditionTypeId =
