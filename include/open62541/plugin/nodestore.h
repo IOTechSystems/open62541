@@ -685,8 +685,10 @@ typedef struct {
 
     /* Members specific to open62541 */
     UA_NodeTypeLifecycle lifecycle;
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     /* For internal use only */
-    const UA_ConditionTypeMetaData *_condition_construction_metadata;
+    const UA_ConditionTypeMetaData *_conditionConstructionMetadata;
+#endif
 } UA_ObjectTypeNode;
 
 /**
