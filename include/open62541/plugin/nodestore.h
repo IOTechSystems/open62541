@@ -27,8 +27,8 @@ struct UA_MonitoredItem;
 typedef struct UA_MonitoredItem UA_MonitoredItem;
 
 # ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
-struct UA_ConditionTypeMetaData;
-typedef struct UA_ConditionTypeMetaData UA_ConditionTypeMetaData;
+typedef UA_StatusCode
+(*UA_ConditionTypeSetupNodesFn)(UA_Server *server, const UA_NodeId *condition, const void *properties);
 #endif
 
 #endif
@@ -687,7 +687,7 @@ typedef struct {
     UA_NodeTypeLifecycle lifecycle;
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     /* For internal use only */
-    const UA_ConditionTypeMetaData *_conditionConstructionMetadata;
+    UA_ConditionTypeSetupNodesFn _conditionNodeSetupFn;
 #endif
 } UA_ObjectTypeNode;
 
