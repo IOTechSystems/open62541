@@ -14,10 +14,6 @@
 typedef enum {
     UA_INACTIVE = 0,
     UA_ACTIVE,
-    UA_ACTIVE_HIGHHIGH,
-    UA_ACTIVE_HIGH,
-    UA_ACTIVE_LOW,
-    UA_ACTIVE_LOWLOW
 } UA_ActiveState;
 
 /* In Alarms and Conditions first implementation, conditionBranchId is always
@@ -39,6 +35,8 @@ typedef struct UA_Condition {
     UA_NodeId conditionId;
     UA_UInt16 lastSeverity;
     UA_DateTime lastSeveritySourceTimeStamp;
+    UA_ActiveState lastActiveState;
+    UA_ActiveState currentActiveState;
 
     /* These callbacks are defined by the user and must not be called with a
      * locked server mutex */
@@ -51,9 +49,6 @@ typedef struct UA_Condition {
         UA_TwoStateVariableChangeCallback activeStateCallback;
     } callbacks;
 
-    UA_ActiveState lastActiveState;
-    UA_ActiveState currentActiveState;
-    UA_Boolean isLimitAlarm;
 } UA_Condition;
 
 /* A ConditionSource can have multiple Conditions. */
@@ -180,6 +175,9 @@ static const UA_QualifiedName fieldOffDelayQN = STATIC_QN(CONDITION_FIELD_OFFDEL
 static const UA_QualifiedName fieldReAlarmTimeQN = STATIC_QN(CONDITION_FIELD_REALARMTIME);
 static const UA_QualifiedName fieldReAlarmRepeatCountQN = STATIC_QN(CONDITION_FIELD_REALARMREPEATCOUNT);
 static const UA_QualifiedName fieldTimeQN = STATIC_QN(CONDITION_FIELD_TIME);
+static const UA_QualifiedName fieldCommentQN = STATIC_QN(CONDITION_FIELD_COMMENT);
+static const UA_QualifiedName fieldEventIdQN = STATIC_QN(CONDITION_FIELD_EVENTID);
+static const UA_QualifiedName fieldBranchIdQN = STATIC_QN(CONDITION_FIELD_BRANCHID);
 static const UA_QualifiedName fieldSourceQN = STATIC_QN(CONDITION_FIELD_SOURCENODE);
 static const UA_QualifiedName fieldLimitStateQN = STATIC_QN(CONDITION_FIELD_LIMITSTATE);
 static const UA_QualifiedName fieldLowLimitQN = STATIC_QN(CONDITION_FIELD_LOWLIMIT);
@@ -196,22 +194,41 @@ static const UA_QualifiedName fieldExpirationLimitQN = STATIC_QN(CONDITION_FIELD
 #define CONDITION_ASSERT_RETURN_RETVAL(retval, logMessage, deleteFunction)                \
     {                                                                                     \
         if(retval != UA_STATUSCODE_GOOD) {                                                \
-            UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,                  \
+            UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,                 \
                          logMessage". StatusCode %s", UA_StatusCode_name(retval));        \
             deleteFunction                                                                \
             return retval;                                                                \
         }                                                                                 \
     }
 
+#define CONDITION_ASSERT_GOTOLABEL(retval, logMessage, label)                \
+    {                                                                                     \
+        if(retval != UA_STATUSCODE_GOOD) {                                                \
+            UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,                 \
+                         logMessage". StatusCode %s", UA_StatusCode_name(retval));        \
+            goto label;                                                                    \
+        }                                                                                 \
+    }
+
 #define CONDITION_ASSERT_RETURN_VOID(retval, logMessage, deleteFunction)                  \
     {                                                                                     \
         if(retval != UA_STATUSCODE_GOOD) {                                                \
-            UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,                  \
+            UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,                 \
                          logMessage". StatusCode %s", UA_StatusCode_name(retval));        \
             deleteFunction                                                                \
             return;                                                                       \
         }                                                                                 \
     }
+
+/* Get the node id of the condition state */
+static UA_StatusCode
+UA_Server_getConditionBranchNodeId(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    const UA_ByteString *eventId,
+    UA_NodeId *outConditionBranchNodeId
+);
+
 
 static UA_StatusCode
 setupConditionNodes (UA_Server *server, const UA_NodeId *condition,
@@ -238,11 +255,18 @@ addConditionOptionalField(UA_Server *server, const UA_NodeId condition,
                           UA_NodeId *outOptionalNode);
 
 static UA_StatusCode
+getConditionFieldNodeId(UA_Server *server, const UA_NodeId *conditionNodeId,
+                        const UA_QualifiedName* fieldName, UA_NodeId *outFieldNodeId);
+
+static UA_StatusCode
 getConditionFieldPropertyNodeId(UA_Server *server, const UA_NodeId *originCondition,
                                 const UA_QualifiedName* variableFieldName,
                                 const UA_QualifiedName* variablePropertyName,
                                 UA_NodeId *outFieldPropertyNodeId);
 
+static UA_StatusCode
+getNodeIdValueOfConditionField(UA_Server *server, const UA_NodeId *condition,
+                               UA_QualifiedName fieldName, UA_NodeId *outNodeId);
 
 
 static UA_ConditionSource *
@@ -257,8 +281,8 @@ getConditionSource(UA_Server *server, const UA_NodeId *sourceId) {
 }
 
 static UA_Condition *
-getCondition(UA_Server *server, const UA_NodeId *sourceId,
-             const UA_NodeId *conditionId) {
+getCondition(UA_Server *server, const UA_NodeId *sourceId, const UA_NodeId *conditionId)
+{
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_ConditionSource *cs = getConditionSource(server, sourceId);
     if(!cs)
@@ -270,6 +294,264 @@ getCondition(UA_Server *server, const UA_NodeId *sourceId,
             return c;
     }
     return NULL;
+}
+
+static UA_NodeId getTypeDefinitionId(UA_Server *server, const UA_NodeId *targetId)
+{
+    UA_BrowseDescription bd;
+    UA_BrowseDescription_init(&bd);
+    bd.browseDirection = UA_BROWSEDIRECTION_FORWARD;
+    bd.includeSubtypes = false;
+    bd.referenceTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_HASTYPEDEFINITION);
+    bd.nodeId = *targetId;
+    bd.resultMask = UA_BROWSERESULTMASK_TYPEDEFINITION;
+    UA_UInt32 maxRefs = 1;
+    UA_BrowseResult br;
+    UA_BrowseResult_init (&br);
+    Operation_Browse(server, &server->adminSession, &maxRefs, &bd, &br);
+    if (br.statusCode != UA_STATUSCODE_GOOD || br.referencesSize != 1)
+    {
+        return UA_NODEID_NULL;
+    }
+    UA_NodeId id = br.references->nodeId.nodeId;
+    br.references->nodeId.nodeId = UA_NODEID_NULL;
+    UA_BrowseResult_clear(&br);
+    return id;
+}
+
+static UA_Boolean
+isBranchIdMainCondition (UA_Server *server, const UA_NodeId *conditionBranchId)
+{
+    UA_NodeId branchIdFieldValue;
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_StatusCode retval = getNodeIdValueOfConditionField(server, conditionBranchId, fieldBranchIdQN, &branchIdFieldValue);
+    if (retval != UA_STATUSCODE_GOOD) return false;
+    UA_Boolean isMainCondition = UA_NodeId_isNull(&branchIdFieldValue);
+    UA_NodeId_clear(&branchIdFieldValue);
+    return isMainCondition;
+
+}
+
+static UA_Boolean
+isTwoStateVariableInTrueState(UA_Server *server, const UA_NodeId *condition,
+                              const UA_QualifiedName *twoStateVariable) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
+    /* Get TwoStateVariableId NodeId */
+    UA_NodeId twoStateVariableIdNodeId;
+    UA_StatusCode retval = getConditionFieldPropertyNodeId(server, condition, twoStateVariable,
+                                                           &twoStateVariableIdQN,
+                                                           &twoStateVariableIdNodeId);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
+                       "TwoStateVariable/Id not found. StatusCode %s", UA_StatusCode_name(retval));
+        return false; //TODO maybe a better error handling?
+    }
+
+    /* Read Id value */
+    UA_Variant tOutVariant;
+    retval = readWithReadValue(server, &twoStateVariableIdNodeId, UA_ATTRIBUTEID_VALUE, &tOutVariant);
+    if(retval != UA_STATUSCODE_GOOD ||
+       !UA_Variant_hasScalarType(&tOutVariant, &UA_TYPES[UA_TYPES_BOOLEAN])) {
+        UA_NodeId_clear(&twoStateVariableIdNodeId);
+        return false;
+    }
+
+    UA_NodeId_clear(&twoStateVariableIdNodeId);
+
+    if(*(UA_Boolean *)tOutVariant.data == true) {
+        UA_Variant_clear(&tOutVariant);
+        return true;
+    }
+
+    UA_Variant_clear(&tOutVariant);
+    return false;
+}
+
+static UA_Boolean
+UA_Server_isTwoStateVariableInTrueState(UA_Server *server, const UA_NodeId *condition,
+                                        const UA_QualifiedName *twoStateVariable) {
+    UA_LOCK(&server->serviceMutex);
+    UA_Boolean res = isTwoStateVariableInTrueState(server, condition, twoStateVariable);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+static inline UA_Boolean
+conditionConfirmed (UA_Server *server, const UA_NodeId *conditionId)
+{
+    return isTwoStateVariableInTrueState (server, conditionId, &fieldConfirmedStateQN);
+}
+
+static inline UA_Boolean
+conditionAcked (UA_Server *server, const UA_NodeId *conditionId)
+{
+    return isTwoStateVariableInTrueState (server, conditionId, &fieldAckedStateQN);
+}
+
+static inline UA_Boolean
+conditionEnabled (UA_Server *server, const UA_NodeId *conditionId)
+{
+    return isTwoStateVariableInTrueState (server, conditionId, &fieldEnabledStateQN);
+}
+
+static UA_Boolean
+UA_Server_conditionEnabled (UA_Server *server, const UA_NodeId *conditionId)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_Boolean enabled = isTwoStateVariableInTrueState (server, conditionId, &fieldEnabledStateQN);
+    UA_UNLOCK(&server->serviceMutex);
+    return enabled;
+}
+
+
+static inline UA_Boolean
+isBranch (UA_Server *server, const UA_NodeId *condition)
+{
+    return !isBranchIdMainCondition(server, condition);
+}
+
+static UA_Boolean
+fieldExists (UA_Server *server, const UA_NodeId *condition, const UA_QualifiedName *field)
+{
+    UA_NodeId tmp;
+    UA_NodeId_init (&tmp);
+    UA_StatusCode status = getConditionFieldNodeId(server, condition, field, &tmp);
+    UA_Boolean exists = status == UA_STATUSCODE_GOOD && !UA_NodeId_isNull(&tmp);
+    UA_NodeId_clear (&tmp);
+    return exists;
+}
+
+static inline UA_Boolean
+isConfirmable (UA_Server *server, const UA_NodeId *condition)
+{
+   return fieldExists (server, condition, &fieldConfirmedStateQN);
+}
+
+static inline UA_StatusCode
+setRetain (UA_Server *server, const UA_NodeId *condition, UA_Boolean retain)
+{
+    UA_Variant value;
+    UA_Variant_setScalar(&value, &retain, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    UA_StatusCode retval = setConditionField (server, *condition, &value, fieldRetainQN);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "set Condition Retain failed",);
+    return retval;
+}
+
+static UA_StatusCode
+setTwoStateVariable (UA_Server *server, const UA_NodeId *condition,
+                          UA_Boolean idValue, const char *state)
+{
+    /* Update Enabled State */
+    UA_Variant value;
+    UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    retval = setConditionVariableFieldProperty(server, *condition, &value,
+                                               fieldEnabledStateQN, twoStateVariableIdQN);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting State Id failed",);
+
+    UA_LocalizedText stateText = UA_LOCALIZEDTEXT(LOCALE, (char *) (uintptr_t) state);
+    UA_Variant_setScalar(&value, &stateText, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
+    retval = setConditionField (server, *condition, &value, fieldEnabledStateQN);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "set State text failed",);
+    return retval;
+}
+
+static inline UA_StatusCode
+setComment (UA_Server *server, const UA_NodeId *condition, const UA_LocalizedText *comment)
+{
+    if (UA_String_equal(&comment->text, &UA_STRING_NULL)
+        && UA_String_equal(&comment->locale, &UA_STRING_NULL)) return UA_STATUSCODE_GOOD;
+    UA_Variant value;
+    UA_Variant_setScalar(&value, (void *) (uintptr_t) comment, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    retval = setConditionField (server, *condition, &value, fieldCommentQN);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting Condition Comment failed",);
+    return retval;
+}
+
+static inline UA_StatusCode
+UA_Server_setComment (UA_Server *server, const UA_NodeId *condition, const UA_LocalizedText *comment)
+{
+    UA_LOCK (&server->serviceMutex);
+    UA_StatusCode ret = setComment(server, condition, comment);
+    UA_UNLOCK (&server->serviceMutex);
+    return ret;
+}
+
+static inline UA_StatusCode
+setMessage (UA_Server *server, const UA_NodeId *condition, const UA_LocalizedText *message)
+{
+    UA_Variant value;
+    UA_Variant_setScalar(&value, (void*)(uintptr_t) message, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    retval = setConditionField (server, *condition, &value, fieldMessageQN);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting Condition Message failed",);
+    return retval;
+}
+
+static inline UA_StatusCode
+UA_Server_setMessage (UA_Server *server, const UA_NodeId *condition, const UA_LocalizedText *message)
+{
+    UA_LOCK (&server->serviceMutex);
+    UA_StatusCode ret = setComment(server, condition, message);
+    UA_UNLOCK (&server->serviceMutex);
+    return ret;
+}
+
+static inline UA_StatusCode
+setEnabledState (UA_Server *server, const UA_NodeId *condition, UA_Boolean enabled)
+{
+    return setTwoStateVariable (
+        server, condition, enabled, enabled ? ENABLED_TEXT : DISABLED_TEXT
+    );
+}
+
+static inline UA_StatusCode
+setAckedState (UA_Server *server, const UA_NodeId *condition, UA_Boolean acked)
+{
+    return setTwoStateVariable (
+        server, condition, acked, acked ? ACKED_TEXT : UNACKED_TEXT
+    );
+}
+
+
+static inline UA_StatusCode
+setConfirmedState (UA_Server *server, const UA_NodeId *condition, UA_Boolean confirmed)
+{
+    return setTwoStateVariable (
+        server, condition, confirmed, confirmed? CONFIRMED_TEXT : UNCONFIRMED_TEXT
+    );
+}
+
+static UA_Condition *
+getConditionFromConditionBranchId (UA_Server *server, const UA_NodeId *sourceId, const UA_NodeId *conditionBranchId)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    if (isBranchIdMainCondition(server, conditionBranchId))
+    {
+        return getCondition(server, sourceId, conditionBranchId);
+    }
+
+    /* search through all branches */
+    UA_ConditionSource *source = getConditionSource(server, sourceId);
+    if (!source) return NULL;
+
+    UA_Condition *cond = NULL;
+    UA_Condition *foundCond = NULL;
+    UA_ConditionBranch *branch = NULL;
+    LIST_FOREACH (cond, &source->conditions, listEntry)
+    {
+        LIST_FOREACH (branch, &cond->conditionBranches, listEntry)
+        {
+            if (UA_NodeId_equal (conditionBranchId, &branch->conditionBranchId))
+            {
+                foundCond = cond;
+                break;
+            }
+        }
+    }
+    return foundCond;
 }
 
 /* Function used to set a user specific callback to TwoStateVariable Fields of a
@@ -491,31 +773,55 @@ getConditionFieldPropertyNodeId(UA_Server *server, const UA_NodeId *originCondit
     return UA_STATUSCODE_GOOD;
 }
 
-/* Gets NodeId value of a Field which has NodeId as DataType (e.g. EventType) */
+static UA_StatusCode
+getValueOfConditionField (UA_Server *server, const UA_NodeId *condition,
+                         UA_QualifiedName fieldName, UA_Variant *outValue)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_Variant_init (outValue);
+    UA_NodeId fieldId;
+    UA_StatusCode retval = getConditionFieldNodeId(server, condition, &fieldName, &fieldId);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Field not found",);
+    retval = readWithReadValue(server, &fieldId, UA_ATTRIBUTEID_VALUE, outValue);
+    UA_NodeId_clear(&fieldId);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Field not found",);
+    return retval;
+}
+
 static UA_StatusCode
 getNodeIdValueOfConditionField(UA_Server *server, const UA_NodeId *condition,
                                UA_QualifiedName fieldName, UA_NodeId *outNodeId) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    *outNodeId = UA_NODEID_NULL;
-    UA_NodeId nodeIdValue;
-    UA_StatusCode retval = getConditionFieldNodeId(server, condition, &fieldName, &nodeIdValue);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Field not found",);
-
     /* Read the Value of SourceNode Property Node (the Value is a NodeId) */
-    UA_Variant tOutVariant;
-    retval = readWithReadValue(server, &nodeIdValue, UA_ATTRIBUTEID_VALUE, &tOutVariant);
-    if(retval != UA_STATUSCODE_GOOD ||
-       !UA_Variant_hasScalarType(&tOutVariant, &UA_TYPES[UA_TYPES_NODEID])) {
-        UA_NodeId_clear(&nodeIdValue);
-        UA_Variant_clear(&tOutVariant);
-        return retval;
+    UA_Variant value;
+    UA_StatusCode retval = getValueOfConditionField (server, condition, fieldName, &value);
+    if(retval != UA_STATUSCODE_GOOD) return retval;
+    if (!UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_NODEID]))
+    {
+        UA_Variant_clear(&value);
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     }
+    *outNodeId = *(UA_NodeId*)value.data;
+    UA_NodeId_init((UA_NodeId*)value.data);
+    UA_Variant_clear(&value);
+    return UA_STATUSCODE_GOOD;
+}
 
-    *outNodeId = *(UA_NodeId*)tOutVariant.data;
-    UA_NodeId_init((UA_NodeId*)tOutVariant.data);
-    UA_NodeId_clear(&nodeIdValue);
-    UA_Variant_clear(&tOutVariant);
+static UA_StatusCode
+getByteStringValueOfConditionField(UA_Server *server, const UA_NodeId *condition,
+                                UA_QualifiedName fieldName, UA_ByteString*outValue) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    /* Read the Value of SourceNode Property Node (the Value is a NodeId) */
+    UA_Variant value;
+    UA_StatusCode retval = getValueOfConditionField(server, condition, fieldName, &value);
+    if(retval != UA_STATUSCODE_GOOD) return retval;
+    if(!UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_BYTESTRING])) {
+        UA_Variant_clear(&value);
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+    }
+    *outValue = *(UA_ByteString*)value.data;
+    UA_ByteString_init((UA_ByteString*)value.data);
+    UA_Variant_clear(&value);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -528,40 +834,95 @@ UA_Server_getNodeIdValueOfConditionField(UA_Server *server, const UA_NodeId *con
     return res;
 }
 
+static UA_StatusCode
+getBooleanValueOfConditionField(UA_Server *server, const UA_NodeId *condition,
+                               UA_QualifiedName fieldName, UA_Boolean*outValue) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    /* Read the Value of SourceNode Property Node (the Value is a NodeId) */
+    UA_Variant value;
+    UA_StatusCode retval = getValueOfConditionField(server, condition, fieldName, &value);
+    if(retval != UA_STATUSCODE_GOOD) return retval;
+    if(!UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_BOOLEAN])) {
+        UA_Variant_clear(&value);
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+    }
+    *outValue = *(UA_Boolean*)value.data;
+    UA_Boolean_init((UA_Boolean*)value.data);
+    UA_Variant_clear(&value);
+    return UA_STATUSCODE_GOOD;
+}
+
+
+
+static UA_Boolean
+isRetained(UA_Server *server, const UA_NodeId *condition) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_Boolean value = false;
+    UA_StatusCode retval = getBooleanValueOfConditionField(server, condition, fieldRetainQN, &value);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
+                       "Retain not found. StatusCode %s", UA_StatusCode_name(retval));
+        return false; //TODO maybe a better error handling?
+    }
+    return value;
+}
+
+static UA_Boolean
+UA_Server_isRetained(UA_Server *server, const UA_NodeId *condition) {
+    UA_LOCK(&server->serviceMutex);
+    UA_Boolean res = isRetained(server, condition);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
 /* Gets the NodeId of a condition branch. In case of main branch (BranchId ==
  * UA_NODEID_NULL), ConditionId will be returned. */
 static UA_StatusCode
-UA_Server_getConditionBranchNodeId(UA_Server *server, const UA_ByteString *eventId,
-                         UA_NodeId *outConditionBranchNodeId) {
+UA_Server_getConditionBranchNodeId(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    const UA_ByteString *eventId,
+    UA_NodeId *outConditionBranchNodeId
+) {
     UA_LOCK(&server->serviceMutex);
 
     *outConditionBranchNodeId = UA_NODEID_NULL;
-    /* The function checks the BranchId based on the event Id, if BranchId ==
-       NULL -> outConditionId = ConditionId */
-    /* Get ConditionSource Entry */
+
     UA_StatusCode res = UA_STATUSCODE_BADEVENTIDUNKNOWN;
     UA_ConditionSource *source;
+    UA_Condition *cond = NULL;
+    UA_Condition *foundCond = NULL;
+
+    /* Find condition */
     LIST_FOREACH(source, &server->conditionSources, listEntry) {
-        /* Get Condition Entry */
-        UA_Condition *cond;
         LIST_FOREACH(cond, &source->conditions, listEntry) {
-            /* Get Branch Entry*/
-            UA_ConditionBranch *branch;
-            LIST_FOREACH(branch, &cond->conditionBranches, listEntry) {
-                if(!UA_ByteString_equal(&branch->lastEventId, eventId))
-                    continue;
-                if(UA_NodeId_isNull(&branch->conditionBranchId)) {
-                    res = UA_NodeId_copy(&cond->conditionId, outConditionBranchNodeId);
-                    UA_UNLOCK(&server->serviceMutex);
-                    return res;
-                } else {
-                    res = UA_NodeId_copy(&branch->conditionBranchId, outConditionBranchNodeId);
-                    UA_UNLOCK(&server->serviceMutex);
-                    return res;
-                }
-                goto out;
+            if (UA_NodeId_equal (conditionId, &cond->conditionId))
+            {
+                foundCond = cond;
+                break;
             }
         }
+    }
+    if (!foundCond)
+    {
+        res = UA_STATUSCODE_BADNODEIDINVALID;
+        goto out;
+    }
+    /* find ConditionBranch */
+    UA_ConditionBranch *branch = NULL;
+    LIST_FOREACH (branch, &foundCond->conditionBranches, listEntry)
+    {
+        if(!UA_ByteString_equal(&branch->lastEventId, eventId)) continue;
+        if(UA_NodeId_isNull(&branch->conditionBranchId)) {
+            res = UA_NodeId_copy(&foundCond->conditionId, outConditionBranchNodeId);
+            UA_UNLOCK(&server->serviceMutex);
+            return res;
+        } else {
+            res = UA_NodeId_copy(&branch->conditionBranchId, outConditionBranchNodeId);
+            UA_UNLOCK(&server->serviceMutex);
+            return res;
+        }
+        goto out;
     }
 
  out:
@@ -569,87 +930,14 @@ UA_Server_getConditionBranchNodeId(UA_Server *server, const UA_ByteString *event
     return res;
 }
 
-static UA_StatusCode
-UA_Server_getConditionLastSeverity(UA_Server *server, const UA_NodeId *conditionSource,
-                         const UA_NodeId *conditionId, UA_UInt16 *outLastSeverity,
-                         UA_DateTime *outLastSeveritySourceTimeStamp) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Condition *cond = getCondition(server, conditionSource, conditionId);
-    if(!cond) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Entry not found in list!");
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNOTFOUND;
-    }
-    *outLastSeverity = cond->lastSeverity;
-    *outLastSeveritySourceTimeStamp = cond->lastSeveritySourceTimeStamp;
-    UA_UNLOCK(&server->serviceMutex);
-    return UA_STATUSCODE_GOOD;
-}
 
 static UA_StatusCode
-UA_Server_updateConditionLastSeverity(UA_Server *server, const UA_NodeId *conditionSource,
-                                      const UA_NodeId *conditionId, UA_UInt16 lastSeverity,
-                                      UA_DateTime lastSeveritySourceTimeStamp) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Condition *cond = getCondition(server, conditionSource, conditionId);
-    if(!cond) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Entry not found in list!");
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNOTFOUND;
-    }
-    cond->lastSeverity = lastSeverity;
-    cond->lastSeveritySourceTimeStamp =  lastSeveritySourceTimeStamp;
-    UA_UNLOCK(&server->serviceMutex);
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-UA_Server_getConditionActiveState(UA_Server *server, const UA_NodeId *conditionSource,
-                                  const UA_NodeId *conditionId, UA_ActiveState *outLastActiveState,
-                                  UA_ActiveState *outCurrentActiveState, UA_Boolean *outIsLimitAlarm) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Condition *cond = getCondition(server, conditionSource, conditionId);
-    if(!cond) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Entry not found in list!");
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNOTFOUND;
-    }
-    *outLastActiveState = cond->lastActiveState;
-    *outCurrentActiveState = cond->currentActiveState;
-    *outIsLimitAlarm = cond->isLimitAlarm;
-    UA_UNLOCK(&server->serviceMutex);
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-UA_Server_updateConditionActiveState(UA_Server *server, const UA_NodeId *conditionSource,
-                                     const UA_NodeId *conditionId, const UA_ActiveState lastActiveState,
-                                     const UA_ActiveState currentActiveState, UA_Boolean isLimitAlarm) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Condition *cond = getCondition(server, conditionSource, conditionId);
-    if(!cond) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Entry not found in list!");
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNOTFOUND;
-    }
-    cond->lastActiveState = lastActiveState;
-    cond->currentActiveState = currentActiveState;
-    cond->isLimitAlarm = isLimitAlarm;
-    UA_UNLOCK(&server->serviceMutex);
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-updateConditionLastEventId(UA_Server *server, const UA_NodeId *triggeredEvent,
+updateConditionLastEventId(UA_Server *server, const UA_NodeId *conditionId,
                            const UA_NodeId *conditionSource,
                            const UA_ByteString *lastEventId) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
-    UA_Condition *cond = getCondition(server, conditionSource, triggeredEvent);
+    UA_Condition *cond = getCondition(server, conditionSource, conditionId);
     if(!cond) {
         UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
                      "Entry not found in list!");
@@ -664,8 +952,6 @@ updateConditionLastEventId(UA_Server *server, const UA_NodeId *triggeredEvent,
             return UA_ByteString_copy(lastEventId, &branch->lastEventId);
         }
     }
-    UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                 "Condition Branch not implemented");
     return UA_STATUSCODE_BADNOTFOUND;
 }
 
@@ -716,844 +1002,7 @@ isConditionOrBranch(UA_Server *server, const UA_NodeId *condition,
     return false;
 }
 
-static UA_Boolean
-isRetained(UA_Server *server, const UA_NodeId *condition) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
-    /* Get EnabledStateId NodeId */
-    UA_NodeId retainNodeId;
-    UA_StatusCode retval = getConditionFieldNodeId(server, condition, &fieldRetainQN, &retainNodeId);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "Retain not found. StatusCode %s", UA_StatusCode_name(retval));
-        return false; //TODO maybe a better error handling?
-    }
-
-    /* Read Retain value */
-    UA_Variant tOutVariant;
-    retval = readWithReadValue(server, &retainNodeId, UA_ATTRIBUTEID_VALUE, &tOutVariant);
-    if(retval != UA_STATUSCODE_GOOD ||
-       !UA_Variant_hasScalarType(&tOutVariant, &UA_TYPES[UA_TYPES_BOOLEAN])) {
-          UA_NodeId_clear(&retainNodeId);
-          return false;
-    }
-
-    if(*(UA_Boolean *)tOutVariant.data == true) {
-        UA_NodeId_clear(&retainNodeId);
-        UA_Variant_clear(&tOutVariant);
-        return true;
-    }
-
-    UA_NodeId_clear(&retainNodeId);
-    UA_Variant_clear(&tOutVariant);
-    return false;
-}
-
-static UA_Boolean
-UA_Server_isRetained(UA_Server *server, const UA_NodeId *condition) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Boolean res = isRetained(server, condition);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-static UA_Boolean
-isTwoStateVariableInTrueState(UA_Server *server, const UA_NodeId *condition,
-                              const UA_QualifiedName *twoStateVariable) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    /* Get TwoStateVariableId NodeId */
-    UA_NodeId twoStateVariableIdNodeId;
-    UA_StatusCode retval = getConditionFieldPropertyNodeId(server, condition, twoStateVariable,
-                                                           &twoStateVariableIdQN,
-                                                           &twoStateVariableIdNodeId);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "TwoStateVariable/Id not found. StatusCode %s", UA_StatusCode_name(retval));
-        return false; //TODO maybe a better error handling?
-    }
-
-    /* Read Id value */
-    UA_Variant tOutVariant;
-    retval = readWithReadValue(server, &twoStateVariableIdNodeId, UA_ATTRIBUTEID_VALUE, &tOutVariant);
-    if(retval != UA_STATUSCODE_GOOD ||
-       !UA_Variant_hasScalarType(&tOutVariant, &UA_TYPES[UA_TYPES_BOOLEAN])) {
-        UA_NodeId_clear(&twoStateVariableIdNodeId);
-        return false;
-    }
-
-    UA_NodeId_clear(&twoStateVariableIdNodeId);
-
-    if(*(UA_Boolean *)tOutVariant.data == true) {
-      UA_Variant_clear(&tOutVariant);
-      return true;
-    }
-
-    UA_Variant_clear(&tOutVariant);
-    return false;
-}
-
-static UA_Boolean
-UA_Server_isTwoStateVariableInTrueState(UA_Server *server, const UA_NodeId *condition,
-                                        const UA_QualifiedName *twoStateVariable) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Boolean res = isTwoStateVariableInTrueState(server, condition, twoStateVariable);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-static UA_StatusCode
-enteringDisabledState(UA_Server *server, const UA_NodeId *conditionId,
-                      const UA_NodeId *conditionSource) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    UA_Condition *cond = getCondition(server, conditionSource, conditionId);
-    if(!cond) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Entry not found in list!");
-        return UA_STATUSCODE_BADNOTFOUND;
-    }
-
-    /* Get Branch Entry*/
-    UA_ConditionBranch *branch;
-    LIST_FOREACH(branch, &cond->conditionBranches, listEntry) {
-        UA_NodeId triggeredNode;
-        if(UA_NodeId_isNull(&branch->conditionBranchId))
-            //disable main Condition Branch (BranchId == NULL)
-            triggeredNode = cond->conditionId;
-        else //disable all branches
-            triggeredNode = branch->conditionBranchId;
-
-        UA_LocalizedText message = UA_LOCALIZEDTEXT(LOCALE, DISABLED_MESSAGE);
-        UA_LocalizedText enableText = UA_LOCALIZEDTEXT(LOCALE, DISABLED_TEXT);
-        UA_Variant value;
-        UA_Variant_setScalar(&value, &message, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        UA_StatusCode retval = setConditionField(server, triggeredNode, &value, fieldMessageQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition Message failed",);
-
-        UA_Variant_setScalar(&value, &enableText, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = setConditionField(server, triggeredNode, &value, fieldEnabledStateQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition EnabledState text failed",);
-
-        UA_Boolean retain = false;
-        UA_Variant_setScalar(&value, &retain, &UA_TYPES[UA_TYPES_BOOLEAN]);
-        retval = setConditionField(server, triggeredNode, &value, fieldRetainQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition Retain failed",);
-
-        /* Trigger event */
-        UA_ByteString lastEventId = UA_BYTESTRING_NULL;
-        /* Trigger the event for Condition or its Branch */
-        setIsCallerAC(server, &triggeredNode, conditionSource, true);
-        /* Condition Nodes should not be deleted after triggering the event */
-        retval = triggerEvent(server, triggeredNode, *conditionSource, &lastEventId, false);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Triggering condition event failed",);
-        setIsCallerAC(server, &triggeredNode, conditionSource, false);
-
-        /* Update list */
-        retval = updateConditionLastEventId(server, &triggeredNode, conditionSource, &lastEventId);
-        UA_ByteString_clear(&lastEventId);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "updating condition event failed",);
-    }
-
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-UA_Server_enteringDisabledState(UA_Server *server, const UA_NodeId *conditionId,
-                                const UA_NodeId *conditionSource) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = enteringDisabledState(server, conditionId, conditionSource);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-static UA_StatusCode
-enteringEnabledState(UA_Server *server,
-                     const UA_NodeId *conditionId,
-                     const UA_NodeId *conditionSource) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    /* Get Condition */
-    UA_Condition *cond = getCondition(server, conditionSource, conditionId);
-    if(!cond) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Entry not found in list!");
-        return UA_STATUSCODE_BADNOTFOUND;
-    }
-
-    /* Get Branch Entry*/
-    UA_ConditionBranch *branch;
-    LIST_FOREACH(branch, &cond->conditionBranches, listEntry) {
-        UA_NodeId triggeredNode;
-        UA_NodeId_init(&triggeredNode);
-        if(UA_NodeId_isNull(&branch->conditionBranchId)) //enable main Condition
-            triggeredNode = cond->conditionId;
-        else //enable branches
-            triggeredNode = branch->conditionBranchId;
-
-        UA_LocalizedText message = UA_LOCALIZEDTEXT(LOCALE, ENABLED_MESSAGE);
-        UA_LocalizedText enableText = UA_LOCALIZEDTEXT(LOCALE, ENABLED_TEXT);
-        UA_Variant value;
-        UA_Variant_setScalar(&value, &message, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        UA_StatusCode retval = setConditionField(server, triggeredNode,
-                                                           &value, fieldMessageQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "set Condition Message failed",);
-
-        UA_Variant_setScalar(&value, &enableText, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = setConditionField(server, triggeredNode, &value, fieldEnabledStateQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "set Condition EnabledState text failed",);
-
-        /* User callback TODO how should branches be evaluated? see p.19 (5.5.2) */
-        UA_Boolean removeBranch = false;//not used
-        retval = callConditionTwoStateVariableCallback(server, &triggeredNode,
-                                                       conditionSource, &removeBranch,
-                                                       UA_ENTERING_ENABLEDSTATE);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "calling condition callback failed",);
-
-        /* Trigger event */
-        //Condition Nodes should not be deleted after triggering the event
-        retval = triggerConditionEvent(server, triggeredNode, *conditionSource, NULL);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "triggering condition event failed",);
-    }
-
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-UA_Server_enteringEnabledState(UA_Server *server, const UA_NodeId *conditionId,
-                               const UA_NodeId *conditionSource) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = enteringEnabledState(server, conditionId, conditionSource);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-
-static void
-afterWriteCallbackAckedStateChange(UA_Server *server,
-                                   const UA_NodeId *sessionId, void *sessionContext,
-                                   const UA_NodeId *nodeId, void *nodeContext,
-                                   const UA_NumericRange *range, const UA_DataValue *data) {
-    /* Get the AckedState NodeId then The Condition NodeId */
-    UA_NodeId twoStateVariableNode;
-    UA_StatusCode retval = UA_Server_getFieldParentNodeId(server, nodeId, &twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent TwoStateVariable found for given AckedState/Id",);
-
-    UA_NodeId conditionNode;
-    retval = UA_Server_getFieldParentNodeId(server, &twoStateVariableNode, &conditionNode);
-    UA_NodeId_clear(&twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent Condition found for given AckedState",);
-
-    /* Callback for change to true in AckedState/Id property.
-     * First check whether the value is true (ackedState/Id == true).
-     * That check makes it possible to set ackedState/Id to false, without triggering an event */
-    if(*((UA_Boolean *)data->value.data) == false) {
-        /* Set unacknowledging time */
-        retval = UA_Server_writeObjectProperty_scalar(server, conditionNode, fieldTimeQN,
-                                                      &data->sourceTimestamp,
-                                                      &UA_TYPES[UA_TYPES_DATETIME]);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set deactivating Time failed",
-                                     UA_NodeId_clear(&conditionNode););
-
-        /* Set AckedState text to Unacknowledged*/
-        UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, UNACKED_TEXT);
-        UA_Variant value;
-        UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = UA_Server_setConditionField(server, conditionNode, &value, fieldAckedStateQN);
-        UA_NodeId_clear(&conditionNode);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition AckedState failed",);
-        return;
-    }
-
-    /* Check if enabled and retained */
-    if(!UA_Server_isTwoStateVariableInTrueState(server, &conditionNode, &fieldEnabledStateQN) ||
-       !UA_Server_isRetained(server, &conditionNode)) {
-        /* Set AckedState/Id to false*/
-        UA_Boolean idValue = false;
-        UA_Variant value;
-        UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-        retval = UA_Server_setConditionVariableFieldProperty(server, conditionNode, &value,
-                                                   fieldAckedStateQN, twoStateVariableIdQN);
-        UA_NodeId_clear(&conditionNode);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set AckedState/Id failed",);
-        return;
-    }
-
-    /* Set Message */
-    UA_LocalizedText message = UA_LOCALIZEDTEXT(LOCALE, ACKED_MESSAGE);
-    UA_Variant value;
-    UA_Variant_setScalar(&value, &message, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, conditionNode, &value, fieldMessageQN);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition Message failed",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* Set AckedState text */
-    UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, ACKED_TEXT);
-    UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, conditionNode, &value, fieldAckedStateQN);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition AckedState failed",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* Get conditionSource */
-    UA_NodeId conditionSource;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &conditionNode, fieldSourceQN,
-                                                      &conditionSource);
-    CONDITION_ASSERT_RETURN_VOID(retval, "ConditionSource not found",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* User callback*/
-    UA_Boolean removeBranch = false;
-    retval = UA_Server_callConditionTwoStateVariableCallback(server, &conditionNode, &conditionSource,
-                                                             &removeBranch, UA_ENTERING_ACKEDSTATE);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Calling condition callback failed",
-                                 UA_NodeId_clear(&conditionNode);
-                                 UA_NodeId_clear(&conditionSource););
-
-    /* Trigger event */
-    //Condition Nodes should not be deleted after triggering the event
-    retval = UA_Server_triggerConditionEvent(server, conditionNode, conditionSource, NULL);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Triggering condition event failed",
-                                 UA_NodeId_clear(&conditionNode);
-                                 UA_NodeId_clear(&conditionSource););
-
-    UA_NodeId_clear(&conditionNode);
-    UA_NodeId_clear(&conditionSource);
-}
-
-static void
-afterWriteCallbackConfirmedStateChange(UA_Server *server,
-                                       const UA_NodeId *sessionId, void *sessionContext,
-                                       const UA_NodeId *nodeId, void *nodeContext,
-                                       const UA_NumericRange *range, const UA_DataValue *data) {
-    UA_Variant value;
-    UA_NodeId twoStateVariableNode;
-    UA_StatusCode retval = UA_Server_getFieldParentNodeId(server, nodeId, &twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent TwoStateVariable found for given ConfirmedState/Id",);
-
-    UA_NodeId conditionNode;
-    retval = UA_Server_getFieldParentNodeId(server, &twoStateVariableNode, &conditionNode);
-    UA_NodeId_clear(&twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent Condition found for given ConfirmedState",);
-
-    /* Callback to change to true in ConfirmedState/Id property.
-     * First check whether the value is true (ConfirmedState/Id == true).
-     * That check makes it possible to set ConfirmedState/Id to false, without triggering an event */
-    if(*((UA_Boolean *)data->value.data) == false) {
-        /* Set unconfirming time */
-        retval = UA_Server_writeObjectProperty_scalar(server, conditionNode, fieldTimeQN,
-                                                      &data->sourceTimestamp,
-                                                      &UA_TYPES[UA_TYPES_DATETIME]);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set deactivating Time failed",
-                                     UA_NodeId_clear(&conditionNode););
-
-        /* Set ConfirmedState text to (Unconfirmed)*/
-        UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, UNCONFIRMED_TEXT);
-        UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = UA_Server_setConditionField(server, conditionNode, &value, fieldConfirmedStateQN);
-        UA_NodeId_clear(&conditionNode);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition ConfirmedState failed",);
-        return;
-    }
-
-    /* Check if enabled and retained */
-    if(!UA_Server_isTwoStateVariableInTrueState(server, &conditionNode, &fieldEnabledStateQN) ||
-       !UA_Server_isRetained(server, &conditionNode)) {
-        /* Set confirmedState/Id to false*/
-        UA_Boolean idValue = false;
-        UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-        retval = UA_Server_setConditionVariableFieldProperty(server, conditionNode, &value,
-                                                   fieldConfirmedStateQN, twoStateVariableIdQN);
-        UA_NodeId_clear(&conditionNode);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set ConfirmedState/Id failed",);
-        return;
-    }
-
-    /* Set confirming time */
-    retval = UA_Server_writeObjectProperty_scalar(server, conditionNode, fieldTimeQN,
-                                                  &data->sourceTimestamp, &UA_TYPES[UA_TYPES_DATETIME]);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Confirming Time failed",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* Set Message */
-    UA_LocalizedText message = UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_MESSAGE);
-    UA_Variant_setScalar(&value, &message, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, conditionNode, &value, fieldMessageQN);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition Message failed",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* Set ConfirmedState text */
-    UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_TEXT);
-    UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, conditionNode, &value, fieldConfirmedStateQN);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition ConfirmedState failed",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* Get conditionSource */
-    UA_NodeId conditionSource;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &conditionNode,
-                                                      fieldSourceQN, &conditionSource);
-    CONDITION_ASSERT_RETURN_VOID(retval, "ConditionSource not found",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* User callback*/
-    UA_Boolean removeBranch = false;
-    retval = UA_Server_callConditionTwoStateVariableCallback(server, &conditionNode,
-                                                             &conditionSource, &removeBranch,
-                                                             UA_ENTERING_CONFIRMEDSTATE);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Calling condition callback failed",
-                                 UA_NodeId_clear(&conditionNode);
-                                 UA_NodeId_clear(&conditionSource););
-
-    /* Trigger event */
-    //Condition Nodes should not be deleted after triggering the event
-    retval = UA_Server_triggerConditionEvent(server, conditionNode, conditionSource, NULL);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Triggering condition event failed",
-                                 UA_NodeId_clear(&conditionNode);
-                                 UA_NodeId_clear(&conditionSource););
-}
-
-static void
-afterWriteCallbackActiveStateChange(UA_Server *server,
-                                    const UA_NodeId *sessionId, void *sessionContext,
-                                    const UA_NodeId *nodeId, void *nodeContext,
-                                    const UA_NumericRange *range, const UA_DataValue *data) {
-    UA_Variant value;
-    UA_NodeId twoStateVariableNode;
-    UA_StatusCode retval = UA_Server_getFieldParentNodeId(server, nodeId, &twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent TwoStateVariable found for given ActiveState/Id",);
-
-    UA_NodeId conditionNode;
-    retval = UA_Server_getFieldParentNodeId(server, &twoStateVariableNode, &conditionNode);
-    UA_NodeId_clear(&twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent Condition found for given ActiveState",);
-
-    /* Get conditionSource */
-    UA_NodeId conditionSource;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &conditionNode,
-                                                      fieldSourceQN, &conditionSource);
-    CONDITION_ASSERT_RETURN_VOID(retval, "ConditionSource not found",
-                                 UA_NodeId_clear(&conditionNode););
-
-    UA_ActiveState lastActiveState = UA_INACTIVE;
-    UA_ActiveState currentActiveState = UA_INACTIVE;
-    UA_Boolean isLimitalarm = false;
-
-    retval = UA_Server_getConditionActiveState(server, &conditionSource, &conditionNode,
-                                               &lastActiveState, &currentActiveState,
-                                               &isLimitalarm);
-    CONDITION_ASSERT_RETURN_VOID(retval, "ActiveState transition check failed",
-                                 UA_NodeId_clear(&conditionNode);
-                                 UA_NodeId_clear(&conditionSource););
-
-    if(isLimitalarm == false) {
-      if(*((UA_Boolean *)data->value.data) == true) {
-        retval = UA_Server_updateConditionActiveState(server, &conditionSource, &conditionNode,
-                                                      currentActiveState, UA_ACTIVE, false);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Updating ActiveState failed",
-                                     UA_NodeId_clear(&conditionNode);
-                                     UA_NodeId_clear(&conditionSource););
-      } else {
-        retval = UA_Server_updateConditionActiveState(server, &conditionSource, &conditionNode,
-                                                      currentActiveState, UA_INACTIVE, false);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Updating ActiveState failed",
-                                     UA_NodeId_clear(&conditionNode);
-                                     UA_NodeId_clear(&conditionSource););
-      }
-
-      retval = UA_Server_getConditionActiveState(server, &conditionSource, &conditionNode,
-                                                 &lastActiveState, &currentActiveState,
-                                                 &isLimitalarm);
-      CONDITION_ASSERT_RETURN_VOID(retval, "ActiveState transition check failed",
-                                   UA_NodeId_clear(&conditionNode);
-                                   UA_NodeId_clear(&conditionSource););
-    }
-
-    /* callback for change to true in ActiveState/Id property.
-     * first check whether the value is true (ActiveState/Id == true).
-     * That check makes it possible to set ActiveState/Id to false, without triggering an event */
-    if(*((UA_Boolean *)data->value.data) == true &&
-       (lastActiveState != currentActiveState)) {
-
-        /* Check if enabled and retained */
-        if(UA_Server_isTwoStateVariableInTrueState(server, &conditionNode, &fieldEnabledStateQN) &&
-           UA_Server_isRetained(server, &conditionNode)) {
-            /* Set activating time */
-            retval = UA_Server_writeObjectProperty_scalar(server, conditionNode, fieldTimeQN,
-                                                          &data->sourceTimestamp,
-                                                          &UA_TYPES[UA_TYPES_DATETIME]);
-            CONDITION_ASSERT_RETURN_VOID(retval, "Set activating Time failed",
-                                         UA_NodeId_clear(&conditionNode);
-                                         UA_NodeId_clear(&conditionSource););
-
-            /* Set ActiveState text */
-            UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_TEXT);
-            UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-            retval = UA_Server_setConditionField(server, conditionNode, &value, fieldActiveStateQN);
-            CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition ActiveState failed",
-                                         UA_NodeId_clear(&conditionNode);
-                                         UA_NodeId_clear(&conditionSource););
-
-            /* User callback*/
-            UA_Boolean removeBranch = false;//not used
-            retval = UA_Server_callConditionTwoStateVariableCallback(server, &conditionNode,
-                                                                     &conditionSource, &removeBranch,
-                                                                     UA_ENTERING_ACTIVESTATE);
-            CONDITION_ASSERT_RETURN_VOID(retval, "Calling condition callback failed",
-                                         UA_NodeId_clear(&conditionNode);
-                                         UA_NodeId_clear(&conditionSource););
-
-            /* Trigger event */
-            //Condition Nodes should not be deleted after triggering the event
-            retval = UA_Server_triggerConditionEvent(server, conditionNode, conditionSource, NULL);
-            UA_NodeId_clear(&conditionNode);
-            UA_NodeId_clear(&conditionSource);
-            CONDITION_ASSERT_RETURN_VOID(retval, "Triggering condition event failed",);
-        } else {
-            /* Set ActiveState/Id to false -> don't apply changes in case of
-             * disabled or not retained*/
-            UA_Boolean idValue = false;
-            UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-            retval = UA_Server_setConditionVariableFieldProperty(server, conditionNode, &value,
-                                                                 fieldActiveStateQN,
-                                                                 twoStateVariableIdQN);
-            UA_NodeId_clear(&conditionSource);
-            UA_NodeId_clear(&conditionNode);
-            CONDITION_ASSERT_RETURN_VOID(retval, "Set ActiveState/Id failed",);
-        }
-        return;
-    }
-
-    if((*((UA_Boolean *)data->value.data) == false) &&
-       (lastActiveState != currentActiveState)) {
-        /* Set ActiveState text to (Inactive) */
-        UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, INACTIVE_TEXT);
-        UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = UA_Server_setConditionField(server, conditionNode, &value, fieldActiveStateQN);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition ActiveState failed",
-                                     UA_NodeId_clear(&conditionNode);
-                                     UA_NodeId_clear(&conditionSource););
-
-        /* Set deactivating time */
-        retval = UA_Server_writeObjectProperty_scalar(server, conditionNode, fieldTimeQN,
-                                                      &data->sourceTimestamp,
-                                                      &UA_TYPES[UA_TYPES_DATETIME]);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set deactivating Time failed",
-                                     UA_NodeId_clear(&conditionNode);
-                                     UA_NodeId_clear(&conditionSource););
-
-        retval = UA_Server_updateConditionActiveState(server, &conditionSource, &conditionNode,
-                                                      currentActiveState, UA_INACTIVE, isLimitalarm);
-        UA_NodeId_clear(&conditionSource);
-        UA_NodeId_clear(&conditionNode);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Set ActiveState failed",);
-    }
-}
-
-static UA_StatusCode
-disableMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                      void *sessionContext, const UA_NodeId *methodId,
-                      void *methodContext, const UA_NodeId *objectId,
-                      void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize, UA_Variant *output) {
-    UA_NodeId conditionTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
-    if(UA_NodeId_equal(objectId, &conditionTypeNodeId)) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "Cannot call method of ConditionType Node. StatusCode %s",
-                       UA_StatusCode_name(UA_STATUSCODE_BADNODEIDINVALID));
-        return UA_STATUSCODE_BADNODEIDINVALID;
-    }
-
-    /* Check if enabled */
-    if(!UA_Server_isTwoStateVariableInTrueState(server, objectId, &fieldEnabledStateQN))
-        return UA_STATUSCODE_BADCONDITIONALREADYDISABLED;
-
-    /* Disable by writing false to EnabledState/Id--> will cause a callback to
-     * trigger the new events */
-    UA_Variant value;
-    UA_Boolean idValue = false;
-    UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    UA_StatusCode retval =
-        UA_Server_setConditionVariableFieldProperty(server, *objectId, &value,
-                                                    fieldEnabledStateQN, twoStateVariableIdQN);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Disable Condition failed",);
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-enableMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                     void *sessionContext, const UA_NodeId *methodId,
-                     void *methodContext, const UA_NodeId *objectId,
-                     void *objectContext, size_t inputSize,
-                     const UA_Variant *input, size_t outputSize,
-                     UA_Variant *output) {
-    UA_NodeId conditionTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
-    if(UA_NodeId_equal(objectId, &conditionTypeNodeId)) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "Cannot call method of ConditionType Node. StatusCode %s",
-                       UA_StatusCode_name(UA_STATUSCODE_BADNODEIDINVALID));
-        return UA_STATUSCODE_BADNODEIDINVALID;
-    }
-
-    /* Check if disabled */
-    if(UA_Server_isTwoStateVariableInTrueState(server, objectId, &fieldEnabledStateQN))
-        return UA_STATUSCODE_BADCONDITIONALREADYENABLED;
-
-    /* Enable by writing true to EnabledStateId--> will cause a callback to
-     * trigger the new events */
-    UA_Variant value;
-    UA_Boolean idValue = true;
-    UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    UA_StatusCode retval =
-        UA_Server_setConditionVariableFieldProperty(server, *objectId, &value,
-                                                    fieldEnabledStateQN, twoStateVariableIdQN);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Enable Condition failed",);
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-addCommentMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                         void *sessionContext, const UA_NodeId *methodId,
-                         void *methodContext, const UA_NodeId *objectId,
-                         void *objectContext, size_t inputSize,
-                         const UA_Variant *input, size_t outputSize,
-                         UA_Variant *output) {
-    UA_QualifiedName fieldComment = UA_QUALIFIEDNAME(0, CONDITION_FIELD_COMMENT);
-    UA_QualifiedName fieldSourceTimeStamp =
-        UA_QUALIFIEDNAME(0, CONDITION_FIELD_CONDITIONVARIABLE_SOURCETIMESTAMP);
-    UA_LocalizedText message;
-    UA_NodeId triggerEvent;
-    UA_Variant value;
-    UA_DateTime fieldSourceTimeStampValue = UA_DateTime_now();
-
-    UA_NodeId conditionTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
-    if(UA_NodeId_equal(objectId, &conditionTypeNodeId)) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "Cannot call method of ConditionType Node. StatusCode %s",
-                       UA_StatusCode_name(UA_STATUSCODE_BADNODEIDINVALID));
-        return UA_STATUSCODE_BADNODEIDINVALID;
-    }
-
-    /* Get condition branch to trigger the correct event.
-     * see error code Bad_NodeIdInvalid Table 16 p.22. It should be returned when the
-     * Method called is from the ConditionType and not its instance, however
-     * in current implementation, methods are only being referenced from their ObjectType Node.
-     * Because of that, the correct instance (Condition) will be found through
-     * its last EventId */
-    UA_StatusCode retval =
-        UA_Server_getConditionBranchNodeId(server, (UA_ByteString *)input[0].data,
-                                           &triggerEvent);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "ConditionId based on EventId not found",);
-
-    /* Check if enabled */
-    if(!UA_Server_isRetained(server, &triggerEvent))
-        return UA_STATUSCODE_BADCONDITIONDISABLED;
-
-    /* Set SourceTimestamp */
-    UA_Variant_setScalar(&value, &fieldSourceTimeStampValue, &UA_TYPES[UA_TYPES_DATETIME]);
-    retval = UA_Server_setConditionVariableFieldProperty(server, triggerEvent, &value,
-                                                         fieldComment, fieldSourceTimeStamp);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition EnabledState text failed",
-                                   UA_NodeId_clear(&triggerEvent););
-
-    /* Set adding comment time (the same value of SourceTimestamp) */
-    retval = UA_Server_writeObjectProperty_scalar(server, triggerEvent, fieldTimeQN,
-                                                  &fieldSourceTimeStampValue,
-                                                  &UA_TYPES[UA_TYPES_DATETIME]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Set enabling/disabling Time failed",
-                                   UA_NodeId_clear(&triggerEvent););
-
-    /* Set Message */
-    message = UA_LOCALIZEDTEXT(LOCALE, COMMENT_MESSAGE);
-    UA_Variant_setScalar(&value, &message, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, triggerEvent, &value, fieldMessageQN);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition Message failed",
-                                   UA_NodeId_clear(&triggerEvent););
-
-    /* Set Comment. Check whether comment is empty -> leave the last value as is*/
-    UA_LocalizedText *inputComment = (UA_LocalizedText *)input[1].data;
-    UA_String nullString = UA_STRING_NULL;
-    if(!UA_ByteString_equal(&inputComment->locale, &nullString) &&
-       !UA_ByteString_equal(&inputComment->text, &nullString)) {
-        UA_Variant_setScalar(&value, inputComment, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = UA_Server_setConditionField(server, triggerEvent, &value, fieldComment);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition Comment failed",
-                                       UA_NodeId_clear(&triggerEvent););
-    }
-
-    /* Get conditionSource */
-    UA_NodeId conditionSource;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &triggerEvent,
-                                                      fieldSourceQN, &conditionSource);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "ConditionSource not found",
-                                   UA_NodeId_clear(&triggerEvent););
-
-    /* Trigger event */
-    //Condition Nodes should not be deleted after triggering the event
-    retval = UA_Server_triggerConditionEvent(server, triggerEvent, conditionSource, NULL);
-    UA_NodeId_clear(&conditionSource);
-    UA_NodeId_clear(&triggerEvent);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Triggering condition event failed",);
-    return retval;
-}
-
-static UA_StatusCode
-acknowledgeMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                          void *sessionContext, const UA_NodeId *methodId,
-                          void *methodContext, const UA_NodeId *objectId,
-                          void *objectContext, size_t inputSize,
-                          const UA_Variant *input, size_t outputSize,
-                          UA_Variant *output) {
-    UA_QualifiedName fieldComment = UA_QUALIFIEDNAME(0, CONDITION_FIELD_COMMENT);
-    UA_Variant value;
-
-    UA_NodeId conditionTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
-    if(UA_NodeId_equal(objectId, &conditionTypeNodeId)) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "Cannot call method of ConditionType Node. StatusCode %s",
-                       UA_StatusCode_name(UA_STATUSCODE_BADNODEIDINVALID));
-        return UA_STATUSCODE_BADNODEIDINVALID;
-    }
-
-    /* Get condition branch to trigger the correct event */
-    UA_NodeId conditionNode;
-    UA_StatusCode retval =
-        UA_Server_getConditionBranchNodeId(server, (UA_ByteString *)input[0].data,
-                                           &conditionNode);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "ConditionId based on EventId not found",);
-
-    /* Check if retained */
-    if(!UA_Server_isRetained(server, &conditionNode))
-        return UA_STATUSCODE_BADCONDITIONDISABLED;
-
-    /* Check if already acknowledged */
-    if(UA_Server_isTwoStateVariableInTrueState(server, &conditionNode, &fieldAckedStateQN))
-        return UA_STATUSCODE_BADCONDITIONBRANCHALREADYACKED;
-
-    /* Get EventType */
-    UA_NodeId eventType;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &conditionNode,
-                                                      UA_QUALIFIEDNAME(0, CONDITION_FIELD_EVENTTYPE),
-                                                      &eventType);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "EventType not found",
-                                   UA_NodeId_clear(&conditionNode););
-
-    /* Check if ConditionType is subType of AcknowledgeableConditionType TODO Over Kill*/
-    UA_NodeId AcknowledgeableConditionTypeId =
-        UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE);
-    UA_LOCK(&server->serviceMutex);
-    UA_Boolean found = isNodeInTree_singleRef(server, &eventType, &AcknowledgeableConditionTypeId,
-                                              UA_REFERENCETYPEINDEX_HASSUBTYPE);
-    UA_UNLOCK(&server->serviceMutex);
-    if(!found) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Condition Type must be a subtype of AcknowledgeableConditionType!");
-        UA_NodeId_clear(&conditionNode);
-        UA_NodeId_clear(&eventType);
-        return UA_STATUSCODE_BADNODEIDINVALID;
-    }
-
-    UA_NodeId_clear(&eventType);
-
-    /* Set Comment. Check whether comment is empty -> leave the last value as is*/
-    UA_LocalizedText *inputComment = (UA_LocalizedText *)input[1].data;
-    UA_String nullString = UA_STRING_NULL;
-    if(!UA_ByteString_equal(&inputComment->locale, &nullString) &&
-       !UA_ByteString_equal(&inputComment->text, &nullString)) {
-        UA_Variant_setScalar(&value, inputComment, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = UA_Server_setConditionField(server, conditionNode, &value, fieldComment);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition Comment failed",
-                                       UA_NodeId_clear(&conditionNode););
-    }
-
-    /* Set AcknowledgeableStateId */
-    UA_Boolean idValue = true;
-    UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    retval = UA_Server_setConditionVariableFieldProperty(server, conditionNode, &value,
-                                               fieldAckedStateQN, twoStateVariableIdQN);
-    UA_NodeId_clear(&conditionNode);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Acknowledge Condition failed",);
-    return retval;
-}
-
-static UA_StatusCode
-confirmMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                      void *sessionContext, const UA_NodeId *methodId,
-                      void *methodContext, const UA_NodeId *objectId,
-                      void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize,
-                      UA_Variant *output) {
-    UA_QualifiedName fieldComment = UA_QUALIFIEDNAME(0, CONDITION_FIELD_COMMENT);
-    UA_Variant value;
-
-    UA_NodeId conditionTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
-    if(UA_NodeId_equal(objectId, &conditionTypeNodeId)) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "Cannot call method of ConditionType Node. StatusCode %s",
-                       UA_StatusCode_name(UA_STATUSCODE_BADNODEIDINVALID));
-        return UA_STATUSCODE_BADNODEIDINVALID;
-    }
-
-    /* Get condition branch to trigger the correct event */
-    UA_NodeId conditionNode;
-    UA_StatusCode retval =
-        UA_Server_getConditionBranchNodeId(server, (UA_ByteString *)input[0].data,
-                                           &conditionNode);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "ConditionId based on EventId not found",);
-
-    /* Check if retained */
-    if(!UA_Server_isRetained(server, &conditionNode))
-        return UA_STATUSCODE_BADCONDITIONDISABLED;
-
-    /* Check if already confirmed */
-    if(UA_Server_isTwoStateVariableInTrueState(server, &conditionNode, &fieldConfirmedStateQN))
-        return UA_STATUSCODE_BADCONDITIONBRANCHALREADYCONFIRMED;
-
-    /* Get EventType */
-    UA_NodeId eventType;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &conditionNode,
-                                                      UA_QUALIFIEDNAME(0, CONDITION_FIELD_EVENTTYPE),
-                                                      &eventType);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "EventType not found",
-                                   UA_NodeId_clear(&conditionNode););
-
-    /* Check if ConditionType is subType of AcknowledgeableConditionType. */
-    UA_NodeId AcknowledgeableConditionTypeId =
-        UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE);
-    UA_LOCK(&server->serviceMutex);
-    UA_Boolean found = isNodeInTree_singleRef(server, &eventType, &AcknowledgeableConditionTypeId,
-                                              UA_REFERENCETYPEINDEX_HASSUBTYPE);
-    UA_UNLOCK(&server->serviceMutex);
-    if(!found) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "Condition Type must be a subtype of AcknowledgeableConditionType!");
-        UA_NodeId_clear(&conditionNode);
-        UA_NodeId_clear(&eventType);
-        return UA_STATUSCODE_BADNODEIDINVALID;
-    }
-
-    UA_NodeId_clear(&eventType);
-
-    /* Set Comment. Check whether comment is empty -> leave the last value as is*/
-    UA_LocalizedText *inputComment = (UA_LocalizedText *)input[1].data;
-    UA_String nullString = UA_STRING_NULL;
-    if(!UA_ByteString_equal(&inputComment->locale, &nullString) &&
-       !UA_ByteString_equal(&inputComment->text, &nullString)) {
-        UA_Variant_setScalar(&value, inputComment, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-        retval = UA_Server_setConditionField(server, conditionNode, &value, fieldComment);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition Comment failed",
-                                       UA_NodeId_clear(&conditionNode););
-    }
-
-    /* Set ConfirmedStateId */
-    UA_Boolean idValue = true;
-    UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    retval = UA_Server_setConditionVariableFieldProperty(server, conditionNode, &value,
-                                                         fieldConfirmedStateQN,
-                                                         twoStateVariableIdQN);
-    UA_NodeId_clear(&conditionNode);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Acknowledge Condition failed",);
-    return retval;
-}
 
 static UA_StatusCode
 setRefreshMethodEventFields(UA_Server *server, const UA_NodeId *refreshEventNodId) {
@@ -1562,7 +1011,6 @@ setRefreshMethodEventFields(UA_Server *server, const UA_NodeId *refreshEventNodI
     UA_QualifiedName fieldSeverity = UA_QUALIFIEDNAME(0, CONDITION_FIELD_SEVERITY);
     UA_QualifiedName fieldSourceName = UA_QUALIFIEDNAME(0, CONDITION_FIELD_SOURCENAME);
     UA_QualifiedName fieldReceiveTime = UA_QUALIFIEDNAME(0, CONDITION_FIELD_RECEIVETIME);
-    UA_QualifiedName fieldEventId = UA_QUALIFIEDNAME(0, CONDITION_FIELD_EVENTID);
     UA_String sourceNameString = UA_STRING("Server"); //server is the source of Refresh Events
     UA_UInt16 severityValue = REFRESHEVENT_SEVERITY_DEFAULT;
     UA_ByteString eventId  = UA_BYTESTRING_NULL;
@@ -1590,7 +1038,7 @@ setRefreshMethodEventFields(UA_Server *server, const UA_NodeId *refreshEventNodI
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Generating EventId failed",);
 
     UA_Variant_setScalar(&value, &eventId, &UA_TYPES[UA_TYPES_BYTESTRING]);
-    retval = setConditionField(server, *refreshEventNodId, &value, fieldEventId);
+    retval = setConditionField(server, *refreshEventNodId, &value, fieldEventIdQN);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Set RefreshEvent EventId failed",);
 
     UA_ByteString_clear(&eventId);
@@ -1626,279 +1074,36 @@ isConditionSourceInMonitoredItem(UA_Server *server, const UA_MonitoredItem *moni
     return isNodeInTree(server, conditionSource, &monitoredItem->itemToMonitor.nodeId, &refs);
 }
 
-static UA_StatusCode
-refreshLogic(UA_Server *server, const UA_NodeId *refreshStartNodId,
-             const UA_NodeId *refreshEndNodId, UA_MonitoredItem *monitoredItem) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_assert(monitoredItem != NULL);
-
-    /* 1. Trigger RefreshStartEvent */
-    UA_DateTime fieldTimeValue = UA_DateTime_now();
-    UA_StatusCode retval =
-        writeObjectProperty_scalar(server, *refreshStartNodId, fieldTimeQN,
-                                   &fieldTimeValue, &UA_TYPES[UA_TYPES_DATETIME]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Write Object Property scalar failed",);
-
-    retval = UA_MonitoredItem_addEvent(server, monitoredItem, refreshStartNodId);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Events: Could not add the event to a listening node",);
-
-    /* 2. Refresh (see 5.5.7) */
-    /* Get ConditionSource Entry */
-    UA_ConditionSource *source;
-    LIST_FOREACH(source, &server->conditionSources, listEntry) {
-        UA_NodeId conditionSource = source->conditionSourceId;
-        UA_NodeId serverObjectNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
-        /* Check if the conditionSource is being monitored. If the Server Object
-         * is being monitored, then all Events of all monitoredItems should be
-         * refreshed */
-        if(!UA_NodeId_equal(&monitoredItem->itemToMonitor.nodeId, &conditionSource) &&
-           !UA_NodeId_equal(&monitoredItem->itemToMonitor.nodeId, &serverObjectNodeId) &&
-           !isConditionSourceInMonitoredItem(server, monitoredItem, &conditionSource))
-            continue;
-
-        /* Get Condition Entry */
-        UA_Condition *cond;
-        LIST_FOREACH(cond, &source->conditions, listEntry) {
-            /* Get Branch Entry */
-            UA_ConditionBranch *branch;
-            LIST_FOREACH(branch, &cond->conditionBranches, listEntry) {
-                /* If no event was triggered for that branch, then check next
-                 * without refreshing */
-                if(UA_ByteString_equal(&branch->lastEventId, &UA_BYTESTRING_NULL))
-                    continue;
-
-                UA_NodeId triggeredNode;
-                if(UA_NodeId_isNull(&branch->conditionBranchId))
-                    triggeredNode = cond->conditionId;
-                else
-                    triggeredNode = branch->conditionBranchId;
-
-                /* Check if Retain is set to true */
-                if(!isRetained(server, &triggeredNode))
-                    continue;
-
-                /* Add the event */
-                retval = UA_MonitoredItem_addEvent(server, monitoredItem, &triggeredNode);
-                CONDITION_ASSERT_RETURN_RETVAL(retval, "Events: Could not add the event to a listening node",);
-            }
-        }
-    }
-
-    /* 3. Trigger RefreshEndEvent */
-    fieldTimeValue = UA_DateTime_now();
-    retval = writeObjectProperty_scalar(server, *refreshEndNodId, fieldTimeQN,
-                                        &fieldTimeValue, &UA_TYPES[UA_TYPES_DATETIME]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Write Object Property scalar failed",);
-    return UA_MonitoredItem_addEvent(server, monitoredItem, refreshEndNodId);
-}
-
-static UA_StatusCode
-refresh2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                      void *sessionContext, const UA_NodeId *methodId,
-                      void *methodContext, const UA_NodeId *objectId,
-                      void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize,
-                      UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
-    //TODO implement logic for subscription array
-    /* Check if valid subscriptionId */
-    UA_Session *session = getSessionById(server, sessionId);
-    UA_Subscription *subscription =
-        UA_Session_getSubscriptionById(session, *((UA_UInt32 *)input[0].data));
-    if(!subscription) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADSUBSCRIPTIONIDINVALID;
-    }
-
-    /* set RefreshStartEvent and RefreshEndEvent */
-    UA_StatusCode retval = setRefreshMethodEvents(server,
-                                                  &server->refreshEvents[REFRESHEVENT_START_IDX],
-                                                  &server->refreshEvents[REFRESHEVENT_END_IDX]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Create Event RefreshStart or RefreshEnd failed",
-                                   UA_UNLOCK(&server->serviceMutex););
-
-    /* Trigger RefreshStartEvent and RefreshEndEvent for the each monitoredItem
-     * in the subscription */
-    UA_MonitoredItem *monitoredItem =
-        UA_Subscription_getMonitoredItem(subscription, *((UA_UInt32 *)input[1].data));
-    if(!monitoredItem) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
-    }
-
-    //TODO when there are a lot of monitoreditems (not only events)?
-    retval = refreshLogic(server, &server->refreshEvents[REFRESHEVENT_START_IDX],
-                          &server->refreshEvents[REFRESHEVENT_END_IDX], monitoredItem);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Could not refresh Condition",
-                                   UA_UNLOCK(&server->serviceMutex););
-    UA_UNLOCK(&server->serviceMutex);
-    return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-refreshMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                      void *sessionContext, const UA_NodeId *methodId,
-                      void *methodContext, const UA_NodeId *objectId,
-                      void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize,
-                      UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
-
-    //TODO implement logic for subscription array
-    /* Check if valid subscriptionId */
-    UA_Session *session = getSessionById(server, sessionId);
-    UA_Subscription *subscription =
-        UA_Session_getSubscriptionById(session, *((UA_UInt32 *)input[0].data));
-    if(!subscription) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADSUBSCRIPTIONIDINVALID;
-    }
-
-    /* set RefreshStartEvent and RefreshEndEvent */
-    UA_StatusCode retval =
-        setRefreshMethodEvents(server, &server->refreshEvents[REFRESHEVENT_START_IDX],
-                               &server->refreshEvents[REFRESHEVENT_END_IDX]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Create Event RefreshStart or RefreshEnd failed",
-                                   UA_UNLOCK(&server->serviceMutex););
-
-    /* Trigger RefreshStartEvent and RefreshEndEvent for the each monitoredItem
-     * in the subscription */
-    //TODO when there are a lot of monitoreditems (not only events)?
-    UA_MonitoredItem *monitoredItem = NULL;
-    LIST_FOREACH(monitoredItem, &subscription->monitoredItems, listEntry) {
-        retval = refreshLogic(server, &server->refreshEvents[REFRESHEVENT_START_IDX],
-                              &server->refreshEvents[REFRESHEVENT_END_IDX], monitoredItem);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Could not refresh Condition",
-                                       UA_UNLOCK(&server->serviceMutex););
-    }
-    UA_UNLOCK(&server->serviceMutex);
-    return UA_STATUSCODE_GOOD;
-}
-
-
-static UA_StatusCode
-resetMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                      void *sessionContext, const UA_NodeId *methodId,
-                      void *methodContext, const UA_NodeId *objectId,
-                      void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize,
-                      UA_Variant *output)
-{
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-reset2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                    void *sessionContext, const UA_NodeId *methodId,
-                    void *methodContext, const UA_NodeId *objectId,
-                    void *objectContext, size_t inputSize,
-                    const UA_Variant *input, size_t outputSize,
-                    UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-suppressMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                    void *sessionContext, const UA_NodeId *methodId,
-                    void *methodContext, const UA_NodeId *objectId,
-                    void *objectContext, size_t inputSize,
-                    const UA_Variant *input, size_t outputSize,
-                    UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-suppress2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                     void *sessionContext, const UA_NodeId *methodId,
-                     void *methodContext, const UA_NodeId *objectId,
-                     void *objectContext, size_t inputSize,
-                     const UA_Variant *input, size_t outputSize,
-                     UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-unsuppressMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                       void *sessionContext, const UA_NodeId *methodId,
-                       void *methodContext, const UA_NodeId *objectId,
-                       void *objectContext, size_t inputSize,
-                       const UA_Variant *input, size_t outputSize,
-                       UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-unsuppress2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                        void *sessionContext, const UA_NodeId *methodId,
-                        void *methodContext, const UA_NodeId *objectId,
-                        void *objectContext, size_t inputSize,
-                        const UA_Variant *input, size_t outputSize,
-                        UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-placeInServiceMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                         void *sessionContext, const UA_NodeId *methodId,
-                         void *methodContext, const UA_NodeId *objectId,
-                         void *objectContext, size_t inputSize,
-                         const UA_Variant *input, size_t outputSize,
-                         UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-placeInService2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                          void *sessionContext, const UA_NodeId *methodId,
-                          void *methodContext, const UA_NodeId *objectId,
-                          void *objectContext, size_t inputSize,
-                          const UA_Variant *input, size_t outputSize,
-                          UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-removeFromServiceMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                       void *sessionContext, const UA_NodeId *methodId,
-                       void *methodContext, const UA_NodeId *objectId,
-                       void *objectContext, size_t inputSize,
-                       const UA_Variant *input, size_t outputSize,
-                       UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
-static UA_StatusCode
-removeFromService2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
-                        void *sessionContext, const UA_NodeId *methodId,
-                        void *methodContext, const UA_NodeId *objectId,
-                        void *objectContext, size_t inputSize,
-                        const UA_Variant *input, size_t outputSize,
-                        UA_Variant *output)
-{
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
-}
-
 
 /*****************************************************************************/
 /* Functions                                                                 */
 /*****************************************************************************/
+
+static UA_StatusCode
+setConditionBranchInConditionList (UA_Server *server, const UA_NodeId *sourceId, const UA_NodeId *originConditionBranch,
+                                   const UA_NodeId *branchId, const UA_ByteString *branchlastEventId)
+{
+    UA_Condition *condition = getConditionFromConditionBranchId (server, sourceId, originConditionBranch);
+    if (!condition) return UA_STATUSCODE_BADNOTFOUND;
+
+    UA_ConditionBranch *conditionBranch = (UA_ConditionBranch*) UA_malloc(sizeof(*conditionBranch));
+    if(!conditionBranch) {
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    memset(conditionBranch, 0, sizeof(*conditionBranch));
+
+    UA_StatusCode retval = UA_NodeId_copy(branchId, &conditionBranch->conditionBranchId);
+    if(retval != UA_STATUSCODE_GOOD) goto fail;
+    retval = UA_ByteString_copy (branchlastEventId, &conditionBranch->lastEventId);
+    if(retval != UA_STATUSCODE_GOOD) goto fail;
+    LIST_INSERT_HEAD(&condition->conditionBranches, conditionBranch, listEntry);
+    return UA_STATUSCODE_GOOD;
+fail:
+    UA_NodeId_clear(&conditionBranch->conditionBranchId);
+    UA_ByteString_clear(&conditionBranch->lastEventId);
+    UA_free(conditionBranch);
+    return retval;
+}
 
 static UA_StatusCode
 setConditionInConditionList(UA_Server *server, const UA_NodeId *conditionNodeId,
@@ -1923,12 +1128,14 @@ setConditionInConditionList(UA_Server *server, const UA_NodeId *conditionNodeId,
         UA_free(conditionListEntry);
         return UA_STATUSCODE_BADOUTOFMEMORY;
     }
-
     memset(conditionBranchListEntry, 0, sizeof(UA_ConditionBranch));
+
     LIST_INSERT_HEAD(&conditionSourceEntry->conditions, conditionListEntry, listEntry);
     LIST_INSERT_HEAD(&conditionListEntry->conditionBranches, conditionBranchListEntry, listEntry);
     return UA_STATUSCODE_GOOD;
 }
+
+
 
 static UA_StatusCode
 appendConditionEntry(UA_Server *server, const UA_NodeId *conditionNodeId,
@@ -1936,7 +1143,7 @@ appendConditionEntry(UA_Server *server, const UA_NodeId *conditionNodeId,
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     /* See if the ConditionSource Entry already exists*/
-    UA_ConditionSource *source = getConditionSource(server, conditionSourceNodeId);
+    UA_ConditionSource *source = getConditionSource (server, conditionSourceNodeId);
     if(source)
         return setConditionInConditionList(server, conditionNodeId, source);
 
@@ -1958,6 +1165,7 @@ appendConditionEntry(UA_Server *server, const UA_NodeId *conditionNodeId,
     LIST_INSERT_HEAD(&server->conditionSources, conditionSourceListEntry, listEntry);
     return setConditionInConditionList(server, conditionNodeId, conditionSourceListEntry);
 }
+
 
 static void
 deleteAllBranchesFromCondition(UA_Condition *cond) {
@@ -2151,27 +1359,8 @@ addCondition_finish(
             CONDITION_ASSERT_RETURN_RETVAL(retval, "Creating HasCondition Reference failed",);
     }
 
-
     retval = setupConditionInstance (server, &conditionId, conditionType, conditionProperties, conditionSetupProperties);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setup Condition failed",);
-
-    /* change Refresh Events IsAbstract = false
-     * so abstract Events : RefreshStart and RefreshEnd could be created */
-    UA_NodeId refreshStartEventTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_REFRESHSTARTEVENTTYPE);
-    UA_NodeId refreshEndEventTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_REFRESHENDEVENTTYPE);
-
-    UA_Boolean startAbstract = false;
-    UA_Boolean endAbstract = false;
-    readWithReadValue(server, &refreshStartEventTypeNodeId,
-                      UA_ATTRIBUTEID_ISABSTRACT, &startAbstract);
-    readWithReadValue(server, &refreshEndEventTypeNodeId,
-                      UA_ATTRIBUTEID_ISABSTRACT, &endAbstract);
-
-    UA_Boolean inner = (startAbstract == false && endAbstract == false);
-    if(inner) {
-        writeIsAbstractAttribute(server, refreshStartEventTypeNodeId, false);
-        writeIsAbstractAttribute(server, refreshEndEventTypeNodeId, false);
-    }
 
     /* append Condition to list */
     return appendConditionEntry(server, &conditionId, &conditionProperties->source);
@@ -2243,6 +1432,126 @@ UA_Server_createCondition(UA_Server *server,
                                conditionSetupProperties);
     UA_UNLOCK(&server->serviceMutex);
     return retval;
+}
+
+UA_StatusCode
+UA_Server_deleteCondition(UA_Server *server, const UA_NodeId condition,
+                          const UA_NodeId conditionSource) {
+    /* Get ConditionSource Entry */
+    UA_Boolean found = false; /* Delete from internal list */
+    UA_ConditionSource *source, *tmp_source;
+
+    UA_LOCK(&server->serviceMutex);
+    LIST_FOREACH_SAFE(source, &server->conditionSources, listEntry, tmp_source) {
+        if(!UA_NodeId_equal(&source->conditionSourceId, &conditionSource))
+            continue;
+
+        /* Get Condition Entry */
+        UA_Condition *cond, *tmp_cond;
+        LIST_FOREACH_SAFE(cond, &source->conditions, listEntry, tmp_cond) {
+            if(!UA_NodeId_equal(&cond->conditionId, &condition))
+                continue;
+            deleteCondition(cond);
+            found = true;
+            break;
+        }
+
+        if(LIST_EMPTY(&source->conditions)){
+            UA_NodeId_clear(&source->conditionSourceId);
+            LIST_REMOVE(source, listEntry);
+            UA_free(source);
+        }
+        break;
+    }
+    UA_UNLOCK(&server->serviceMutex);
+
+    if(!found)
+        return UA_STATUSCODE_BADNOTFOUND;
+
+    /* Delete from address space */
+    return UA_Server_deleteNode(server, condition, true);
+}
+
+static UA_StatusCode createConditionBranch (UA_Server *server, const UA_NodeId *originConditionBranchId)
+{
+    UA_NodeId sourceId;
+    UA_NodeId_init (&sourceId);
+    UA_ByteString lastEventId;
+    UA_ByteString_init (&lastEventId);
+
+    UA_NodeId conditionType = getTypeDefinitionId (server, originConditionBranchId);
+    if (UA_NodeId_isNull(&conditionType)) return UA_STATUSCODE_BADINTERNALERROR;
+    conditionType = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
+
+    UA_ObjectAttributes oa = UA_ObjectAttributes_default;
+    oa.displayName = UA_LOCALIZEDTEXT("en", "ConditionBranch");
+    const UA_QualifiedName qn = STATIC_QN("ConditionBranch");
+    UA_NodeId branchId;
+    UA_StatusCode retval = addNode_begin (server, UA_NODECLASS_OBJECT, UA_NODEID_NULL,
+                                          UA_NODEID_NULL, UA_NODEID_NULL, qn, conditionType, &oa, &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES],
+                                          NULL,
+                                          &branchId
+    );
+    CONDITION_ASSERT_GOTOLABEL(retval,"Adding ConditionBranch failed", fail);
+
+    /* Copy the state of the condition */
+    retval = copyAllChildren (server, &server->adminSession, originConditionBranchId, &branchId);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Copying Condition State failed", );
+
+    /* Update branchId property */
+    UA_Variant value;
+    UA_Variant_setScalar(&value, (void*)(uintptr_t) &branchId, &UA_TYPES[UA_TYPES_NODEID]);
+    retval = setConditionField(server, branchId, &value,
+                               UA_QUALIFIEDNAME(0,CONDITION_FIELD_BRANCHID));
+    CONDITION_ASSERT_GOTOLABEL(retval, "Set EventType Field failed", fail);
+
+    //TODO DELETE - FOR TESTING expose it in the address space
+    {
+        UA_NodeId source = UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER);
+        retval = addRef(server, source, UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT), branchId,
+                        true);
+        CONDITION_ASSERT_GOTOLABEL(retval,
+                                  "Creating hierarchical Reference to "
+                                  "ConditionSource failed", fail);
+
+        UA_NodeId hasCondition = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCONDITION);
+        retval = addRef(server, source, hasCondition, branchId, true);
+        CONDITION_ASSERT_GOTOLABEL(retval,
+                                  "Creating HasCondition Reference failed", fail);
+    }
+
+    retval = getByteStringValueOfConditionField(server, originConditionBranchId, fieldEventIdQN, &lastEventId);
+    CONDITION_ASSERT_GOTOLABEL(retval, "Could not get sourceId of condition", fail);
+
+    retval = getNodeIdValueOfConditionField (server, originConditionBranchId, fieldSourceQN, &sourceId);
+    CONDITION_ASSERT_GOTOLABEL(retval, "Could not get sourceId of condition", fail);
+
+    retval = setConditionBranchInConditionList (server, &sourceId, originConditionBranchId, &branchId, &lastEventId);
+    UA_NodeId_clear(&sourceId);
+    UA_ByteString_clear(&lastEventId);
+    CONDITION_ASSERT_GOTOLABEL(retval, "Set ConditionBranch in list failed", fail);
+    //create the internal condition branch
+    return UA_STATUSCODE_GOOD;
+fail:
+    UA_NodeId_clear(&sourceId);
+    UA_ByteString_clear(&lastEventId);
+    deleteNode(server, branchId, true);
+    return retval;
+}
+
+
+UA_StatusCode UA_Server_createConditionBranch (UA_Server *server, const UA_NodeId *conditionId)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = createConditionBranch(server, conditionId);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
+}
+
+static UA_StatusCode deleteConditionBranch (UA_Server *server, const UA_NodeId *branchId)
+{
+    //TODO
+    return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
@@ -2482,29 +1791,23 @@ UA_Server_setConditionVariableFieldProperty(UA_Server *server, const UA_NodeId c
     return res;
 }
 
-/* triggers an event only for an enabled condition. The condition list is
- * updated then with the last generated EventId. */
 static UA_StatusCode
-triggerConditionEvent(UA_Server *server, const UA_NodeId condition,
-                      const UA_NodeId conditionSource, UA_ByteString *outEventId) {
+triggerConditionEvent(UA_Server *server, const UA_NodeId condition, const UA_NodeId conditionSource, UA_ByteString *outEventId) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
+    /* Set time */
+    UA_DateTime time = UA_DateTime_now();
+    UA_StatusCode retval = writeObjectProperty_scalar(server, condition, fieldTimeQN,
+                                        &time,
+                                        &UA_TYPES[UA_TYPES_DATETIME]);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Condition Time failed",);
     /* Check if enabled */
     UA_ByteString eventId = UA_BYTESTRING_NULL;
-    UA_QualifiedName enabledStateField = UA_QUALIFIEDNAME(0, CONDITION_FIELD_ENABLEDSTATE);
-    if(!isTwoStateVariableInTrueState(server, &condition, &enabledStateField)) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                       "Cannot trigger condition event when "
-                       CONDITION_FIELD_ENABLEDSTATE"."
-                       CONDITION_FIELD_TWOSTATEVARIABLE_ID" is false.");
-        return UA_STATUSCODE_BADCONDITIONALREADYDISABLED;
-    }
-
     setIsCallerAC(server, &condition, &conditionSource, true);
 
     /* Trigger the event for Condition*/
     //Condition Nodes should not be deleted after triggering the event
-    UA_StatusCode retval = triggerEvent(server, condition, conditionSource, &eventId, false);
+    retval = triggerEvent(server, condition, conditionSource, &eventId, false);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Triggering condition event failed",);
 
     setIsCallerAC(server, &condition, &conditionSource, false);
@@ -2529,378 +1832,110 @@ UA_Server_triggerConditionEvent(UA_Server *server, const UA_NodeId condition,
     return res;
 }
 
-UA_StatusCode
-UA_Server_deleteCondition(UA_Server *server, const UA_NodeId condition,
-                          const UA_NodeId conditionSource) {
-    /* Get ConditionSource Entry */
-    UA_Boolean found = false; /* Delete from internal list */
-    UA_ConditionSource *source, *tmp_source;
-
-    UA_LOCK(&server->serviceMutex);
-    LIST_FOREACH_SAFE(source, &server->conditionSources, listEntry, tmp_source) {
-        if(!UA_NodeId_equal(&source->conditionSourceId, &conditionSource))
-            continue;
-
-        /* Get Condition Entry */
-        UA_Condition *cond, *tmp_cond;
-        LIST_FOREACH_SAFE(cond, &source->conditions, listEntry, tmp_cond) {
-            if(!UA_NodeId_equal(&cond->conditionId, &condition))
-                continue;
-            deleteCondition(cond);
-            found = true;
-            break;
-        }
-
-        if(LIST_EMPTY(&source->conditions)){
-            UA_NodeId_clear(&source->conditionSourceId);
-            LIST_REMOVE(source, listEntry);
-            UA_free(source);
-        }
-        break;
-    }
-    UA_UNLOCK(&server->serviceMutex);
-
-    if(!found)
-        return UA_STATUSCODE_BADNOTFOUND;
-
-    /* Delete from address space */
-    return UA_Server_deleteNode(server, condition, true);
-}
-
 static UA_StatusCode
-getLowLimit(UA_Server *server, UA_NodeId conditionId, UA_Double *lowLimit) {
+triggerNewBranchState (UA_Server *server, const UA_NodeId condition, const UA_NodeId conditionSource) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_Variant value;
-    UA_StatusCode retval =
-        readObjectProperty(server, conditionId,
-                           UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLIMIT), &value);
-    *lowLimit = *(UA_Double*) value.data;
-    return retval;
-}
+    UA_StatusCode status = triggerConditionEvent(server, condition, conditionSource, NULL);
+    if (status != UA_STATUSCODE_GOOD) return status;
 
-static UA_StatusCode
-getLowLowLimit(UA_Server *server, UA_NodeId conditionId, UA_Double *lowLowLimit) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_Variant value;
-    UA_StatusCode retval =
-        readObjectProperty(server, conditionId,
-                           UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWLIMIT), &value);
-    *lowLowLimit = *(UA_Double*) value.data;
-    return retval;
-}
-
-static UA_StatusCode
-getHighLimit(UA_Server *server, UA_NodeId conditionId, UA_Double *highLimit) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_Variant value;
-    UA_StatusCode retval =
-        readObjectProperty(server, conditionId,
-                           UA_QUALIFIEDNAME(0, CONDITION_FIELD_HIGHLIMIT), &value);
-    *highLimit = *(UA_Double*) value.data;
-    return retval;
-}
-
-static UA_StatusCode
-getHighHighLimit(UA_Server *server, UA_NodeId conditionId, UA_Double *highHighLimit) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_Variant value;
-    UA_StatusCode retval =
-        readObjectProperty(server, conditionId,
-                           UA_QUALIFIEDNAME(0, CONDITION_FIELD_HIGHHIGHLIMIT), &value);
-    *highHighLimit = *(UA_Double*) value.data;
-    return retval;
-}
-
-static UA_StatusCode
-setLimitState(UA_Server *server, const UA_NodeId conditionId,
-              UA_Double limitValue) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    UA_NodeId limitState;
-    UA_Double lowLowLimit;
-    UA_Double lowLimit;
-    UA_Double highLimit;
-    UA_Double highHighLimit;
-    UA_Variant value;
-    UA_QualifiedName currentStateField = UA_QUALIFIEDNAME(0,"CurrentState");
-    UA_QualifiedName currentStateIdField = UA_QUALIFIEDNAME(0,"Id");
-    UA_StatusCode retval = getConditionFieldNodeId(server, &conditionId,
-                                                   &fieldLimitStateQN, &limitState);
-
-    retval |= getHighHighLimit(server, conditionId, &highHighLimit);
-    if(retval == UA_STATUSCODE_GOOD) {
-        if(limitValue >= highHighLimit) {
-            UA_NodeId highHighLimitId;
-            retval |= getConditionFieldNodeId(server, &conditionId,
-                                              &fieldHighHighLimitQN, &highHighLimitId);
-            UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_HIGHHIGH_TEXT);
-            UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-            retval |= setConditionField(server, limitState, &value, currentStateField);
-            UA_Variant_setScalar(&value, &highHighLimitId, &UA_TYPES[UA_TYPES_NODEID]);
-            retval |= setConditionVariableFieldProperty(server, limitState, &value,
-                                                        currentStateField, currentStateIdField);
-            return retval;
-        }
+    if (!isBranchIdMainCondition(server, &condition) && isRetained(server, &condition))
+    {
+       status = deleteConditionBranch (server, &condition);
     }
-
-    retval |= getHighLimit(server, conditionId, &highLimit);
-    if(retval == UA_STATUSCODE_GOOD) {
-        if(limitValue >= highLimit) {
-            UA_NodeId highLimitId;
-            retval |= getConditionFieldNodeId(server, &conditionId, &fieldHighLimitQN, &highLimitId);
-            UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_HIGH_TEXT);
-            UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-            retval |= setConditionField(server, limitState, &value, currentStateField);
-
-            UA_Variant_setScalar(&value, &highLimitId, &UA_TYPES[UA_TYPES_NODEID]);
-            retval |= setConditionVariableFieldProperty(server, limitState, &value,
-                                                        currentStateField,
-                                                        currentStateIdField);
-            return retval;
-        }
-    }
-
-    retval |= getLowLowLimit(server, conditionId, &lowLowLimit);
-    if(retval == UA_STATUSCODE_GOOD) {
-        if(limitValue <= lowLowLimit) {
-            UA_NodeId lowLowLimitId;
-            retval |= getConditionFieldNodeId(server, &conditionId,
-                                              &fieldLowLowLimitQN, &lowLowLimitId);
-            UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_LOWLOW_TEXT);
-            UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-            retval |= setConditionField(server, limitState, &value, currentStateField);
-            UA_Variant_setScalar(&value, &lowLowLimitId, &UA_TYPES[UA_TYPES_NODEID]);
-            retval |= setConditionVariableFieldProperty(server, limitState, &value,
-                                                        currentStateField,
-                                                        currentStateIdField);
-            return retval;
-        }
-    }
-
-    retval |= getLowLimit(server, conditionId, &lowLimit);
-    if(retval == UA_STATUSCODE_GOOD) {
-        if(limitValue <= lowLimit) {
-            UA_NodeId lowLimitId;
-            retval |= getConditionFieldNodeId(server, &conditionId, &fieldLowLimitQN, &lowLimitId);
-            UA_LocalizedText text = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_LOW_TEXT);
-            UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-            retval |= setConditionField(server, limitState, &value, currentStateField);
-            UA_Variant_setScalar(&value, &lowLimitId, &UA_TYPES[UA_TYPES_NODEID]);
-            retval |= setConditionVariableFieldProperty(server, limitState, &value,
-                                                        currentStateField,
-                                                        currentStateIdField);
-            return retval;
-        }
-    }
-
-    UA_LocalizedText textNull = UA_LOCALIZEDTEXT(LOCALE_NULL, TEXT_NULL);
-    UA_Variant_setScalar(&value, &textNull, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval |= setConditionField(server, limitState, &value, currentStateField);
-
-    UA_NodeId nodeIdNull = UA_NODEID_NULL;
-    UA_Variant_setScalar(&value, &nodeIdNull, &UA_TYPES[UA_TYPES_NODEID]);
-    retval |= setConditionVariableFieldProperty(server, limitState, &value,
-                                                currentStateField,
-                                                currentStateIdField);
-    return retval;
-}
-
-UA_StatusCode
-UA_Server_setLimitState(UA_Server *server, const UA_NodeId conditionId,
-                        UA_Double limitValue) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = setLimitState(server, conditionId, limitValue);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-/* Currently supports only MBEDTLS and OpenSSL */
-UA_StatusCode
-UA_Server_setExpirationDate(UA_Server *server, const UA_NodeId conditionId,
-                            UA_ByteString  cert) {
-    UA_StatusCode retval;
-    if(cert.data == NULL){
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
-                    "No Certificate found.");
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    UA_CertificateVerification *cv = &server->config.sessionPKI;
-    UA_DateTime getExpiryDateAndTime;
-    if(cv == NULL && cv->getExpirationDate == NULL) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
-                    "Certificate verification and get Expiration date function is not registered");
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-    
-    retval = cv->getExpirationDate(&getExpiryDateAndTime, &cert);
-    if(retval != UA_STATUSCODE_GOOD){
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
-                    "Failed to get certificate expiration date");
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    /* Write the expiry date to the propery of the condition instance */
-    retval = UA_Server_writeObjectProperty_scalar(server, conditionId,
-                                                  fieldExpirationDateQN,
-                                                  &getExpiryDateAndTime,
-                                                  &UA_TYPES[UA_TYPES_DATETIME]);
-    return retval;
+    return status;
 }
 
 
+// --------------- After variable write
 
+static void
+afterWriteCallbackSeverityChange(UA_Server *server,
+                                     const UA_NodeId *sessionId, void *sessionContext,
+                                     const UA_NodeId *nodeId, void *nodeContext,
+                                     const UA_NumericRange *range, const UA_DataValue *data) {
+    //TODO
+}
 
-// ConditionType implementation
+static void
+afterWriteCallbackQualityChange(UA_Server *server,
+                                     const UA_NodeId *sessionId, void *sessionContext,
+                                     const UA_NodeId *nodeId, void *nodeContext,
+                                     const UA_NumericRange *range, const UA_DataValue *data) {
+    //TODO
+}
+
 
 static void
 afterWriteCallbackEnabledStateChange(UA_Server *server,
                                      const UA_NodeId *sessionId, void *sessionContext,
                                      const UA_NodeId *nodeId, void *nodeContext,
-                                     const UA_NumericRange *range, const UA_DataValue *data) {
-    /* Callback for change in EnabledState/Id property.
-     * First we get the EnabledState NodeId then The Condition NodeId */
-    UA_NodeId twoStateVariableNode;
-    UA_StatusCode retval = UA_Server_getFieldParentNodeId(server, nodeId, &twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent TwoStateVariable found for given EnabledState/Id",);
-
-    UA_NodeId conditionNode;
-    retval = UA_Server_getFieldParentNodeId(server, &twoStateVariableNode, &conditionNode);
-    UA_NodeId_clear(&twoStateVariableNode);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent Condition found for given EnabledState",);
-
-    /* Get conditionSource */
-    UA_NodeId conditionSource;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &conditionNode, fieldSourceQN,
-                                                      &conditionSource);
-    CONDITION_ASSERT_RETURN_VOID(retval, "ConditionSource not found",
-                                 UA_NodeId_clear(&conditionNode););
-
-    /* Set disabling/enabling time */
-    retval = UA_Server_writeObjectProperty_scalar(server, conditionNode, fieldTimeQN,
-                                                  (const UA_DateTime*)&data->sourceTimestamp,
-                                                  &UA_TYPES[UA_TYPES_DATETIME]);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set enabling/disabling Time failed",
-                                 UA_NodeId_clear(&conditionNode);
-                                     UA_NodeId_clear(&conditionSource););
-
-    if(false == (*((UA_Boolean *)data->value.data))) {
-        /* Disable all branches and update list */
-        retval = UA_Server_enteringDisabledState(server, &conditionNode, &conditionSource);
-        UA_NodeId_clear(&conditionNode);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Entering disabled state failed",
-                                     UA_NodeId_clear(&conditionSource););
-    } else {
-        /* Enable all branches and update list */
-        retval = UA_Server_enteringEnabledState(server, &conditionNode, &conditionSource);
-        UA_NodeId_clear(&conditionNode);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Entering enabled state failed",
-                                     UA_NodeId_clear(&conditionSource););
-    }
-
-    UA_NodeId_clear(&conditionSource);
-}
-
-static void
-afterWriteCallbackQualityChange(UA_Server *server,
-                                const UA_NodeId *sessionId, void *sessionContext,
-                                const UA_NodeId *nodeId, void *nodeContext,
-                                const UA_NumericRange *range, const UA_DataValue *data) {
+                                     const UA_NumericRange *range, const UA_DataValue *data)
+{
     //TODO
 }
 
 static void
-afterWriteCallbackSeverityChange(UA_Server *server,
-                                 const UA_NodeId *sessionId, void *sessionContext,
-                                 const UA_NodeId *nodeId, void *nodeContext,
-                                 const UA_NumericRange *range, const UA_DataValue *data) {
-    UA_QualifiedName fieldLastSeverity = UA_QUALIFIEDNAME(0, CONDITION_FIELD_LASTSEVERITY);
-    UA_QualifiedName fieldSourceTimeStamp =
-        UA_QUALIFIEDNAME(0, CONDITION_FIELD_CONDITIONVARIABLE_SOURCETIMESTAMP);
-    UA_Variant value;
-
-    UA_NodeId condition;
-    UA_StatusCode retval = UA_Server_getFieldParentNodeId(server, nodeId, &condition);
-    CONDITION_ASSERT_RETURN_VOID(retval, "No Parent Condition found for given Severity Field",);
-
-    /* Get conditionSource */
-    UA_NodeId conditionSource;
-    retval = UA_Server_getNodeIdValueOfConditionField(server, &condition,
-                                                      fieldSourceQN, &conditionSource);
-    CONDITION_ASSERT_RETURN_VOID(retval, "ConditionSource not found",
-                                 UA_NodeId_clear(&condition););
-
-    UA_UInt16 lastSeverity;
-    UA_DateTime lastSeveritySourceTimeStamp;
-    retval = UA_Server_getConditionLastSeverity(server, &conditionSource, &condition,
-                                                &lastSeverity, &lastSeveritySourceTimeStamp);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Get Condition LastSeverity failed",
-                                 UA_NodeId_clear(&condition);
-                                     UA_NodeId_clear(&conditionSource););
-
-    /* Set message dependent on compare result*/
-    UA_LocalizedText message;
-    if(lastSeverity < (*(UA_UInt16 *)data->value.data))
-        message = UA_LOCALIZEDTEXT(LOCALE, SEVERITY_INCREASED_MESSAGE);
-    else
-        message = UA_LOCALIZEDTEXT(LOCALE, SEVERITY_DECREASED_MESSAGE);
-
-    /* Set LastSeverity */
-    UA_Variant_setScalar(&value, &lastSeverity, &UA_TYPES[UA_TYPES_UINT16]);
-    retval = UA_Server_setConditionField(server, condition, &value, fieldLastSeverity);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition LAstSeverity failed",
-                                 UA_NodeId_clear(&condition);
-                                     UA_NodeId_clear(&conditionSource););
-
-    /* Set SourceTimestamp */
-    UA_Variant_setScalar(&value, &lastSeveritySourceTimeStamp, &UA_TYPES[UA_TYPES_DATETIME]);
-    retval = UA_Server_setConditionVariableFieldProperty(server, condition, &value,
-                                                         fieldLastSeverity, fieldSourceTimeStamp);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set LastSeverity SourceTimestamp failed",
-                                 UA_NodeId_clear(&condition);
-                                     UA_NodeId_clear(&conditionSource););
-
-    /* Update lastSeverity in list */
-    lastSeverity = *(UA_UInt16 *)data->value.data;
-    lastSeveritySourceTimeStamp = data->sourceTimestamp;
-    retval = UA_Server_updateConditionLastSeverity(server, &conditionSource, &condition,
-                                                   lastSeverity, lastSeveritySourceTimeStamp);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Update Condition LastSeverity failed",
-                                 UA_NodeId_clear(&condition);
-                                     UA_NodeId_clear(&conditionSource););
-
-    /* Set Time (Time of Value Change) */
-    UA_Variant_setScalar(&value, (void*)(uintptr_t)((const UA_DateTime*)&data->sourceTimestamp),
-                         &UA_TYPES[UA_TYPES_DATETIME]);
-    retval = UA_Server_setConditionField(server, condition, &value, fieldTimeQN);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition Time failed",
-                                 UA_NodeId_clear(&condition););
-
-    /* Set Message */
-    UA_Variant_setScalar(&value, &message, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, condition, &value, fieldMessageQN);
-    CONDITION_ASSERT_RETURN_VOID(retval, "Set Condition Message failed",
-                                 UA_NodeId_clear(&condition););
-
-#ifdef CONDITION_SEVERITYCHANGECALLBACK_ENABLE
-    /* Check if retained */
-    if(UA_Server_isRetained(server, &condition)) {
-        /* Trigger event */
-        //Condition Nodes should not be deleted after triggering the event
-        retval = UA_Server_triggerConditionEvent(server, condition, conditionSource, NULL);
-        CONDITION_ASSERT_RETURN_VOID(retval, "Triggering condition event failed",
-                                     UA_NodeId_clear(&condition);
-                                         UA_NodeId_clear(&conditionSource););
-    }
-#endif /* CONDITION_SEVERITYCHANGECALLBACK_ENABLE */
-    UA_NodeId_clear(&conditionSource);
-    UA_NodeId_clear(&condition);
+afterWriteCallbackAckedStateChange(UA_Server *server,
+                                   const UA_NodeId *sessionId, void *sessionContext,
+                                   const UA_NodeId *nodeId, void *nodeContext,
+                                   const UA_NumericRange *range, const UA_DataValue *data)
+{
+   //TODO
 }
+
+
+static void
+afterWriteCallbackConfirmedStateChange(UA_Server *server,
+                                       const UA_NodeId *sessionId, void *sessionContext,
+                                       const UA_NodeId *nodeId, void *nodeContext,
+                                       const UA_NumericRange *range, const UA_DataValue *data) {
+    //TODO
+}
+
+static void
+afterWriteCallbackActiveStateChange(UA_Server *server,
+                                    const UA_NodeId *sessionId, void *sessionContext,
+                                    const UA_NodeId *nodeId, void *nodeContext,
+                                    const UA_NumericRange *range, const UA_DataValue *data)
+{
+    //TODO
+}
+
+
+static void
+afterWriteCallbackLatchedStateChange(UA_Server *server,
+                                     const UA_NodeId *sessionId, void *sessionContext,
+                                     const UA_NodeId *nodeId, void *nodeContext,
+                                     const UA_NumericRange *range, const UA_DataValue *data)
+{
+    //TODO
+}
+
+static void
+afterWriteCallbackSuppressedStateChange(UA_Server *server,
+                                        const UA_NodeId *sessionId, void *sessionContext,
+                                        const UA_NodeId *nodeId, void *nodeContext,
+                                        const UA_NumericRange *range, const UA_DataValue *data)
+{
+    //TODO
+}
+
+static void
+afterWriteCallbackOutOfServiceStateChange(UA_Server *server,
+                                          const UA_NodeId *sessionId, void *sessionContext,
+                                          const UA_NodeId *nodeId, void *nodeContext,
+                                          const UA_NumericRange *range, const UA_DataValue *data)
+{
+    //TODO
+}
+
+
+// ConditionType implementation
 
 static UA_StatusCode
 setupConditionNodes (UA_Server *server, const UA_NodeId *condition,
-                     const UA_NodeId *conditionType,
-                     const UA_ConditionProperties *properties)
+                    const UA_NodeId *conditionType,
+                    const UA_ConditionProperties *properties)
 {
     /* Set Fields */
     /* 1.Set EventType */
@@ -2984,46 +2019,6 @@ setupConditionNodes (UA_Server *server, const UA_NodeId *condition,
     retval = setConditionField(server, *condition, &value,
                                UA_QUALIFIEDNAME(0,CONDITION_FIELD_SEVERITY));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Severity Field failed",);
-
-    /* Set EnabledState Callback */
-    UA_NodeId twoStateVariableIdNodeId = UA_NODEID_NULL;
-    retval = getConditionFieldPropertyNodeId(server, condition, &fieldEnabledStateQN,
-                                                           &twoStateVariableIdQN,
-                                                           &twoStateVariableIdNodeId);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Id Property of TwoStateVariable not found",);
-
-    UA_ValueCallback callback;
-    callback.onRead = NULL;
-    callback.onWrite = afterWriteCallbackEnabledStateChange;
-    retval = setVariableNode_valueCallback(server, twoStateVariableIdNodeId, callback);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Set EnabledState Callback failed",
-                                   UA_NodeId_clear(&twoStateVariableIdNodeId););
-
-    /* Set Variable Callbacks */
-
-    UA_QualifiedName conditionVariableName[2] = {
-        UA_QUALIFIEDNAME(0, CONDITION_FIELD_QUALITY),
-        UA_QUALIFIEDNAME(0, CONDITION_FIELD_SEVERITY)
-    };// extend array with other fields when needed
-
-    UA_BrowsePathResult bpr =
-        browseSimplifiedBrowsePath(server, *condition, 1, &conditionVariableName[0]);
-    if(bpr.statusCode != UA_STATUSCODE_GOOD)
-        return bpr.statusCode;
-    callback.onWrite = afterWriteCallbackQualityChange;
-    retval = setVariableNode_valueCallback(server, bpr.targets[0].targetId.nodeId,
-                                           callback);
-    UA_BrowsePathResult_clear(&bpr);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    bpr = browseSimplifiedBrowsePath(server, *condition, 1, &conditionVariableName[1]);
-    if(bpr.statusCode != UA_STATUSCODE_GOOD)
-        return bpr.statusCode;
-    callback.onWrite = afterWriteCallbackSeverityChange;
-    retval = setVariableNode_valueCallback(server, bpr.targets[0].targetId.nodeId,
-                                           callback);
-    UA_BrowsePathResult_clear(&bpr);
     return retval;
 }
 
@@ -3096,33 +2091,6 @@ UA_Server_setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId
                                        UA_NodeId_clear(&twoStateVariableIdNodeId););
     }
     return retval;
-}
-
-static void
-afterWriteCallbackLatchedStateChange(UA_Server *server,
-                                       const UA_NodeId *sessionId, void *sessionContext,
-                                       const UA_NodeId *nodeId, void *nodeContext,
-                                       const UA_NumericRange *range, const UA_DataValue *data)
-{
-    //TODO
-}
-
-static void
-afterWriteCallbackSuppressedStateChange(UA_Server *server,
-                                     const UA_NodeId *sessionId, void *sessionContext,
-                                     const UA_NodeId *nodeId, void *nodeContext,
-                                     const UA_NumericRange *range, const UA_DataValue *data)
-{
-    //TODO
-}
-
-static void
-afterWriteCallbackOutOfServiceStateChange(UA_Server *server,
-                                        const UA_NodeId *sessionId, void *sessionContext,
-                                        const UA_NodeId *nodeId, void *nodeContext,
-                                        const UA_NumericRange *range, const UA_DataValue *data)
-{
-    //TODO
 }
 
 static UA_StatusCode
@@ -3365,7 +2333,8 @@ UA_Server_setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *conditio
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set ReAlarmTimeRepeatCount Field failed",);
     }
 
-
+    //TODO add support for alarm audio
+    //TODO alarm suppression groups
     return retval;
 }
 
@@ -3475,6 +2444,568 @@ UA_Server_setupNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_N
     return setupRateOfChangeAlarmNodes (server, condition, properties);
 }
 
+
+// -------- Interact with condition
+
+static UA_StatusCode
+conditionSetEnabledState (UA_Server *server, const UA_NodeId *conditionId, UA_Boolean enabled)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
+    /* Cant enable/disable branches - only main condition */
+    if (isBranch(server, conditionId)) return UA_STATUSCODE_BADNODEIDINVALID;
+    if (conditionEnabled (server, conditionId) == enabled)
+        return enabled ? UA_STATUSCODE_BADCONDITIONALREADYENABLED : UA_STATUSCODE_BADCONDITIONALREADYDISABLED;
+
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    retval = setEnabledState(server, conditionId, enabled);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    /* Set condition message */
+    UA_LocalizedText message = UA_LOCALIZEDTEXT(LOCALE, enabled ? ENABLED_MESSAGE : DISABLED_MESSAGE);
+    setMessage(server, conditionId, &message);
+
+    UA_NodeId conditionSource;
+    retval = getNodeIdValueOfConditionField(server, conditionId, fieldSourceQN, &conditionSource);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "ConditionSource not found",);
+    UA_Condition *cond = getCondition(server, &conditionSource, conditionId);
+
+    /**
+     * When the Condition instance enters the Disabled state, the Retain Property of this
+     * Condition shall be set to False by the Server to indicate to the Client that the
+     * Condition instance is currently not of interest to Clients. This includes all
+     * ConditionBranches if any branches exist.
+     * https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5
+     *
+     *
+     */
+    if (enabled == false)
+    {
+        UA_ConditionBranch *branch;
+        LIST_FOREACH(branch, &cond->conditionBranches, listEntry) {
+            UA_NodeId triggeredNode;
+            UA_NodeId_init(&triggeredNode);
+            triggeredNode = UA_NodeId_isNull(&branch->conditionBranchId) ?
+                cond->conditionId : branch->conditionBranchId;
+            //set retain property for each branch
+            setRetain (server, &triggeredNode, false);
+
+            retval = triggerConditionEvent(server, triggeredNode, conditionSource, NULL);
+            CONDITION_ASSERT_RETURN_RETVAL(retval, "triggering condition event failed", UA_NodeId_clear(&conditionSource););
+        }
+    }
+    else
+    {
+        // TODO evaluate condition
+
+        //resend notifications for any branch where retain = true
+        size_t resent_count = 0;
+        UA_ConditionBranch *branch;
+        LIST_FOREACH(branch, &cond->conditionBranches, listEntry) {
+            UA_NodeId triggeredNode;
+            UA_NodeId_init(&triggeredNode);
+            triggeredNode = UA_NodeId_isNull(&branch->conditionBranchId) ?
+                cond->conditionId : branch->conditionBranchId;
+            //check retain property for each branch
+            if (!isRetained(server, &triggeredNode))
+                continue;
+
+            /* Set time */
+            UA_DateTime time = UA_DateTime_now();
+            retval = writeObjectProperty_scalar(server, *conditionId, fieldTimeQN,
+                                                &time,
+                                                &UA_TYPES[UA_TYPES_DATETIME]);
+            CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Time failed",
+                                           UA_NodeId_clear(&conditionSource););
+            retval = triggerConditionEvent(server, triggeredNode, conditionSource, NULL);
+            if (retval != UA_STATUSCODE_GOOD) {
+                UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
+                             "triggering condition event failed. StatusCode %s",
+                             UA_StatusCode_name(retval));
+            }
+            resent_count++;
+        }
+
+        if (resent_count == 0)
+        {
+            //always send a notification
+            retval = triggerConditionEvent(server, *conditionId, conditionSource, NULL);
+            CONDITION_ASSERT_RETURN_RETVAL(retval, "triggering condition event failed", UA_NodeId_clear(&conditionSource););
+        }
+
+    }
+    UA_NodeId_clear(&conditionSource);
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+UA_Server_conditionSetEnabledState (UA_Server *server, const UA_NodeId *conditionId, UA_Boolean enabled)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res = conditionSetEnabledState (server, conditionId, enabled);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+static UA_StatusCode
+conditionAcknowledge (UA_Server *server, const UA_NodeId *conditionId, UA_LocalizedText comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    if(conditionAcked (server, conditionId))
+        return UA_STATUSCODE_BADCONDITIONBRANCHALREADYACKED;
+
+    setAckedState (server, conditionId, true);
+
+    if (isConfirmable(server, conditionId))
+    {
+        setConfirmedState(server, conditionId, false);
+        setRetain(server, conditionId, true);
+    }
+    else
+    {
+        setRetain(server, conditionId, false);
+    }
+
+    setComment (server, conditionId, &comment);
+
+    UA_NodeId conditionSource;
+    UA_StatusCode retval = getNodeIdValueOfConditionField(server, conditionId, fieldSourceQN, &conditionSource);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "ConditionSource not found",);
+    triggerNewBranchState (server, *conditionId, conditionSource);
+    return retval;
+}
+
+static UA_StatusCode
+UA_Server_conditionAcknowledge (UA_Server *server, const UA_NodeId *conditionId, UA_LocalizedText comment)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res = conditionAcknowledge (server, conditionId, comment);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+static UA_StatusCode
+conditionConfirm (UA_Server *server, const UA_NodeId *conditionId, UA_LocalizedText comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
+    if (conditionConfirmed (server, conditionId))
+        return UA_STATUSCODE_BADCONDITIONBRANCHALREADYCONFIRMED;
+
+    setConfirmedState (server, conditionId, true);
+    setRetain (server, conditionId, false);
+    setComment (server, conditionId, &comment);
+    UA_NodeId conditionSource;
+    UA_StatusCode retval = getNodeIdValueOfConditionField(server, conditionId, fieldSourceQN, &conditionSource);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "ConditionSource not found",);
+    triggerNewBranchState (server, *conditionId, conditionSource);
+    return retval;
+}
+
+static UA_StatusCode
+UA_Server_conditionConfirm (UA_Server *server, const UA_NodeId *conditionId, UA_LocalizedText comment)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res = conditionConfirm (server, conditionId, comment);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+static UA_StatusCode
+refreshLogic(UA_Server *server, const UA_NodeId *refreshStartNodId,
+             const UA_NodeId *refreshEndNodId, UA_MonitoredItem *monitoredItem) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_assert(monitoredItem != NULL);
+
+    /* 1. Trigger RefreshStartEvent */
+    UA_DateTime fieldTimeValue = UA_DateTime_now();
+    UA_StatusCode retval =
+        writeObjectProperty_scalar(server, *refreshStartNodId, fieldTimeQN,
+                                   &fieldTimeValue, &UA_TYPES[UA_TYPES_DATETIME]);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Write Object Property scalar failed",);
+
+    retval = UA_MonitoredItem_addEvent(server, monitoredItem, refreshStartNodId);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Events: Could not add the event to a listening node",);
+
+    /* 2. Refresh (see 5.5.7) */
+    /* Get ConditionSource Entry */
+    UA_ConditionSource *source;
+    LIST_FOREACH(source, &server->conditionSources, listEntry) {
+        UA_NodeId conditionSource = source->conditionSourceId;
+        UA_NodeId serverObjectNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+        /* Check if the conditionSource is being monitored. If the Server Object
+         * is being monitored, then all Events of all monitoredItems should be
+         * refreshed */
+        if(!UA_NodeId_equal(&monitoredItem->itemToMonitor.nodeId, &conditionSource) &&
+           !UA_NodeId_equal(&monitoredItem->itemToMonitor.nodeId, &serverObjectNodeId) &&
+           !isConditionSourceInMonitoredItem(server, monitoredItem, &conditionSource))
+            continue;
+
+        /* Get Condition Entry */
+        UA_Condition *cond;
+        LIST_FOREACH(cond, &source->conditions, listEntry) {
+            /* Get Branch Entry */
+            UA_ConditionBranch *branch;
+            LIST_FOREACH(branch, &cond->conditionBranches, listEntry) {
+                /* If no event was triggered for that branch, then check next
+                 * without refreshing */
+                if(UA_ByteString_equal(&branch->lastEventId, &UA_BYTESTRING_NULL))
+                    continue;
+
+                UA_NodeId triggeredNode;
+                if(UA_NodeId_isNull(&branch->conditionBranchId))
+                    triggeredNode = cond->conditionId;
+                else
+                    triggeredNode = branch->conditionBranchId;
+
+                /* Check if Retain is set to true */
+                if(!isRetained(server, &triggeredNode))
+                    continue;
+
+                /* Add the event */
+                retval = UA_MonitoredItem_addEvent(server, monitoredItem, &triggeredNode);
+                CONDITION_ASSERT_RETURN_RETVAL(retval, "Events: Could not add the event to a listening node",);
+            }
+        }
+    }
+
+    /* 3. Trigger RefreshEndEvent */
+    fieldTimeValue = UA_DateTime_now();
+    retval = writeObjectProperty_scalar(server, *refreshEndNodId, fieldTimeQN,
+                                        &fieldTimeValue, &UA_TYPES[UA_TYPES_DATETIME]);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Write Object Property scalar failed",);
+    return UA_MonitoredItem_addEvent(server, monitoredItem, refreshEndNodId);
+}
+
+
+// -------- Method Node Callbacks
+
+static UA_StatusCode
+enableMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                     void *sessionContext, const UA_NodeId *methodId,
+                     void *methodContext, const UA_NodeId *objectId,
+                     void *objectContext, size_t inputSize,
+                     const UA_Variant *input, size_t outputSize,
+                     UA_Variant *output)
+{
+    //TODO check object id type
+    return UA_Server_conditionSetEnabledState (server, objectId, true);
+}
+
+static UA_StatusCode
+disableMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                      void *sessionContext, const UA_NodeId *methodId,
+                      void *methodContext, const UA_NodeId *objectId,
+                      void *objectContext, size_t inputSize,
+                      const UA_Variant *input, size_t outputSize, UA_Variant *output)
+{
+    //TODO check object id type
+    return UA_Server_conditionSetEnabledState (server, objectId, false);
+}
+
+static UA_StatusCode
+addCommentMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                         void *sessionContext, const UA_NodeId *methodId,
+                         void *methodContext, const UA_NodeId *objectId,
+                         void *objectContext, size_t inputSize,
+                         const UA_Variant *input, size_t outputSize,
+                         UA_Variant *output)
+{
+    //TODO check object id type
+    UA_NodeId conditionId;
+    UA_NodeId_init (&conditionId);
+
+    UA_StatusCode retval = UA_Server_getConditionBranchNodeId(
+        server,
+        objectId,
+        (UA_ByteString *)input[0].data,
+        &conditionId
+    );
+    CONDITION_ASSERT_GOTOLABEL(retval, "ConditionId based on EventId not found",done);
+
+    /* Check if enabled */
+    if(!UA_Server_conditionEnabled (server, &conditionId))
+        return UA_STATUSCODE_BADCONDITIONDISABLED;
+
+    UA_LocalizedText message = UA_LOCALIZEDTEXT(LOCALE, COMMENT_MESSAGE);
+    setMessage(server, &conditionId, &message);
+
+    /* Set Comment. Check whether comment is empty -> leave the last value as is*/
+    UA_LocalizedText *inputComment = (UA_LocalizedText *)input[1].data;
+    UA_String nullString = UA_STRING_NULL;
+    if(!UA_ByteString_equal(&inputComment->locale, &nullString) &&
+       !UA_ByteString_equal(&inputComment->text, &nullString)) {
+        retval = UA_Server_setComment(server, &conditionId, inputComment);
+        CONDITION_ASSERT_GOTOLABEL (retval, "Set Condition Comment failed", done);
+    }
+
+    /* Get conditionSource */
+    UA_NodeId conditionSource;
+    retval = UA_Server_getNodeIdValueOfConditionField(server, &conditionId,
+                                                      fieldSourceQN, &conditionSource);
+    CONDITION_ASSERT_GOTOLABEL (retval, "ConditionSource not found", done);
+
+    /* Trigger event */
+    retval = UA_Server_triggerConditionEvent (server, conditionId, conditionSource, NULL);
+    UA_NodeId_clear(&conditionSource);
+    CONDITION_ASSERT_GOTOLABEL (retval, "Triggering condition event failed",done);
+done:
+    UA_NodeId_clear(&conditionId);
+    return retval;
+}
+
+static UA_StatusCode
+refreshMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                      void *sessionContext, const UA_NodeId *methodId,
+                      void *methodContext, const UA_NodeId *objectId,
+                      void *objectContext, size_t inputSize,
+                      const UA_Variant *input, size_t outputSize,
+                      UA_Variant *output) {
+    UA_LOCK(&server->serviceMutex);
+
+    //TODO implement logic for subscription array
+    /* Check if valid subscriptionId */
+    UA_Session *session = getSessionById(server, sessionId);
+    UA_Subscription *subscription =
+        UA_Session_getSubscriptionById(session, *((UA_UInt32 *)input[0].data));
+    if(!subscription) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADSUBSCRIPTIONIDINVALID;
+    }
+
+    /* set RefreshStartEvent and RefreshEndEvent */
+    UA_StatusCode retval =
+        setRefreshMethodEvents(server, &server->refreshEvents[REFRESHEVENT_START_IDX],
+                               &server->refreshEvents[REFRESHEVENT_END_IDX]);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Create Event RefreshStart or RefreshEnd failed",
+                                   UA_UNLOCK(&server->serviceMutex););
+
+    /* Trigger RefreshStartEvent and RefreshEndEvent for the each monitoredItem
+     * in the subscription */
+    //TODO when there are a lot of monitoreditems (not only events)?
+    UA_MonitoredItem *monitoredItem = NULL;
+    LIST_FOREACH(monitoredItem, &subscription->monitoredItems, listEntry) {
+        retval = refreshLogic(server, &server->refreshEvents[REFRESHEVENT_START_IDX],
+                              &server->refreshEvents[REFRESHEVENT_END_IDX], monitoredItem);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Could not refresh Condition",
+                                       UA_UNLOCK(&server->serviceMutex););
+    }
+    UA_UNLOCK(&server->serviceMutex);
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+refresh2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                       void *sessionContext, const UA_NodeId *methodId,
+                       void *methodContext, const UA_NodeId *objectId,
+                       void *objectContext, size_t inputSize,
+                       const UA_Variant *input, size_t outputSize,
+                       UA_Variant *output)
+{
+    UA_LOCK(&server->serviceMutex);
+    //TODO implement logic for subscription array
+    /* Check if valid subscriptionId */
+    UA_Session *session = getSessionById(server, sessionId);
+    UA_Subscription *subscription =
+        UA_Session_getSubscriptionById(session, *((UA_UInt32 *)input[0].data));
+    if(!subscription) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADSUBSCRIPTIONIDINVALID;
+    }
+
+    /* set RefreshStartEvent and RefreshEndEvent */
+    UA_StatusCode retval = setRefreshMethodEvents(server,
+                                                  &server->refreshEvents[REFRESHEVENT_START_IDX],
+                                                  &server->refreshEvents[REFRESHEVENT_END_IDX]);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Create Event RefreshStart or RefreshEnd failed",
+                                   UA_UNLOCK(&server->serviceMutex););
+
+    /* Trigger RefreshStartEvent and RefreshEndEvent for the each monitoredItem
+     * in the subscription */
+    UA_MonitoredItem *monitoredItem =
+        UA_Subscription_getMonitoredItem(subscription, *((UA_UInt32 *)input[1].data));
+    if(!monitoredItem) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
+    }
+
+    //TODO when there are a lot of monitoreditems (not only events)?
+    retval = refreshLogic(server, &server->refreshEvents[REFRESHEVENT_START_IDX],
+                          &server->refreshEvents[REFRESHEVENT_END_IDX], monitoredItem);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Could not refresh Condition",
+                                   UA_UNLOCK(&server->serviceMutex););
+    UA_UNLOCK(&server->serviceMutex);
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+acknowledgeMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                          void *sessionContext, const UA_NodeId *methodId,
+                          void *methodContext, const UA_NodeId *objectId,
+                          void *objectContext, size_t inputSize,
+                          const UA_Variant *input, size_t outputSize,
+                          UA_Variant *output)
+{
+    //TODO check object id type
+
+    UA_NodeId conditionId;
+    UA_StatusCode retval = UA_Server_getConditionBranchNodeId (
+        server,
+        objectId,
+        (UA_ByteString *)input[0].data,
+        &conditionId
+    );
+    CONDITION_ASSERT_GOTOLABEL(retval, "ConditionId based on EventId not found",done);
+    UA_LocalizedText *comment = (UA_LocalizedText *)input[1].data;
+    retval = UA_Server_conditionAcknowledge (server, &conditionId, *comment);
+done:
+    UA_NodeId_clear(&conditionId);
+    return retval;
+}
+
+static UA_StatusCode
+confirmMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                      void *sessionContext, const UA_NodeId *methodId,
+                      void *methodContext, const UA_NodeId *objectId,
+                      void *objectContext, size_t inputSize,
+                      const UA_Variant *input, size_t outputSize,
+                      UA_Variant *output)
+{
+    UA_NodeId conditionId;
+    UA_StatusCode retval = UA_Server_getConditionBranchNodeId (
+        server,
+        objectId,
+        (UA_ByteString *)input[0].data,
+        &conditionId
+    );
+    CONDITION_ASSERT_GOTOLABEL(retval, "ConditionId based on EventId not found",done);
+    UA_LocalizedText *comment = (UA_LocalizedText *)input[1].data;
+    retval = UA_Server_conditionConfirm(server, &conditionId, *comment);
+    done:
+    UA_NodeId_clear(&conditionId);
+    return retval;
+}
+
+
+static UA_StatusCode
+resetMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                    void *sessionContext, const UA_NodeId *methodId,
+                    void *methodContext, const UA_NodeId *objectId,
+                    void *objectContext, size_t inputSize,
+                    const UA_Variant *input, size_t outputSize,
+                    UA_Variant *output)
+{
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+reset2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                     void *sessionContext, const UA_NodeId *methodId,
+                     void *methodContext, const UA_NodeId *objectId,
+                     void *objectContext, size_t inputSize,
+                     const UA_Variant *input, size_t outputSize,
+                     UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+suppressMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                       void *sessionContext, const UA_NodeId *methodId,
+                       void *methodContext, const UA_NodeId *objectId,
+                       void *objectContext, size_t inputSize,
+                       const UA_Variant *input, size_t outputSize,
+                       UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+suppress2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                        void *sessionContext, const UA_NodeId *methodId,
+                        void *methodContext, const UA_NodeId *objectId,
+                        void *objectContext, size_t inputSize,
+                        const UA_Variant *input, size_t outputSize,
+                        UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+unsuppressMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                         void *sessionContext, const UA_NodeId *methodId,
+                         void *methodContext, const UA_NodeId *objectId,
+                         void *objectContext, size_t inputSize,
+                         const UA_Variant *input, size_t outputSize,
+                         UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+unsuppress2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                          void *sessionContext, const UA_NodeId *methodId,
+                          void *methodContext, const UA_NodeId *objectId,
+                          void *objectContext, size_t inputSize,
+                          const UA_Variant *input, size_t outputSize,
+                          UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+placeInServiceMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                             void *sessionContext, const UA_NodeId *methodId,
+                             void *methodContext, const UA_NodeId *objectId,
+                             void *objectContext, size_t inputSize,
+                             const UA_Variant *input, size_t outputSize,
+                             UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+placeInService2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                              void *sessionContext, const UA_NodeId *methodId,
+                              void *methodContext, const UA_NodeId *objectId,
+                              void *objectContext, size_t inputSize,
+                              const UA_Variant *input, size_t outputSize,
+                              UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+removeFromServiceMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                                void *sessionContext, const UA_NodeId *methodId,
+                                void *methodContext, const UA_NodeId *objectId,
+                                void *objectContext, size_t inputSize,
+                                const UA_Variant *input, size_t outputSize,
+                                UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
+static UA_StatusCode
+removeFromService2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
+                                 void *sessionContext, const UA_NodeId *methodId,
+                                 void *methodContext, const UA_NodeId *objectId,
+                                 void *objectContext, size_t inputSize,
+                                 const UA_Variant *input, size_t outputSize,
+                                 UA_Variant *output)
+{
+    //TODO
+    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+}
+
 static UA_StatusCode UA_Server_setConditionNodesSetupFn (UA_Server *server, const UA_NodeId *typeId, UA_ConditionTypeSetupNodesFn fn)
 {
     const UA_Node *node = UA_NODESTORE_GET (server, typeId);
@@ -3558,6 +3089,24 @@ void initNs0ConditionAndAlarms (UA_Server *server)
             UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
                          "CreateEvent RefreshEnd failed. StatusCode %s", UA_StatusCode_name(retval));
         }
+    }
+
+    /* change Refresh Events IsAbstract = false
+     * so abstract Events : RefreshStart and RefreshEnd could be created */
+    UA_NodeId refreshStartEventTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_REFRESHSTARTEVENTTYPE);
+    UA_NodeId refreshEndEventTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_REFRESHENDEVENTTYPE);
+
+    UA_Boolean startAbstract = false;
+    UA_Boolean endAbstract = false;
+    readWithReadValue(server, &refreshStartEventTypeNodeId,
+                      UA_ATTRIBUTEID_ISABSTRACT, &startAbstract);
+    readWithReadValue(server, &refreshEndEventTypeNodeId,
+                      UA_ATTRIBUTEID_ISABSTRACT, &endAbstract);
+
+    UA_Boolean inner = (startAbstract == false && endAbstract == false);
+    if(inner) {
+        writeIsAbstractAttribute(server, refreshStartEventTypeNodeId, false);
+        writeIsAbstractAttribute(server, refreshEndEventTypeNodeId, false);
     }
 
     const struct UA_ConditionTypeMetaData conditions[] = {

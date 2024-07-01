@@ -1137,6 +1137,7 @@ UA_Server_setVariableNode_valueBackend(UA_Server *server,
                                        const UA_NodeId nodeId,
                                        const UA_ValueBackend valueBackend);
 
+
 /**
  * .. _local-monitoreditems:
  *
@@ -1759,6 +1760,8 @@ UA_Server_createCondition(UA_Server *server,
                           const UA_ConditionTypeFunctionsTable *fns,
                           const void *conditionSetupProperties,
                           UA_NodeId *outConditionId);
+
+UA_StatusCode UA_Server_createConditionBranch (UA_Server *server, const UA_NodeId *conditionId);
 
 typedef struct UA_AcknowledgeableConditionProperties
 {

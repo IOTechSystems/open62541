@@ -382,6 +382,10 @@ addRef(UA_Server *server, const UA_NodeId sourceId,
        UA_Boolean forward);
 
 UA_StatusCode
+copyAllChildren(UA_Server *server, UA_Session *session,
+                const UA_NodeId *source, const UA_NodeId *destination);
+
+UA_StatusCode
 deleteReference(UA_Server *server, const UA_NodeId sourceNodeId,
                 const UA_NodeId referenceTypeId, UA_Boolean isForward,
                 const UA_ExpandedNodeId targetNodeId,
