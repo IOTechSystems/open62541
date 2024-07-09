@@ -238,6 +238,10 @@ struct UA_ConditionSource {
 #define DISABLED_MESSAGE                                       "The alarm was disabled"
 #define COMMENT_MESSAGE                                        "A comment was added"
 #define RESET_MESSAGE                                          "The alarm was reset"
+#define SUPPRESSED_MESSAGE                                     "The alarm was suppressed"
+#define UNSUPPRESSED_MESSAGE                                   "The alarm was unsuppressed"
+#define PLACEDINSERVICE_MESSAGE                                "The alarm was placed in service"
+#define REMOVEDFROMSRVICE_MESSAGE                              "The alarm was removed from service"
 #define REALARM_MESSAGE                                        "ReAlarm time expired"
 #define SEVERITY_INCREASED_MESSAGE                             "The alarm severity has increased"
 #define SEVERITY_DECREASED_MESSAGE                             "The alarm severity has decreased"
@@ -272,6 +276,7 @@ static const UA_QualifiedName fieldConfirmedStateQN = STATIC_QN(CONDITION_FIELD_
 static const UA_QualifiedName fieldActiveStateQN = STATIC_QN(CONDITION_FIELD_ACTIVESTATE);
 static const UA_QualifiedName fieldLatchedStateQN = STATIC_QN(CONDITION_FIELD_LATCHEDSTATE);
 static const UA_QualifiedName fieldSuppressedStateQN = STATIC_QN(CONDITION_FIELD_SUPPRESSEDSTATE);
+static const UA_QualifiedName fieldSuppressedOrShelvedQN = STATIC_QN(CONDITION_FIELD_SUPPRESSEDORSHELVED);
 static const UA_QualifiedName fieldOutOfServiceStateQN = STATIC_QN(CONDITION_FIELD_OUTOFSERVICESTATE);
 static const UA_QualifiedName fieldMaxTimeShelvedQN = STATIC_QN(CONDITION_FIELD_MAXTIMESHELVED);
 static const UA_QualifiedName fieldOnDelayQN = STATIC_QN(CONDITION_FIELD_ONDELAY);
@@ -281,7 +286,6 @@ static const UA_QualifiedName fieldReAlarmRepeatCountQN = STATIC_QN(CONDITION_FI
 static const UA_QualifiedName fieldTimeQN = STATIC_QN(CONDITION_FIELD_TIME);
 static const UA_QualifiedName fieldCommentQN = STATIC_QN(CONDITION_FIELD_COMMENT);
 static const UA_QualifiedName fieldEventIdQN = STATIC_QN(CONDITION_FIELD_EVENTID);
-static const UA_QualifiedName fieldBranchIdQN = STATIC_QN(CONDITION_FIELD_BRANCHID);
 static const UA_QualifiedName fieldSourceNodeQN = STATIC_QN(CONDITION_FIELD_SOURCENODE);
 static const UA_QualifiedName fieldInputNodeQN = STATIC_QN(CONDITION_FIELD_INPUTNODE);
 static const UA_QualifiedName fieldLimitStateQN = STATIC_QN(CONDITION_FIELD_LIMITSTATE);
@@ -747,39 +751,61 @@ UA_ConditionBranch_State_Retain (const UA_ConditionBranch *branch, UA_Server *se
 }
 
 static inline UA_Boolean
-UA_ConditionBranch_State_Latched (const UA_ConditionBranch *branch, UA_Server *server)
+UA_ConditionBranch_State_Latched(const UA_ConditionBranch *branch, UA_Server *server)
 {
-    return branch->isMainBranch && isTwoStateVariableInTrueState (server, &branch->id, &fieldLatchedStateQN);
+    return branch->isMainBranch && isTwoStateVariableInTrueState(server, &branch->id, &fieldLatchedStateQN);
 }
 
 static inline UA_Boolean
-UA_ConditionBranch_State_Enabled (const UA_ConditionBranch *branch, UA_Server *server)
+UA_ConditionBranch_State_Enabled(const UA_ConditionBranch *branch, UA_Server *server)
 {
-    return isTwoStateVariableInTrueState (server, &branch->id, &fieldConfirmedStateQN);
+    return isTwoStateVariableInTrueState(server, &branch->id, &fieldConfirmedStateQN);
 }
 
 static inline UA_Boolean
-UA_ConditionBranch_State_Active (const UA_ConditionBranch *branch, UA_Server *server)
+UA_ConditionBranch_State_Active(const UA_ConditionBranch *branch, UA_Server *server)
 {
-    return isTwoStateVariableInTrueState (server, &branch->id, &fieldActiveStateQN);
+    return isTwoStateVariableInTrueState(server, &branch->id, &fieldActiveStateQN);
 }
 
 static inline UA_Boolean
-UA_ConditionBranch_State_Acked (const UA_ConditionBranch *branch, UA_Server *server)
+UA_ConditionBranch_State_Acked(const UA_ConditionBranch *branch, UA_Server *server)
 {
-    return isTwoStateVariableInTrueState (server, &branch->id, &fieldAckedStateQN);
+    return isTwoStateVariableInTrueState(server, &branch->id, &fieldAckedStateQN);
 }
 
 static inline UA_Boolean
-UA_ConditionBranch_State_Confirmed (const UA_ConditionBranch *branch, UA_Server *server)
+UA_ConditionBranch_State_Confirmed(const UA_ConditionBranch *branch, UA_Server *server)
 {
-    return isTwoStateVariableInTrueState (server, &branch->id, &fieldConfirmedStateQN);
+    return isTwoStateVariableInTrueState(server, &branch->id, &fieldConfirmedStateQN);
 }
 
 static inline UA_Boolean
-UA_ConditionBranch_State_isConfirmable (const UA_ConditionBranch *branch, UA_Server *server)
+UA_ConditionBranch_State_Suppressed(const UA_ConditionBranch *branch, UA_Server *server)
 {
-    return fieldExists (server, &branch->id, &fieldConfirmedStateQN);
+    return isTwoStateVariableInTrueState(server, &branch->id, &fieldSuppressedStateQN);
+}
+
+static inline UA_Boolean
+UA_ConditionBranch_State_OutOfService(const UA_ConditionBranch *branch, UA_Server *server)
+{
+    return isTwoStateVariableInTrueState(server, &branch->id, &fieldOutOfServiceStateQN);
+}
+
+static inline UA_Boolean
+UA_ConditionBranch_State_isConfirmable(const UA_ConditionBranch *branch, UA_Server *server)
+{
+    return fieldExists(server, &branch->id, &fieldConfirmedStateQN);
+}
+
+static inline UA_StatusCode
+UA_ConditionBranch_State_setSuppressedOrShelved (UA_ConditionBranch *branch, UA_Server *server, UA_Boolean suppressedOrShelved)
+{
+    UA_Variant value;
+    UA_Variant_setScalar(&value, &suppressedOrShelved, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    UA_StatusCode retval = setConditionField (server, branch->id, &value, fieldSuppressedOrShelvedQN);
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "set Condition SuppressedOrShelved failed",);
+    return retval;
 }
 
 static inline UA_StatusCode
@@ -925,7 +951,8 @@ static inline UA_StatusCode
 UA_Condition_State_setEnabledState(UA_Condition *condition, UA_Server *server, UA_Boolean enabled)
 {
     return setTwoStateVariable (
-        server, &condition->mainBranch->id, fieldEnabledStateQN, enabled, enabled ? ENABLED_TEXT : DISABLED_TEXT
+        server, &condition->mainBranch->id, fieldEnabledStateQN, enabled,
+        enabled ? ENABLED_TEXT : DISABLED_TEXT
     );
 }
 
@@ -933,7 +960,8 @@ static inline UA_StatusCode
 UA_Condition_State_setActiveState (UA_Condition *condition, UA_Server *server, UA_Boolean active)
 {
     return setTwoStateVariable (
-        server, &condition->mainBranch->id, fieldActiveStateQN, active, active ? ACTIVE_TEXT : INACTIVE_TEXT
+        server, &condition->mainBranch->id, fieldActiveStateQN, active,
+        active ? ACTIVE_TEXT : INACTIVE_TEXT
     );
 }
 
@@ -941,7 +969,37 @@ static inline UA_StatusCode
 UA_Condition_State_setLatchedState (UA_Condition *condition, UA_Server *server, UA_Boolean latched)
 {
     return setOptionalTwoStateVariable (
-        server, &condition->mainBranch->id, fieldLatchedStateQN, latched, latched ? LATCHED_TEXT: NOT_LATCHED_TEXT
+        server, &condition->mainBranch->id, fieldLatchedStateQN, latched,
+        latched ? LATCHED_TEXT: NOT_LATCHED_TEXT
+    );
+}
+
+static inline UA_StatusCode
+UA_Condition_State_updateSuppressedOrShelved (UA_Condition *condition, UA_Server *server)
+{
+    UA_Boolean suppressed = UA_ConditionBranch_State_Suppressed(condition->mainBranch, server);
+    //TODO
+    //UA_Boolean shelved = UA_ConditionBranch_State_Shelved(condition->mainBranch, server);
+    UA_Boolean outOfService = UA_ConditionBranch_State_OutOfService(condition->mainBranch, server);
+    UA_Boolean value = suppressed || outOfService;
+    return UA_ConditionBranch_State_setSuppressedOrShelved(condition->mainBranch, server, value);
+}
+
+static inline UA_StatusCode
+UA_Condition_State_setSuppressedState (UA_Condition *condition, UA_Server *server, UA_Boolean suppressed)
+{
+    return setOptionalTwoStateVariable (
+        server, &condition->mainBranch->id, fieldSuppressedStateQN, suppressed,
+        suppressed ? SUPPRESSED_TEXT : NOT_SUPPRESSED_TEXT
+    );
+}
+
+static inline UA_StatusCode
+UA_Condition_State_setOutOfServiceState (UA_Condition *condition, UA_Server *server, UA_Boolean outOfService)
+{
+    return setOptionalTwoStateVariable (
+        server, &condition->mainBranch->id, fieldSuppressedStateQN, outOfService,
+        outOfService ? OUT_OF_SERVICE_TEXT : IN_SERVICE_TEXT
     );
 }
 
@@ -1704,129 +1762,67 @@ UA_Server_setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *conditio
                                        "Adding HasComponent Reference to Reset2 Method failed",);
     }
 
-//    if (properties->suppressible)
-//    {
-//        retval = addConditionOptionalField(server, *condition, alarmConditionTypeId,
-//                                           fieldSuppressedStateQN, NULL);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SuppressedState optional Field failed",);
-//
-//        /* Set SuppressedState (Id = false by default) */
-//        text = UA_LOCALIZEDTEXT(LOCALE, NOT_SUPPRESSED_TEXT);
-//        UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-//        retval = setConditionField (server, *condition, &value, fieldSuppressedStateQN);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set SuppressedState Field failed",);
-//
-//        UA_Variant_setScalar(&value, &stateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
-//        retval = setConditionVariableFieldProperty(server, *condition, &value,
-//                                                   fieldSuppressedStateQN,
-//                                                   twoStateVariableIdQN);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set Suppressed/Id Field failed",);
-//
-//        /* add callback */
-//        UA_NodeId_clear(&twoStateVariableIdNodeId);
-//        retval = getConditionFieldPropertyNodeId(server, condition, &fieldSuppressedStateQN,
-//                                                 &twoStateVariableIdQN, &twoStateVariableIdNodeId);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Id Property of TwoStateVariable not found",);
-//
-//        callback.onWrite = afterWriteCallbackSuppressedStateChange;
-//        retval = setVariableNode_valueCallback(server, twoStateVariableIdNodeId, callback);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding Suppressed/Id callback failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        /* add reference from Condition to Suppress Method */
-//        UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
-//        UA_NodeId suppress = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS);
-//        retval = addRef(server, *condition, hasComponent, suppress, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to Suppress Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        /* add reference from Condition to Suppress2 Method */
-//        UA_NodeId suppress2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS2);
-//        retval = addRef(server, *condition, hasComponent, suppress2, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to Suppress2 Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        /* add reference from Condition to UnSuppress Method */
-//        UA_NodeId unsuppress = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS);
-//        retval = addRef(server, *condition, hasComponent, unsuppress, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to UnSuppress Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        /* add reference from Condition to UnSuppress2 Method */
-//        UA_NodeId unsuppress2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS2);
-//        retval = addRef(server, *condition, hasComponent, unsuppress2, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to UnSuppress2 Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//    }
+    if (properties->isSuppressible)
+    {
+        retval = addConditionOptionalField(server, *condition, alarmConditionTypeId,
+                                           fieldSuppressedStateQN, NULL);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SuppressedState optional Field failed",);
+        setTwoStateVariable(server, condition, fieldConfirmedStateQN, false, NOT_SUPPRESSED_TEXT);
 
-//    if (properties->serviceable)
-//    {
-//        retval = addConditionOptionalField(server, *condition, alarmConditionTypeId,
-//                                           fieldOutOfServiceStateQN, NULL);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OutOfServiceState optional Field failed",);
-//
-//        /* Set OutOfServiceState (Id = false by default) */
-//        text = UA_LOCALIZEDTEXT(LOCALE, IN_SERVICE_TEXT);
-//        UA_Variant_setScalar(&value, &text, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-//        retval = setConditionField (server, *condition, &value, fieldOutOfServiceStateQN);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set OutOfServiceState Field failed",);
-//
-//        UA_Variant_setScalar(&value, &stateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
-//        retval = setConditionVariableFieldProperty(server, *condition, &value,
-//                                                   fieldOutOfServiceStateQN,
-//                                                   twoStateVariableIdQN);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set OutOfServiceState/Id Field failed",);
-//
-//        /* add callback */
-//        UA_NodeId_clear(&twoStateVariableIdNodeId);
-//        retval = getConditionFieldPropertyNodeId(server, condition, &fieldOutOfServiceStateQN,
-//                                                 &twoStateVariableIdQN, &twoStateVariableIdNodeId);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Id Property of TwoStateVariable not found",);
-//
-//        callback.onWrite = afterWriteCallbackOutOfServiceStateChange;
-//        retval = setVariableNode_valueCallback(server, twoStateVariableIdNodeId, callback);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OutOfServiceState/Id callback failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        if (properties->maxTimeShelved)
-//        {
-//            retval = addConditionOptionalField (server, *condition, alarmConditionTypeId,
-//                                                fieldMaxTimeShelvedQN, NULL);
-//            CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding MaxTimeShelved optional Field failed",);
-//            UA_Variant_setScalar(&value, (void *) (uintptr_t) properties->maxTimeShelved, &UA_TYPES[UA_TYPES_DURATION]);
-//            retval = setConditionField (server, *condition, &value, fieldMaxTimeShelvedQN);
-//            CONDITION_ASSERT_RETURN_RETVAL(retval, "Set MaxTimeShelved Field failed",);
-//        }
-//
-//        UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
-//        UA_NodeId place = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE);
-//        retval = addRef(server, *condition, hasComponent, place, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to PlaceInService Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        UA_NodeId place2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE2);
-//        retval = addRef(server, *condition, hasComponent, place2, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to PlaceInService2 Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        UA_NodeId remove = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE);
-//        retval = addRef(server, *condition, hasComponent, remove, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to RemoveFromService Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//
-//        UA_NodeId remove2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE2);
-//        retval = addRef(server, *condition, hasComponent, remove2, true);
-//        CONDITION_ASSERT_RETURN_RETVAL(retval,
-//                                       "Adding HasComponent Reference to RemoveFromService2 Method failed",
-//                                       UA_NodeId_clear(&twoStateVariableIdNodeId););
-//    }
+        /* add reference from Condition to Suppress Method */
+        UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
+        UA_NodeId suppress = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS);
+        retval = addRef(server, *condition, hasComponent, suppress, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to Suppress Method failed",);
+
+        /* add reference from Condition to Suppress2 Method */
+        UA_NodeId suppress2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS2);
+        retval = addRef(server, *condition, hasComponent, suppress2, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to Suppress2 Method failed",);
+
+        /* add reference from Condition to UnSuppress Method */
+        UA_NodeId unsuppress = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS);
+        retval = addRef(server, *condition, hasComponent, unsuppress, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to UnSuppress Method failed",);
+
+        /* add reference from Condition to UnSuppress2 Method */
+        UA_NodeId unsuppress2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS2);
+        retval = addRef(server, *condition, hasComponent, unsuppress2, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to UnSuppress2 Method failed",);
+    }
+
+    if (properties->isServiceable)
+    {
+        retval = addConditionOptionalField(server, *condition, alarmConditionTypeId,
+                                           fieldOutOfServiceStateQN, NULL);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OutOfServiceState optional Field failed",);
+        setTwoStateVariable(server, condition, fieldOutOfServiceStateQN, false, IN_SERVICE_TEXT);
+
+        UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
+        UA_NodeId place = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE);
+        retval = addRef(server, *condition, hasComponent, place, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to PlaceInService Method failed",);
+
+        UA_NodeId place2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE2);
+        retval = addRef(server, *condition, hasComponent, place2, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to PlaceInService2 Method failed",);
+
+        UA_NodeId remove = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE);
+        retval = addRef(server, *condition, hasComponent, remove, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to RemoveFromService Method failed",);
+
+        UA_NodeId remove2 = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE2);
+        retval = addRef(server, *condition, hasComponent, remove2, true);
+        CONDITION_ASSERT_RETURN_RETVAL(retval,
+                                       "Adding HasComponent Reference to RemoveFromService2 Method failed",);
+    }
 
     if (properties->onDelay)
     {
@@ -2433,7 +2429,37 @@ UA_Server_conditionEnable (UA_Server *server, const UA_NodeId *conditionId, UA_B
 }
 
 static UA_StatusCode
-conditionBranchAcknowledge (UA_Server *server, UA_ConditionBranch *branch, UA_LocalizedText comment)
+conditionBranch_addComment(UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    if (!UA_ConditionBranch_State_Enabled(branch, server))
+    {
+        return UA_STATUSCODE_BADCONDITIONDISABLED;
+    }
+
+    /* Set Comment. Check whether comment is empty -> leave the last value as is*/
+    if(!UA_ByteString_equal(&comment->locale, &UA_STRING_NULL) &&
+       !UA_ByteString_equal(&comment->text, &UA_STRING_NULL)) {
+        retval = UA_ConditionBranch_State_setComment(branch, server, comment);
+        CONDITION_ASSERT_RETURN_RETVAL (retval, "Set Condition Comment failed",);
+    }
+    return retval;
+}
+
+static UA_StatusCode
+conditionBranch_addCommentAndEvent (UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment)
+{
+    UA_StatusCode ret = conditionBranch_addComment(server, branch, comment);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    UA_ConditionEventInfo info = {
+        .message = UA_LOCALIZEDTEXT(LOCALE, COMMENT_MESSAGE)
+    };
+    return UA_ConditionBranch_triggerEvent (branch, server, &info);
+}
+
+static UA_StatusCode
+conditionBranchAcknowledge (UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     if(UA_ConditionBranch_State_Acked(branch, server))
@@ -2451,18 +2477,18 @@ conditionBranchAcknowledge (UA_Server *server, UA_ConditionBranch *branch, UA_Lo
     UA_Boolean retain = latched || confirmable;
     UA_ConditionBranch_State_setRetain(branch, server, retain);
     if (confirmable) UA_ConditionBranch_State_setConfirmedState(branch, server, false);
-    UA_ConditionBranch_State_setComment(branch, server, &comment);
+    if (comment) conditionBranch_addComment (server, branch, comment);
     return UA_ConditionBranch_triggerNewBranchState(branch, server, &info);
 }
 
 static UA_StatusCode
-conditionBranchConfirm (UA_Server *server, UA_ConditionBranch *branch, UA_LocalizedText comment)
+conditionBranchConfirm (UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     if (UA_ConditionBranch_State_Confirmed(branch, server))
         return UA_STATUSCODE_BADCONDITIONBRANCHALREADYCONFIRMED;
     UA_ConditionBranch_State_setConfirmedState(branch, server, true);
-    UA_ConditionBranch_State_setComment(branch, server, &comment);
+    if (comment) conditionBranch_addComment (server, branch, comment);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_MESSAGE)
     };
@@ -2471,6 +2497,79 @@ conditionBranchConfirm (UA_Server *server, UA_ConditionBranch *branch, UA_Locali
         UA_ConditionBranch_State_setRetain(branch, server, false);
     return UA_ConditionBranch_triggerNewBranchState (branch, server, &info);
 }
+
+static UA_StatusCode
+condition_reset (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    /* For an Alarm Instance to be reset it must have been in Alarm, and returned to
+     * normal and have been acknowledged/confirmed prior to being reset. */
+    UA_Boolean validState = !UA_ConditionBranch_State_Active(condition->mainBranch, server) &&
+                            UA_ConditionBranch_State_Acked(condition->mainBranch, server) &&
+                            (!UA_ConditionBranch_State_isConfirmable(condition->mainBranch, server) || UA_ConditionBranch_State_Confirmed(condition->mainBranch, server));
+    if (!validState) return UA_STATUSCODE_BADINVALIDSTATE;
+    UA_Condition_State_setLatchedState(condition, server, false);
+    UA_ConditionBranch_State_setRetain(condition->mainBranch, server, false);
+    UA_ConditionEventInfo info = {
+        .message = UA_LOCALIZEDTEXT(LOCALE, RESET_MESSAGE)
+    };
+    if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
+    return UA_ConditionBranch_triggerEvent (condition->mainBranch, server, &info);
+}
+
+static UA_StatusCode
+condition_suppress (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_Condition_State_setSuppressedState (condition, server, true);
+    UA_ConditionEventInfo info = {
+        .message = UA_LOCALIZEDTEXT(LOCALE, SUPPRESSED_MESSAGE)
+    };
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
+
+    if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
+    return UA_ConditionBranch_triggerEvent (condition->mainBranch, server, &info);
+}
+
+static UA_StatusCode
+condition_unsuppress (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_Condition_State_setSuppressedState (condition, server, false);
+    UA_ConditionEventInfo info = {
+        .message = UA_LOCALIZEDTEXT(LOCALE, UNSUPPRESSED_MESSAGE)
+    };
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
+    if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
+    return UA_ConditionBranch_triggerEvent (condition->mainBranch, server, &info);
+}
+
+static UA_StatusCode
+condition_removeFromService (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_Condition_State_setOutOfServiceState (condition, server, true);
+    UA_ConditionEventInfo info = {
+        .message = UA_LOCALIZEDTEXT(LOCALE, REMOVEDFROMSRVICE_MESSAGE)
+    };
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
+    if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
+    return UA_ConditionBranch_triggerEvent (condition->mainBranch, server, &info);
+}
+
+static UA_StatusCode
+condition_placeInService (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_Condition_State_setOutOfServiceState (condition, server, false);
+    UA_ConditionEventInfo info = {
+        .message = UA_LOCALIZEDTEXT(LOCALE, PLACEDINSERVICE_MESSAGE)
+    };
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
+    if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
+    return UA_ConditionBranch_triggerEvent (condition->mainBranch, server, &info);
+}
+
 
 struct refreshIterCtx
 {
@@ -2540,50 +2639,6 @@ refreshLogic(UA_Server *server, const UA_NodeId *refreshStartNodId,
     return UA_MonitoredItem_addEvent(server, monitoredItem, refreshEndNodId);
 }
 
-static UA_StatusCode
-conditionBranch_addComment (UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment)
-{
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    if (!UA_ConditionBranch_State_Enabled(branch, server))
-    {
-        return UA_STATUSCODE_BADCONDITIONDISABLED;
-    }
-
-    UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, COMMENT_MESSAGE)
-    };
-
-    /* Set Comment. Check whether comment is empty -> leave the last value as is*/
-    UA_String nullString = UA_STRING_NULL;
-    if(!UA_ByteString_equal(&comment->locale, &nullString) &&
-       !UA_ByteString_equal(&comment->text, &nullString)) {
-        retval = UA_ConditionBranch_State_setComment(branch, server, comment);
-        CONDITION_ASSERT_RETURN_RETVAL (retval, "Set Condition Comment failed",);
-    }
-    /* Trigger event */
-    retval = UA_ConditionBranch_triggerEvent (branch, server, &info);
-    return retval;
-}
-
-static UA_StatusCode
-condition_reset (UA_Server *server, UA_Condition *condition)
-{
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    /* For an Alarm Instance to be reset it must have been in Alarm, and returned to
-     * normal and have been acknowledged/confirmed prior to being reset. */
-    UA_Boolean validState = !UA_ConditionBranch_State_Active(condition->mainBranch, server) &&
-                            UA_ConditionBranch_State_Acked(condition->mainBranch, server) &&
-                            (!UA_ConditionBranch_State_isConfirmable(condition->mainBranch, server) || UA_ConditionBranch_State_Confirmed(condition->mainBranch, server));
-    if (!validState) return UA_STATUSCODE_BADINVALIDSTATE;
-    UA_Condition_State_setLatchedState(condition, server, false);
-    UA_ConditionBranch_State_setRetain(condition->mainBranch, server, false);
-    UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, RESET_MESSAGE)
-    };
-    return UA_ConditionBranch_triggerEvent (condition->mainBranch, server, &info);
-}
-
 // -------- Method Node Callbacks
 
 static UA_StatusCode
@@ -2629,7 +2684,7 @@ addCommentMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
         CONDITION_LOG_ERROR(retval, "ConditionBranch based on EventId not found");
         goto done;
     }
-    retval = conditionBranch_addComment (server, branch, (UA_LocalizedText *)input[1].data);
+    retval = conditionBranch_addCommentAndEvent (server, branch, (UA_LocalizedText *)input[1].data);
 done:
     UA_UNLOCK(&server->serviceMutex);
     return retval;
@@ -2741,7 +2796,7 @@ acknowledgeMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
     }
 
     UA_LocalizedText *comment = (UA_LocalizedText *)input[1].data;
-    retval = conditionBranchAcknowledge(server, branch, *comment);
+    retval = conditionBranchAcknowledge(server, branch, comment);
 done:
     UA_UNLOCK(&server->serviceMutex);
     return retval;
@@ -2768,7 +2823,7 @@ confirmMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
         goto done;
     }
     UA_LocalizedText *comment = (UA_LocalizedText *)input[1].data;
-    retval = conditionBranchConfirm (server, branch, *comment);
+    retval = conditionBranchConfirm (server, branch, comment);
 done:
     UA_UNLOCK(&server->serviceMutex);
     return retval;
@@ -2790,7 +2845,7 @@ resetMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
         retval = UA_STATUSCODE_BADNODEIDINVALID;
         goto done;
     }
-    retval = condition_reset(server, condition);
+    retval = condition_reset(server, condition, NULL);
 done:
     UA_UNLOCK(&server->serviceMutex);
     return retval;
@@ -2804,8 +2859,18 @@ reset2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                      const UA_Variant *input, size_t outputSize,
                      UA_Variant *output)
 {
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    UA_LocalizedText *comment = (UA_LocalizedText *)input[0].data;
+    retval = condition_reset(server, condition, comment);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 static UA_StatusCode
@@ -2816,8 +2881,17 @@ suppressMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                        const UA_Variant *input, size_t outputSize,
                        UA_Variant *output)
 {
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    retval = condition_suppress(server, condition, NULL);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 static UA_StatusCode
@@ -2828,8 +2902,18 @@ suppress2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                         const UA_Variant *input, size_t outputSize,
                         UA_Variant *output)
 {
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    UA_LocalizedText *comment = (UA_LocalizedText *)input[0].data;
+    retval = condition_suppress(server, condition, comment);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 static UA_StatusCode
@@ -2840,8 +2924,17 @@ unsuppressMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                          const UA_Variant *input, size_t outputSize,
                          UA_Variant *output)
 {
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    retval = condition_unsuppress(server, condition, NULL);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 static UA_StatusCode
@@ -2852,8 +2945,18 @@ unsuppress2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                           const UA_Variant *input, size_t outputSize,
                           UA_Variant *output)
 {
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    UA_LocalizedText *comment = (UA_LocalizedText *)input[0].data;
+    retval = condition_unsuppress(server, condition, comment);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 static UA_StatusCode
@@ -2864,8 +2967,17 @@ placeInServiceMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                              const UA_Variant *input, size_t outputSize,
                              UA_Variant *output)
 {
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    retval = condition_placeInService(server, condition, NULL);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 static UA_StatusCode
@@ -2876,8 +2988,18 @@ placeInService2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                               const UA_Variant *input, size_t outputSize,
                               UA_Variant *output)
 {
-    //TODO
-    return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    UA_LocalizedText *comment = (UA_LocalizedText *)input[0].data;
+    retval = condition_placeInService(server, condition, comment);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 static UA_StatusCode
@@ -2888,7 +3010,17 @@ removeFromServiceMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                                 const UA_Variant *input, size_t outputSize,
                                 UA_Variant *output)
 {
-    //TODO
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    retval = condition_removeFromService(server, condition, NULL);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
     return UA_STATUSCODE_BADNOTIMPLEMENTED;
 }
 
@@ -2900,7 +3032,18 @@ removeFromService2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                                  const UA_Variant *input, size_t outputSize,
                                  UA_Variant *output)
 {
-    //TODO
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_Condition *condition = getCondition(server, objectId);
+    if (!condition) {
+        retval = UA_STATUSCODE_BADNODEIDINVALID;
+        goto done;
+    }
+    UA_LocalizedText *comment = (UA_LocalizedText *)input[0].data;
+    retval = condition_removeFromService(server, condition, comment);
+done:
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
     return UA_STATUSCODE_BADNOTIMPLEMENTED;
 }
 
@@ -3030,22 +3173,22 @@ exclusiveLimitAlarmUpdateLimitState (UA_Server *server, const UA_NodeId *conditi
 
     if (LIMITSTATE_CHECK(state, LIMITSTATE_HIGHHIGHSTATEBIT))
     {
-       currentStateValue = UA_LOCALIZEDTEXT(LOCALE, "HighHigh");
+       currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_HIGHHIGH_TEXT);
        currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_HIGHHIGH);
     }
     else if (LIMITSTATE_CHECK(state, LIMITSTATE_HIGHSTATEBIT))
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, "High");
+        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_HIGH_TEXT);
         currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_HIGH);
     }
     else if (LIMITSTATE_CHECK(state, LIMITSTATE_LOWSTATEBIT))
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, "Low");
+        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_LOW_TEXT);
         currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_LOW);
     }
     else if (LIMITSTATE_CHECK(state, LIMITSTATE_LOWLOWSTATEBIT))
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, "LowLow");
+        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_LOWLOW_TEXT);
         currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_LOWLOW);
     }
     else

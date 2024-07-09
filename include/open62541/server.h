@@ -1679,8 +1679,8 @@ typedef struct UA_AlarmConditionProperties
     UA_AcknowledgeableConditionProperties acknowledgeableConditionProperties;
     UA_NodeId inputNode;
     UA_Boolean isLatching;
-    //TODO UA_Boolean isSuppressible;
-    //TODO UA_Boolean isServiceable;
+    UA_Boolean isSuppressible;
+    UA_Boolean isServiceable;
     const UA_Duration *maxTimeShelved;
     const UA_Duration *onDelay;
     const UA_Duration *offDelay;
