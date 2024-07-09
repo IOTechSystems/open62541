@@ -19,6 +19,28 @@ typedef struct UA_ConditionEventInfo {
     UA_Boolean hasQuality;
 } UA_ConditionEventInfo;
 
+static UA_StatusCode UA_ConditionEventInfo_copy (const UA_ConditionEventInfo *src, UA_ConditionEventInfo *dest)
+{
+    *dest = *src;
+    UA_StatusCode ret = UA_LocalizedText_copy(&src->message, &dest->message);
+    return ret;
+}
+
+static UA_ConditionEventInfo *UA_ConditionEventInfo_new (void)
+{
+    UA_ConditionEventInfo *p = (UA_ConditionEventInfo*) UA_malloc(sizeof(*p));
+    if (!p) return NULL;
+    memset(p, 0, sizeof(*p));
+    return p;
+}
+
+static void UA_ConditionEventInfo_delete (UA_ConditionEventInfo *p)
+{
+    if (!p) return;
+    UA_LocalizedText_clear(&p->message);
+    UA_free (p);
+}
+
 struct UA_ConditionBranch {
     ZIP_ENTRY(UA_ConditionBranch) zipEntry;
     //Each condition has a list of branches
@@ -42,6 +64,7 @@ struct UA_Condition {
     const UA_ConditionTypeFunctionsTable *fns;
     UA_UInt64 onDelayCallbackId;
     UA_UInt64 offDelayCallbackId;
+    UA_ConditionEventInfo *_delayCallbackInfo;
     UA_UInt64 reAlarmCallbackId;
     UA_Int16 reAlarmCount;
 };
@@ -1054,9 +1077,10 @@ static void removeCondition (UA_Server *server, UA_Condition *condition)
     }
 
     ZIP_REMOVE(UA_ConditionTree, &server->conditions ,condition);
-    if (condition->onDelayCallbackId) removeCallback (server, condition->onDelayCallbackId, UA_free);
-    if (condition->offDelayCallbackId) removeCallback (server, condition->offDelayCallbackId, UA_free);
-    if (condition->reAlarmCallbackId) removeCallback (server, condition->reAlarmCallbackId, NULL);
+    if (condition->onDelayCallbackId) removeCallback (server, condition->onDelayCallbackId);
+    if (condition->offDelayCallbackId) removeCallback (server, condition->offDelayCallbackId);
+    UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+    if (condition->reAlarmCallbackId) removeCallback (server, condition->reAlarmCallbackId);
     UA_Condition_delete (condition);
 }
 
@@ -2030,12 +2054,6 @@ UA_ConditionBranch_triggerNewBranchState (UA_ConditionBranch *branch, UA_Server 
     return status;
 }
 
-struct AlarmEventCtx
-{
-    UA_Condition * condition;
-    UA_ConditionEventInfo info;
-};
-
 static UA_StatusCode
 addTimedCallback(UA_Server *server, UA_ServerCallback callback,
                            void *data, UA_DateTime date, UA_UInt64 *callbackId) {
@@ -2098,10 +2116,12 @@ static void reAlarmCallback (UA_Server *server, void *data)
 
 static void onDelayExpiredCallback (UA_Server *server, void *data)
 {
-    struct AlarmEventCtx *ctx = (struct AlarmEventCtx*) data;
+    UA_Condition *condition = (UA_Condition *) data;
     UA_LOCK(&server->serviceMutex);
-    ctx->condition->onDelayCallbackId = 0;
-    alarmActivate (server, ctx->condition, &ctx->info);
+    condition->onDelayCallbackId = 0;
+    alarmActivate(server, condition, condition->_delayCallbackInfo);
+    UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+    condition->_delayCallbackInfo = NULL;
     UA_UNLOCK(&server->serviceMutex);
 }
 
@@ -2119,8 +2139,10 @@ triggerAlarmEventActive (UA_Server *server, UA_Condition *condition, const UA_Co
         * it returns to active */
         if (condition->offDelayCallbackId)
         {
-            removeCallback (server, condition->offDelayCallbackId, UA_free);
+            removeCallback (server, condition->offDelayCallbackId);
             condition->offDelayCallbackId = 0;
+            UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+            condition->_delayCallbackInfo = NULL;
             return UA_STATUSCODE_GOOD;
         }
         /* Create event for the update in state */
@@ -2140,19 +2162,31 @@ triggerAlarmEventActive (UA_Server *server, UA_Condition *condition, const UA_Co
             return retval;
         }
 
-        struct AlarmEventCtx *ctx = (struct AlarmEventCtx *) UA_malloc (sizeof(*ctx));
-        ctx->condition = condition;
-        ctx->info = *info;
+        if (info)
+        {
+            condition->_delayCallbackInfo = UA_ConditionEventInfo_new();
+            if (!condition->_delayCallbackInfo) return UA_STATUSCODE_BADOUTOFMEMORY;
+            retval = UA_ConditionEventInfo_copy(info, condition->_delayCallbackInfo);
+        }
+
+        if (retval != UA_STATUSCODE_GOOD)
+        {
+            UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+            condition->_delayCallbackInfo = NULL;
+            return retval;
+        }
+
         retval = addTimedCallback (
             server,
             onDelayExpiredCallback,
-            ctx,
+            condition,
             UA_DateTime_nowMonotonic() + ((UA_DateTime) onDelay * UA_DATETIME_MSEC),
             &condition->onDelayCallbackId
         );
         if (retval != UA_STATUSCODE_GOOD)
         {
-            UA_free(ctx);
+            UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+            condition->_delayCallbackInfo = NULL;
             CONDITION_LOG_ERROR (retval, "Could not add timedCallback for onDelay");
             return UA_STATUSCODE_BADINTERNALERROR;
         }
@@ -2166,7 +2200,7 @@ triggerAlarmEventActive (UA_Server *server, UA_Condition *condition, const UA_Co
 static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
                             const UA_ConditionEventInfo *info)
 {
-    removeCallback(server, condition->reAlarmCallbackId, NULL);
+    removeCallback(server, condition->reAlarmCallbackId);
     condition->reAlarmCount = 0;
     //condition is in a state where we need to branch -> previous state needed acknowledgement/confirmed
     UA_Boolean conditionRequiresAction = UA_ConditionBranch_State_Acked(condition->mainBranch, server) ||
@@ -2188,10 +2222,12 @@ static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
 
 static void offDelayExpiredCallback (UA_Server *server, void *data)
 {
-    struct AlarmEventCtx *ctx = (struct AlarmEventCtx*) data;
+    UA_Condition*condition = (UA_Condition*) data;
     UA_LOCK(&server->serviceMutex);
-    ctx->condition->offDelayCallbackId = 0;
-    alarmSetInactive (server, ctx->condition, &ctx->info);
+    condition->offDelayCallbackId = 0;
+    alarmSetInactive(server, condition, condition->_delayCallbackInfo);
+    UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+    condition->_delayCallbackInfo = NULL;
     UA_UNLOCK(&server->serviceMutex);
 }
 
@@ -2204,8 +2240,10 @@ triggerAlarmEventInactive (UA_Server *server, UA_Condition *condition, const UA_
     /* Alarm should stay deactivated and not regenerate - cancel any onDelay to active */
     if (condition->onDelayCallbackId)
     {
-        removeCallback(server, condition->onDelayCallbackId, UA_free);
+        removeCallback(server, condition->onDelayCallbackId);
         condition->onDelayCallbackId = 0;
+        UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+        condition->_delayCallbackInfo = NULL;
         return UA_STATUSCODE_GOOD;
     }
     //off delay already in progress
@@ -2222,6 +2260,19 @@ triggerAlarmEventInactive (UA_Server *server, UA_Condition *condition, const UA_
             return retval;
         }
 
+        if (info)
+        {
+            condition->_delayCallbackInfo = UA_ConditionEventInfo_new();
+            if (!condition->_delayCallbackInfo) return UA_STATUSCODE_BADOUTOFMEMORY;
+            retval = UA_ConditionEventInfo_copy(info, condition->_delayCallbackInfo);
+        }
+
+        if (retval != UA_STATUSCODE_GOOD)
+        {
+            UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+            condition->_delayCallbackInfo = NULL;
+            return retval;
+        }
         retval = addTimedCallback (
             server,
             offDelayExpiredCallback,
@@ -2231,6 +2282,8 @@ triggerAlarmEventInactive (UA_Server *server, UA_Condition *condition, const UA_
         );
         if (retval != UA_STATUSCODE_GOOD)
         {
+            condition->_delayCallbackInfo = NULL;
+            UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
             CONDITION_LOG_ERROR (retval, "Could not add timedCallback for onDelay");
             return UA_STATUSCODE_BADINTERNALERROR;
         }
