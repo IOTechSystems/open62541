@@ -1681,6 +1681,7 @@ typedef struct UA_AlarmConditionProperties
     UA_Boolean isLatching;
     UA_Boolean isSuppressible;
     UA_Boolean isServiceable;
+    UA_Boolean isShelvable;
     const UA_Duration *maxTimeShelved;
     const UA_Duration *onDelay;
     const UA_Duration *offDelay;
