@@ -105,18 +105,19 @@ addExclusiveLimitAlarmCondition (UA_Server *server) {
 
     UA_Duration test = 20.0f;
     UA_Duration reAlarmTime = 1000;
-    UA_Int16 repeatCount = 10;
+    UA_Int16 repeatCount = 1000;
 
     UA_AlarmConditionProperties baseP = {
         .inputNode = inputNode,
         .isLatching = true,
+        .isShelvable = true
         //.suppressible = true,
         //.serviceable = true,
         //.maxTimeShelved = &test,
         //.onDelay = &test,
         //.offDelay = &test,
-        .reAlarmRepeatCount = &repeatCount,
-        .reAlarmTime = &reAlarmTime
+        //.reAlarmRepeatCount = &repeatCount,
+        //.reAlarmTime = &reAlarmTime
 
     };
 
