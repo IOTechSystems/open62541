@@ -1403,8 +1403,7 @@ conditionBranchConfirm (UA_Server *server, UA_ConditionBranch *branch, const UA_
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_MESSAGE)
     };
-    //set retain to false if the branch is not latched
-    if (UA_Condition_State_Latched(branch->condition, server))
+    if (!UA_Condition_State_Latched(branch->condition, server))
         UA_ConditionBranch_State_setRetain(branch, server, false);
     return UA_ConditionBranch_triggerNewBranchState (branch, server, &info);
 }
@@ -2283,7 +2282,7 @@ static void onDelayExpiredCallback (UA_Server *server, void *data)
 }
 
 static UA_StatusCode
-triggerAlarmEventActive (UA_Server *server, UA_Condition *condition, const UA_ConditionEventInfo *info)
+alarmEnteringActive (UA_Server *server, UA_Condition *condition, const UA_ConditionEventInfo *info)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
@@ -2395,7 +2394,7 @@ static void offDelayExpiredCallback (UA_Server *server, void *data)
 }
 
 static UA_StatusCode
-triggerAlarmEventInactive (UA_Server *server, UA_Condition *condition, const UA_ConditionEventInfo *info)
+alarmEnteringInactive (UA_Server *server, UA_Condition *condition, const UA_ConditionEventInfo *info)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
@@ -2458,13 +2457,13 @@ triggerAlarmEventInactive (UA_Server *server, UA_Condition *condition, const UA_
 }
 
 static UA_StatusCode
-condition_triggerAlarmEvent (UA_Server *server, UA_Condition *condition,
+condition_updateAlarmActive (UA_Server *server, UA_Condition *condition,
                              const UA_ConditionEventInfo *info, UA_Boolean isActive)
 {
     UA_LOCK_ASSERT(&server->serviceMutex,1);
     if (!condition) return UA_STATUSCODE_BADNODEIDINVALID;
-    return isActive ? triggerAlarmEventActive(server, condition, info) :
-           triggerAlarmEventInactive(server, condition, info);
+    return isActive ? alarmEnteringActive (server, condition, info) :
+           alarmEnteringInactive( server, condition, info);
 }
 
 UA_StatusCode
@@ -3835,7 +3834,7 @@ static UA_StatusCode exclusiveLimitAlarmInputUpdated (
     {
         exclusiveLimitAlarmCalculateEventInfo (server, &condition->mainBranch->id, currentState, limitValue, &info);
         exclusiveLimitAlarmUpdateLimitState (server, &condition->mainBranch->id, currentState);
-        condition_triggerAlarmEvent (server, condition, &info, isActive);
+        condition_updateAlarmActive (server, condition, &info, isActive);
     }
 
     return retval;
