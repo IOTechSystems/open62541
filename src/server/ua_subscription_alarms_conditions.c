@@ -2209,7 +2209,6 @@ setConditionVariableFieldProperty(UA_Server *server, const UA_NodeId condition,
     return retval;
 }
 
-
 // -------- Interact with condition
 
 static void reAlarmCallback (UA_Server *server, void *data);
