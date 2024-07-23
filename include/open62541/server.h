@@ -1687,6 +1687,15 @@ UA_StatusCode UA_EXPORT
 UA_Server_Condition_setOnAckedCallback (UA_Server *server, UA_NodeId conditionId, UA_ConditionCallbackFn callbackFn);
 
 UA_StatusCode UA_EXPORT
+UA_Server_setConditionContext(UA_Server *server, UA_NodeId conditionId, void *conditionContext);
+
+UA_StatusCode UA_EXPORT
+UA_Server_getConditionContext(UA_Server *server, UA_NodeId conditionId, void **conditionContext);
+
+UA_StatusCode
+UA_Server_conditionGetInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);
+
+UA_StatusCode UA_EXPORT
 UA_Server_Condition_setOnConfirmedCallback (UA_Server *server, UA_NodeId conditionId, UA_ConditionCallbackFn callbackFn);
 
 UA_StatusCode UA_EXPORT

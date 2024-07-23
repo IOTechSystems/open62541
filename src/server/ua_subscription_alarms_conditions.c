@@ -431,7 +431,6 @@ static UA_StatusCode
 getNodeIdValueOfNodeField(UA_Server *server, const UA_NodeId *nodeId,
                           UA_QualifiedName fieldName, UA_NodeId *outNodeId);
 
-
 static UA_NodeId getTypeDefinitionId(UA_Server *server, const UA_NodeId *targetId)
 {
     UA_BrowseDescription bd;
