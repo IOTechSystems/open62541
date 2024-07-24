@@ -1707,10 +1707,6 @@ UA_StatusCode
 UA_Server_Condition_updateActive(UA_Server *server, UA_NodeId conditionId,
                                       const UA_ConditionEventInfo *info, UA_Boolean isActive);
 
-/* Retain property of a condition is server defined */
-UA_StatusCode
-UA_Server_Condition_setRetain (UA_Server *server, UA_NodeId conditionId, UA_Boolean retain);
-
 /*
  * Set the condition confirmed state where a confirmation is required. The logic for setting this is Server specific, so
  * the only time a conditions ConfirmedState will be set to false is when a server implementation uses this function .
