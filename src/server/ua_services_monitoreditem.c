@@ -583,19 +583,25 @@ UA_Server_createDataChangeMonitoredItem(UA_Server *server,
 }
 
 UA_MonitoredItemCreateResult
-UA_Server_createEventNotificationMonitoredItem(UA_Server *server,
+UA_Server_createEventMonitoredItem(UA_Server *server,
                                         UA_TimestampsToReturn timestampsToReturn,
                                         const UA_MonitoredItemCreateRequest item,
                                         void *monitoredItemContext,
                                         UA_Server_EventNotificationCallback callback) {
+    UA_MonitoredItemCreateResult result;
+    UA_MonitoredItemCreateResult_init(&result);
+    if (item.itemToMonitor.attributeId != UA_ATTRIBUTEID_EVENTNOTIFIER)
+    {
+        result.statusCode = UA_STATUSCODE_BADINTERNALERROR;
+        return result;
+    }
+
     struct createMonContext cmc;
     cmc.sub = NULL;
     cmc.context = monitoredItemContext;
     cmc.callback.eventCallback = callback;
     cmc.timestampsToReturn = timestampsToReturn;
 
-    UA_MonitoredItemCreateResult result;
-    UA_MonitoredItemCreateResult_init(&result);
     UA_LOCK(&server->serviceMutex);
     Operation_CreateMonitoredItem(server, &server->adminSession, &cmc, &item, &result);
     UA_UNLOCK(&server->serviceMutex);

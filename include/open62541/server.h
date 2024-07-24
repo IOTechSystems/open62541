@@ -1182,17 +1182,12 @@ UA_Server_createDataChangeMonitoredItem(UA_Server *server,
           UA_Server_DataChangeNotificationCallback callback);
 
 UA_MonitoredItemCreateResult UA_EXPORT UA_THREADSAFE
-UA_Server_createEventNotificationMonitoredItem(UA_Server *server,
+UA_Server_createEventMonitoredItem(UA_Server *server,
           UA_TimestampsToReturn timestampsToReturn,
           const UA_MonitoredItemCreateRequest item,
           void *monitoredItemContext,
           UA_Server_EventNotificationCallback callback);
 
-/* UA_MonitoredItemCreateResult UA_EXPORT */
-/* UA_Server_createEventMonitoredItem(UA_Server *server, */
-/*           UA_TimestampsToReturn timestampsToReturn, */
-/*           const UA_MonitoredItemCreateRequest item, void *context, */
-/*           UA_Server_EventNotificationCallback callback); */
 
 UA_StatusCode UA_EXPORT UA_THREADSAFE
 UA_Server_deleteMonitoredItem(UA_Server *server, UA_UInt32 monitoredItemId);
@@ -1618,6 +1613,19 @@ UA_Server_triggerEvent(UA_Server *server, const UA_NodeId eventNodeId,
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
+typedef UA_StatusCode (*UA_ConditionCallbackFn)(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    void *context
+);
+
+typedef struct UA_ConditionImplCallbacks {
+    UA_ConditionCallbackFn onAcked;
+    UA_ConditionCallbackFn onConfirmed;
+    UA_ConditionCallbackFn onActive;
+    UA_ConditionCallbackFn onInactive;
+} UA_ConditionImplCallbacks;
+
 typedef struct UA_ConditionEventInfo {
     UA_LocalizedText message;
     UA_UInt16 severity;
@@ -1677,26 +1685,8 @@ __UA_Server_createCondition(UA_Server *server,
                           UA_NodeId *outConditionId);
 
 
-typedef void (*UA_ConditionCallbackFn)(
-    UA_Server *server,
-    const UA_NodeId *conditionId,
-    void *context
-);
-
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_setOnAckedCallback (UA_Server *server, UA_NodeId conditionId, UA_ConditionCallbackFn callbackFn);
-
-UA_StatusCode UA_EXPORT
-UA_Server_setConditionContext(UA_Server *server, UA_NodeId conditionId, void *conditionContext);
-
-UA_StatusCode UA_EXPORT
-UA_Server_getConditionContext(UA_Server *server, UA_NodeId conditionId, void **conditionContext);
-
-UA_StatusCode
-UA_Server_conditionGetInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);
-
-UA_StatusCode UA_EXPORT
-UA_Server_Condition_setOnConfirmedCallback (UA_Server *server, UA_NodeId conditionId, UA_ConditionCallbackFn callbackFn);
+UA_Server_Condition_setImplCallbacks (UA_Server *server, UA_NodeId conditionId, const UA_ConditionImplCallbacks *callback);
 
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_setContext(UA_Server *server, UA_NodeId conditionId, void *conditionContext);
@@ -1717,12 +1707,20 @@ UA_StatusCode
 UA_Server_Condition_updateActive(UA_Server *server, UA_NodeId conditionId,
                                       const UA_ConditionEventInfo *info, UA_Boolean isActive);
 
+/* Retain property of a condition is server defined */
+UA_StatusCode
+UA_Server_Condition_setRetain (UA_Server *server, UA_NodeId conditionId, UA_Boolean retain);
+
 /*
  * Set the condition confirmed state where a confirmation is required. The logic for setting this is Server specific, so
  * the only time a conditions ConfirmedState will be set to false is when a server implementation uses this function .
  */
 UA_StatusCode
 UA_Server_Condition_setConfirmRequired(UA_Server *server, UA_NodeId conditionId);
+
+
+UA_StatusCode
+UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditionId);
 
 UA_StatusCode
 UA_Server_Condition_getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);

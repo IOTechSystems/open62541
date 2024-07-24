@@ -392,7 +392,7 @@ addRef(UA_Server *server, const UA_NodeId sourceId,
 
 UA_StatusCode
 copyAllChildren(UA_Server *server, UA_Session *session,
-                const UA_NodeId *source, const UA_NodeId *destination);
+                const UA_NodeId *source, const UA_NodeId *destination, UA_Boolean copyOptional);
 
 UA_StatusCode
 deleteReference(UA_Server *server, const UA_NodeId sourceNodeId,
