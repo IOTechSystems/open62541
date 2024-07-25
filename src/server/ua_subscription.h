@@ -167,6 +167,9 @@ struct UA_MonitoredItem {
                        * (maximum) queueSize in the parameters. */
     size_t eventOverflows; /* Separate counter for the queue. Can at most double
                             * the queue size */
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+    UA_Boolean conditionStateChangePassedLastFilter;
+#endif
 };
 
 void UA_MonitoredItem_init(UA_MonitoredItem *mon);

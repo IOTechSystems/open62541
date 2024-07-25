@@ -182,20 +182,24 @@ UA_MonitoredItem_addEvent(UA_Server *server, UA_MonitoredItem *mon,
     UA_EventFilter *eventFilter = (UA_EventFilter*)
         mon->parameters.filter.content.decoded.data;
 
-
     UA_EventFieldList efl;
     UA_EventFieldList_init(&efl);
-    UA_EventFilterResult res; /* FilterResult contains only statuscodes. Ignored
-                               * outside the initial setup/validation. */
+    UA_EventFilterResult res;
     UA_EventFilterResult_init(&res);
+
+    UA_Boolean *passLastFilterPtr = NULL;
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+    passLastFilterPtr = &mon->conditionStateChangePassedLastFilter;
+#endif
+
     UA_StatusCode retval = filterEvent(
         server,
         mon->subscription ? mon->subscription->session : &server->adminSession,
         event, eventFilter,
         &efl,
-        &res
+        &res,
+        passLastFilterPtr
     );
-
     UA_EventFilterResult_clear(&res);
     if (retval != UA_STATUSCODE_GOOD) return retval;
 

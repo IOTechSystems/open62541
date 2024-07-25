@@ -8,6 +8,7 @@
  *    Copyright 2022 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  */
 
+#include <stdio.h>
 #include "ua_server_internal.h"
 #include "ua_subscription.h"
 
@@ -1020,7 +1021,7 @@ isValidEvent(UA_Server *server, const UA_NodeId *validEventParent,
 UA_StatusCode
 filterEvent(UA_Server *server, UA_Session *session,
             const UA_NodeId *eventNode, UA_EventFilter *filter,
-            UA_EventFieldList *efl, UA_EventFilterResult *result) {
+            UA_EventFieldList *efl, UA_EventFilterResult *result, UA_Boolean *passLastFilter) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     if(filter->selectClausesSize == 0)
@@ -1071,15 +1072,47 @@ filterEvent(UA_Server *server, UA_Session *session,
         }
     }
 
-    /* Evaluate the where filter. Do we event need to consider the event? */
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+    UA_Boolean overwriteRetain = false;
+#endif
+
+    /* Evaluate the where filter. Do we even need to consider the event? */
     UA_StatusCode res = evaluateWhereClause(server, session, eventNode,
                                             &filter->whereClause,
                                             &result->whereClauseResult);
     if(res != UA_STATUSCODE_GOOD){
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+        if (res != UA_STATUSCODE_BADNOMATCH || !UA_isEventConditionOrBranch(server, eventNode))
+        {
+            UA_EventFieldList_clear(efl);
+            UA_EventFilterResult_clear(result);
+            return res;
+        }
+        UA_Boolean passedLastFilter = passLastFilter ? (*passLastFilter) : false;
+        fprintf (stderr, "failed where: get passedlast filter %s %s\n", UA_StatusCode_name(res), passedLastFilter ? "true" : "false");
+        if (!passedLastFilter)
+        {
+            /*Not a condition, not supported or previous state did not pass filter - so dont event*/
+            UA_EventFieldList_clear(efl);
+            UA_EventFilterResult_clear(result);
+            return UA_STATUSCODE_BADNOMATCH;
+        }
+        if (passLastFilter) *passLastFilter = false;
+        /*Previous state passed filter so overwrite retain*/
+        overwriteRetain = true;
+#else
         UA_EventFieldList_clear(efl);
         UA_EventFilterResult_clear(result);
         return res;
+#endif
     }
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+    else
+    {
+        fprintf (stderr, "failed where: set passedlast filter true\n");
+        if (passLastFilter && UA_isEventConditionOrBranch(server, eventNode)) *passLastFilter = true;
+    }
+#endif
 
     /* Apply the select filter */
     UA_NodeId baseEventTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_BASEEVENTTYPE);
@@ -1095,12 +1128,27 @@ filterEvent(UA_Server *server, UA_Session *session,
                    UA_STATUSCODE_BADTYPEDEFINITIONINVALID; */
             continue;
         }
-
         /* Lookup the field. The overall filter can succeed even if a single
          * select-field cannot be resolved. */
         result->selectClauseResults[i] =
             resolveSimpleAttributeOperand(server, session, eventNode,
                                           sc, &efl->eventFields[i]);
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+        if (overwriteRetain)
+        {
+            UA_QualifiedName retainQN = UA_QUALIFIEDNAME(0, "Retain");
+            UA_NodeId conditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
+            UA_Boolean isRetainOperand = sc->attributeId == UA_ATTRIBUTEID_VALUE &&
+                                         sc->browsePathSize == 1 && UA_QualifiedName_equal(&retainQN, sc->browsePath) &&
+                                         UA_NodeId_equal(&sc->typeDefinitionId, &conditionTypeId);
+            if (isRetainOperand)
+            {
+                UA_Boolean retain = false;
+                UA_Variant_clear(&efl->eventFields[i]);
+                result->selectClauseResults[i] = UA_Variant_setScalarCopy(&efl->eventFields[i], &retain, &UA_TYPES[UA_TYPES_BOOLEAN]);
+            }
+        }
+#endif
     }
 
     return UA_STATUSCODE_GOOD;

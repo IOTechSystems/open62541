@@ -341,14 +341,12 @@ UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId);
 
+UA_Boolean
+UA_isEventConditionOrBranch (UA_Server *server, const UA_NodeId *id);
+
 void
 UA_ConditionList_delete(UA_Server *server);
 
-UA_Boolean
-isConditionOrBranch(UA_Server *server,
-                    const UA_NodeId *condition,
-                    const UA_NodeId *conditionSource,
-                    UA_Boolean *isCallerAC);
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
@@ -505,7 +503,7 @@ triggerEvent(UA_Server *server, const UA_NodeId eventNodeId,
 UA_StatusCode
 filterEvent(UA_Server *server, UA_Session *session,
             const UA_NodeId *eventNode, UA_EventFilter *filter,
-            UA_EventFieldList *efl, UA_EventFilterResult *result);
+            UA_EventFieldList *efl, UA_EventFilterResult *result, UA_Boolean *previousFilterPassed);
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_EVENTS */
 
