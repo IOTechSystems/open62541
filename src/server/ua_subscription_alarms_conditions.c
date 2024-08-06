@@ -1468,6 +1468,8 @@ conditionBranchConfirm(UA_Server *server, UA_ConditionBranch *branch, const UA_L
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     UA_ConditionBranch_State_setConfirmedState(branch, server, true);
+    UA_ConditionBranch_evaluateRetainState(branch, server);
+
     if (comment) conditionBranch_addComment (server, branch, comment);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_MESSAGE)
@@ -1517,6 +1519,21 @@ UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditio
     }
     UA_StatusCode ret = UA_STATUSCODE_GOOD;
     ret = UA_ConditionBranch_State_setAckedState(branch, server, false);
+    UA_UNLOCK(&server->serviceMutex);
+    return ret;
+}
+
+UA_StatusCode
+UA_Server_Condition_setRetain (UA_Server *server, UA_NodeId conditionId, UA_Boolean retain)
+{
+    UA_LOCK (&server->serviceMutex);
+    UA_ConditionBranch *branch = getConditionBranch(server, &conditionId);
+    if (!branch)
+    {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADNODEIDUNKNOWN;
+    }
+    UA_StatusCode ret = UA_ConditionBranch_State_setRetain(branch, server, retain);
     UA_UNLOCK(&server->serviceMutex);
     return ret;
 }

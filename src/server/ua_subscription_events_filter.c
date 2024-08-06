@@ -8,7 +8,6 @@
  *    Copyright 2022 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  */
 
-#include <stdio.h>
 #include "ua_server_internal.h"
 #include "ua_subscription.h"
 
@@ -1089,7 +1088,6 @@ filterEvent(UA_Server *server, UA_Session *session,
             return res;
         }
         UA_Boolean passedLastFilter = passLastFilter ? (*passLastFilter) : false;
-        fprintf (stderr, "failed where: get passedlast filter %s %s\n", UA_StatusCode_name(res), passedLastFilter ? "true" : "false");
         if (!passedLastFilter)
         {
             /*Not a condition, not supported or previous state did not pass filter - so dont event*/
@@ -1109,7 +1107,6 @@ filterEvent(UA_Server *server, UA_Session *session,
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     else
     {
-        fprintf (stderr, "failed where: set passedlast filter true\n");
         if (passLastFilter && UA_isEventConditionOrBranch(server, eventNode)) *passLastFilter = true;
     }
 #endif

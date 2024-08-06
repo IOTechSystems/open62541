@@ -1726,7 +1726,6 @@ UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, con
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_setConfirmRequired(UA_Server *server, UA_NodeId conditionId);
 
-
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditionId);
 
@@ -1736,7 +1735,6 @@ UA_Server_Condition_notifyStateChange(UA_Server *server, UA_NodeId condition, co
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_updateActive(UA_Server *server, UA_NodeId conditionId,
                                  const UA_ConditionEventInfo *info, UA_Boolean isActive);
-
 
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);
