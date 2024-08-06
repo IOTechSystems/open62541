@@ -2499,6 +2499,7 @@ static void UA_Condition_createReAlarmCallback (UA_Condition *condition, UA_Serv
 
 static void alarmTryBranch (UA_Server *server, UA_Condition *condition)
 {
+    if (!condition->canBranch) return;
     /* if condition requires acknowledgement branch*/
     if (!condition->canBranch) return;
     if (!UA_ConditionBranch_State_Acked(condition->mainBranch, server) && UA_ConditionBranch_State_Retain(condition->mainBranch, server))

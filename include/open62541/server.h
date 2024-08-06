@@ -1739,10 +1739,9 @@ UA_Server_Condition_updateActive(UA_Server *server, UA_NodeId conditionId,
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);
 
-
 typedef UA_StatusCode (*UA_ConditionBranchIterCb)(
     UA_Server *server,
-    const UA_NodeId *conditionId,
+    const UA_NodeId *conditionBranchId,
     void *conditionContext,
     void *iterCtx
 );

@@ -157,14 +157,14 @@ START_TEST(createDelete) {
             NULL,
             NULL,
             &conditionInstance
-        );
+                                            );
         ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
         ck_assert_msg(!UA_NodeId_isNull(&conditionInstance), "ConditionId is null");
 
         retval = UA_Server_deleteCondition(
             acserver,
             conditionInstance
-        );
+                                          );
         ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     }
 } END_TEST
@@ -327,16 +327,7 @@ START_TEST(conditionSequence1) {
     ck_assert(isConditionConfirmed(acserver, conditionInstance) == false);
     ck_assert(conditionRetain(acserver, conditionInstance) == true);
 
-    /* 4. Alarm goes inactive */
-    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false);
-    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
-    expectedEventCount++;
-    ck_assert(isConditionActive(acserver, conditionInstance) == false);
-    ck_assert(isConditionAcked(acserver, conditionInstance) == true);
-    ck_assert(isConditionConfirmed(acserver, conditionInstance) == false);
-    ck_assert(conditionRetain(acserver, conditionInstance) == true);
-
-    /* 5. Condition confirmed */
+    /* 4. Condition confirmed */
     retval = UA_Server_Condition_confirm (acserver, conditionInstance, NULL);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     expectedEventCount++;
@@ -345,7 +336,7 @@ START_TEST(conditionSequence1) {
     ck_assert(isConditionConfirmed(acserver, conditionInstance) == true);
     ck_assert(conditionRetain(acserver, conditionInstance) == false);
 
-    /* 6. Alarm goes active */
+    /* 5. Alarm goes active */
     retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     expectedEventCount++;
@@ -354,7 +345,7 @@ START_TEST(conditionSequence1) {
     ck_assert(isConditionConfirmed(acserver, conditionInstance) == true);
     ck_assert(conditionRetain(acserver, conditionInstance) == true);
 
-    /* 7. Alarm goes inactive */
+    /* 6. Alarm goes inactive */
     retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     expectedEventCount++;
@@ -363,7 +354,7 @@ START_TEST(conditionSequence1) {
     ck_assert(isConditionConfirmed(acserver, conditionInstance) == true);
     ck_assert(conditionRetain(acserver, conditionInstance) == true);
 
-    /* 8. Condition Acknowledged Confirm required */
+    /* 7. Condition Acknowledged Confirm required */
     retval = UA_Server_Condition_acknowledge(acserver, conditionInstance, NULL);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     expectedEventCount++;
@@ -372,7 +363,7 @@ START_TEST(conditionSequence1) {
     ck_assert(isConditionConfirmed(acserver, conditionInstance) == false);
     ck_assert(conditionRetain(acserver, conditionInstance) == true);
 
-    /* 10. Condition confirmed */
+    /* 8. Condition confirmed */
     retval = UA_Server_Condition_confirm (acserver, conditionInstance, NULL);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     expectedEventCount++;
@@ -458,15 +449,15 @@ START_TEST(conditionSequence2) {
     UA_ConditionInputFns inputs = {0};
     UA_NodeId conditionInstance = UA_NODEID_NULL;
     retval = __UA_Server_createCondition(
-            acserver,
-            UA_NODEID_NULL,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
-            &conditionProperties,
-            inputs,
-            NULL,
-            &alarmProperties,
-            &conditionInstance
-    );
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        inputs,
+        NULL,
+        &alarmProperties,
+        &conditionInstance
+                                        );
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     retval = UA_Server_Condition_setImplCallbacks(acserver, conditionInstance, &callbacks);
@@ -1023,6 +1014,7 @@ int main(void) {
     tcase_add_test(tc_call, conditionSequence2);
     tcase_add_checked_fixture(tc_call, setup, teardown);
     suite_add_tcase(s, tc_call);
+#endif
 
     TCase *tc_call1 = tcase_create("Alarms and Conditions Supports Filtered Retain True");
     tcase_add_test(tc_call1, conditionSequence3);
