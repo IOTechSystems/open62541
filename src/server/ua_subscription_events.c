@@ -187,21 +187,23 @@ UA_MonitoredItem_addEvent(UA_Server *server, UA_MonitoredItem *mon,
     UA_EventFilterResult res;
     UA_EventFilterResult_init(&res);
 
-    UA_Boolean *passLastFilterPtr = NULL;
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
-    passLastFilterPtr = &mon->conditionStateChangePassedLastFilter;
-#endif
-
+    UA_Boolean triggerEvent = true;
     UA_StatusCode retval = filterEvent(
         server,
         mon->subscription ? mon->subscription->session : &server->adminSession,
+        mon->monitoredItemId,
         event, eventFilter,
         &efl,
         &res,
-        passLastFilterPtr
+        &triggerEvent
     );
     UA_EventFilterResult_clear(&res);
     if (retval != UA_STATUSCODE_GOOD) return retval;
+    if (!triggerEvent)
+    {
+        UA_EventFieldList_clear(&efl);
+        return UA_STATUSCODE_GOOD;
+    }
 
     if (!mon->subscription)
     {

@@ -992,8 +992,65 @@ START_TEST(conditionSequence3) {
     ck_assert(conditionRetain(acserver, conditionInstance) == true);
     ck_assert(retainSent == false);
 
-    //UA_Server_run_startup(acserver);
-    //while (1){ UA_Server_run_iterate(acserver, true);}
+    /* 11. Alarm goes inactive, No event since suppressed */
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == true);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 12. Alarm no longer suppressed */
+    retval = UA_Server_Condition_unsuppress (acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 13. Alarm placed out of service */
+    retval = UA_Server_Condition_removeFromService (acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 14. Alarm goes active; No event since out of service */
+    retval = UA_Server_Condition_updateActive (acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == false);
+
+    /* 15. Alarm goes inactive; No event since out of service */
+    retval = UA_Server_Condition_updateActive (acserver, conditionInstance, NULL, false);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 16. Alarm no longer out of service */
+    retval = UA_Server_Condition_placeInService(acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
 
     retval = UA_Server_deleteCondition(
         acserver,
@@ -1014,7 +1071,6 @@ int main(void) {
     tcase_add_test(tc_call, conditionSequence2);
     tcase_add_checked_fixture(tc_call, setup, teardown);
     suite_add_tcase(s, tc_call);
-#endif
 
     TCase *tc_call1 = tcase_create("Alarms and Conditions Supports Filtered Retain True");
     tcase_add_test(tc_call1, conditionSequence3);

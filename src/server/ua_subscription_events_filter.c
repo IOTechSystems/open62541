@@ -1017,10 +1017,11 @@ isValidEvent(UA_Server *server, const UA_NodeId *validEventParent,
     return isSubtypeOfBaseEvent;
 }
 
+
 UA_StatusCode
-filterEvent(UA_Server *server, UA_Session *session,
+filterEvent(UA_Server *server, UA_Session *session, UA_UInt32 monId,
             const UA_NodeId *eventNode, UA_EventFilter *filter,
-            UA_EventFieldList *efl, UA_EventFilterResult *result, UA_Boolean *passLastFilter) {
+            UA_EventFieldList *efl, UA_EventFilterResult *result, UA_Boolean *triggerEventOut) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     if(filter->selectClausesSize == 0)
@@ -1071,43 +1072,44 @@ filterEvent(UA_Server *server, UA_Session *session,
         }
     }
 
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
-    UA_Boolean overwriteRetain = false;
-#endif
-
     /* Evaluate the where filter. Do we even need to consider the event? */
     UA_StatusCode res = evaluateWhereClause(server, session, eventNode,
                                             &filter->whereClause,
                                             &result->whereClauseResult);
-    if(res != UA_STATUSCODE_GOOD){
+
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
-        if (res != UA_STATUSCODE_BADNOMATCH || !UA_isEventConditionOrBranch(server, eventNode))
-        {
-            UA_EventFieldList_clear(efl);
-            UA_EventFilterResult_clear(result);
-            return res;
-        }
-        UA_Boolean passedLastFilter = passLastFilter ? (*passLastFilter) : false;
-        if (!passedLastFilter)
-        {
-            /*Not a condition, not supported or previous state did not pass filter - so dont event*/
-            UA_EventFieldList_clear(efl);
-            UA_EventFilterResult_clear(result);
-            return UA_STATUSCODE_BADNOMATCH;
-        }
-        if (passLastFilter) *passLastFilter = false;
-        /*Previous state passed filter so overwrite retain*/
-        overwriteRetain = true;
-#else
+
+    if (res != UA_STATUSCODE_GOOD && res != UA_STATUSCODE_BADNOMATCH)
+    {
         UA_EventFieldList_clear(efl);
         UA_EventFilterResult_clear(result);
         return res;
-#endif
     }
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
-    else
+    UA_Boolean whereClausePassed = res != UA_STATUSCODE_BADNOMATCH;
+    UA_Boolean overwriteRetain = false;
+    UA_ConditionBranch *branch = UA_getConditionBranch(server, eventNode);
+    if (branch)
     {
-        if (passLastFilter && UA_isEventConditionOrBranch(server, eventNode)) *passLastFilter = true;
+       res =  UA_ConditionBranch_filter (server, branch, monId, whereClausePassed, &overwriteRetain, triggerEventOut);
+       if (res != UA_STATUSCODE_GOOD)
+       {
+           UA_EventFieldList_clear(efl);
+           UA_EventFilterResult_clear(result);
+           return res;
+       }
+    }
+    else if (!whereClausePassed)
+    {
+       UA_EventFieldList_clear(efl);
+       UA_EventFilterResult_clear(result);
+       return res;
+    }
+#else
+    if (res != UA_STATUSCODE_GOOD)
+    {
+        UA_EventFieldList_clear(efl);
+        UA_EventFilterResult_clear(result);
+        return res;
     }
 #endif
 

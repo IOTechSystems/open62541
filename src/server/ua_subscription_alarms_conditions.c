@@ -33,7 +33,13 @@ static void UA_ConditionEventInfo_delete (UA_ConditionEventInfo *p)
     UA_free (p);
 }
 
-typedef struct UA_ConditionBranch {
+typedef struct UA_ConditionBranchFilterEntry
+{
+    LIST_ENTRY (UA_ConditionBranchFilterEntry) listEntry;
+    UA_UInt32 monitoredItemId;
+}UA_ConditionBranchFilterEntry;
+
+struct UA_ConditionBranch {
     ZIP_ENTRY(UA_ConditionBranch) zipEntry;
     //Each condition has a list of branches
     LIST_ENTRY (UA_ConditionBranch) listEntry;
@@ -46,7 +52,9 @@ typedef struct UA_ConditionBranch {
     UA_Boolean isMainBranch;
     UA_Boolean lastEventRetainValue;
     UA_ByteString eventId;
-}UA_ConditionBranch;
+
+    LIST_HEAD (,UA_ConditionBranchFilterEntry) failedLastFilterList;
+};
 
 typedef struct UA_Condition {
     ZIP_ENTRY (UA_Condition) zipEntry;
@@ -63,7 +71,6 @@ typedef struct UA_Condition {
     UA_Int16 reAlarmCount;
     UA_UInt64 unshelveCallbackId;
     UA_Boolean canBranch;
-    UA_Boolean supportsFilteredRetain;
     const UA_ConditionImplCallbacks *callbacks;
 } UA_Condition;
 
@@ -412,6 +419,11 @@ static inline UA_Condition *getCondition (UA_Server *server, const UA_NodeId *co
 
 static inline UA_ConditionBranch *getConditionBranch (UA_Server *server, const UA_NodeId *branchId);
 
+inline UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId)
+{
+    return getConditionBranch(server, conditionBranchId);
+}
+
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId)
@@ -420,13 +432,6 @@ UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
     if (!branch) return UA_STATUSCODE_BADNODEIDUNKNOWN;
     *outConditionId = branch->condition->mainBranch->id;
     return UA_STATUSCODE_GOOD;
-}
-
-UA_Boolean
-UA_isEventConditionOrBranch (UA_Server *server, const UA_NodeId *id)
-{
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    return getConditionBranch(server, id) ? true : false;
 }
 
 /* Get the node id of the condition state */
@@ -441,6 +446,20 @@ getConditionBranchFromConditionAndEvent(
     if (!condition) return NULL;
     return UA_Condition_GetBranchWithEventId(condition, eventId);
 }
+
+static UA_ConditionBranchFilterEntry*
+UA_ConditionBranch_getFailedFilterEntry (UA_ConditionBranch *branch, UA_UInt32 monId)
+{
+    UA_ConditionBranchFilterEntry *entry = NULL;
+    LIST_FOREACH(entry, &branch->failedLastFilterList, listEntry)
+    {
+        if (entry->monitoredItemId == monId) break;
+    }
+    return entry;
+}
+
+
+
 
 
 static UA_StatusCode
@@ -861,6 +880,59 @@ UA_ConditionBranch_State_Retain (const UA_ConditionBranch *branch, UA_Server *se
     return value;
 }
 
+static UA_StatusCode
+evaluateFilteredRetain (UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                        UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
+{
+    UA_Boolean overwriteRetain = false;
+    UA_Boolean triggerEvent = true;
+    /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5.2#_Ref106692035 */
+    UA_ConditionBranchFilterEntry *entry = UA_ConditionBranch_getFailedFilterEntry(branch, monId);
+    if (passed)
+    {
+        if (entry) LIST_REMOVE(entry, listEntry);
+        goto done;
+    }
+    /* already in list */
+    if (entry)
+    {
+        triggerEvent = false;
+        goto done;
+    }
+    entry = (UA_ConditionBranchFilterEntry*) UA_malloc(sizeof (*entry));
+    if (!entry) return UA_STATUSCODE_BADOUTOFMEMORY;
+    entry->monitoredItemId = monId;
+    LIST_INSERT_HEAD(&branch->failedLastFilterList, entry, listEntry);
+    overwriteRetain = true;
+done:
+    *overwriteRetainOut = overwriteRetain;
+    *triggerEventOut = triggerEvent;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
+{
+    UA_Boolean overwriteRetain = false;
+    UA_Boolean triggerEvent = true;
+    if (server->config.supportsFilteredRetain)
+    {
+        UA_StatusCode ret = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
+        if (ret != UA_STATUSCODE_GOOD) return ret;
+    }
+
+    UA_Boolean eventRetain = UA_ConditionBranch_State_Retain (branch,server);
+    UA_Boolean lastEventRetain = branch->lastEventRetainValue;
+    branch->lastEventRetainValue = eventRetain;
+    /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
+    * of the Retain field from True to False. */
+    if (lastEventRetain == false && eventRetain == false) triggerEvent = false;
+    *overwriteRetainOut = overwriteRetain;
+    *triggerEventOut = triggerEvent;
+    return UA_STATUSCODE_GOOD;
+}
+
 static inline UA_Boolean
 UA_ConditionBranch_State_Acked(const UA_ConditionBranch *branch, UA_Server *server)
 {
@@ -1211,17 +1283,7 @@ UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
         if (info->hasSeverity) UA_ConditionBranch_State_updateSeverity (branch, server, info->severity);
     }
 
-    /* Trigger the event for Condition*/
-    UA_Boolean eventRetain = UA_ConditionBranch_State_Retain(branch,server);
-    UA_Boolean lastEventRetain = branch->lastEventRetainValue;
-    branch->lastEventRetainValue = eventRetain;
-    /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
-     * of the Retain field from True to False. */
-    if (lastEventRetain == false && eventRetain == false)
-    {
-        //TODO go through each monitored item and see if the new state passes the where clause update. then update monitored item conditionStateChangePassedLastFilter.
-        return UA_STATUSCODE_GOOD;
-    }
+
 
     UA_ByteString_clear(&branch->eventId);
     //Condition Nodes should not be deleted after triggering the event
@@ -1896,7 +1958,7 @@ static inline UA_Condition *getCondition (UA_Server *server, const UA_NodeId *co
     return ZIP_FIND(UA_ConditionTree, &server->conditions, &dummy_ptr);
 }
 
-static inline UA_ConditionBranch *getConditionBranch (UA_Server *server, const UA_NodeId *branchId)
+inline UA_ConditionBranch *getConditionBranch (UA_Server *server, const UA_NodeId *branchId)
 {
     UA_ConditionBranch dummy;
     dummy.id = *branchId;
