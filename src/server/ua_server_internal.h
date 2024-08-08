@@ -508,7 +508,7 @@ triggerEvent(UA_Server *server, const UA_NodeId eventNodeId,
 /* Filters the given event with the given filter and writes the results into a
  * notification */
 UA_StatusCode
-filterEvent(UA_Server *server, UA_Session *session, UA_UInt32 monId,
+filterEvent(UA_Server *server, UA_Boolean historicalEvent, UA_Session *session, UA_UInt32 monId,
             const UA_NodeId *eventNode, UA_EventFilter *filter,
             UA_EventFieldList *efl, UA_EventFilterResult *result,
             UA_Boolean *triggerEvent);

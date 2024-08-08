@@ -190,6 +190,7 @@ UA_MonitoredItem_addEvent(UA_Server *server, UA_MonitoredItem *mon,
     UA_Boolean triggerEvent = true;
     UA_StatusCode retval = filterEvent(
         server,
+        false,
         mon->subscription ? mon->subscription->session : &server->adminSession,
         mon->monitoredItemId,
         event, eventFilter,
@@ -269,7 +270,7 @@ setHistoricalEvent(UA_Server *server, const UA_NodeId *origin,
     UA_EventFilter *filter = (UA_EventFilter*) historicalEventFilterValue.data;
     UA_EventFieldList efl;
     UA_EventFilterResult result;
-    retval = filterEvent(server, &server->adminSession, eventNodeId, filter, &efl, &result, NULL);
+    retval = filterEvent(server, true, &server->adminSession, eventNodeId, filter, &efl, &result, NULL, NULL);
     if(retval == UA_STATUSCODE_GOOD)
         server->config.historyDatabase.setEvent(server, server->config.historyDatabase.context,
                                                 origin, emitNodeId, filter, &efl);

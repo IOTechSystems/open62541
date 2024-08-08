@@ -1019,7 +1019,7 @@ isValidEvent(UA_Server *server, const UA_NodeId *validEventParent,
 
 
 UA_StatusCode
-filterEvent(UA_Server *server, UA_Session *session, UA_UInt32 monId,
+filterEvent(UA_Server *server, UA_Boolean historicalEvent, UA_Session *session, UA_UInt32 monId,
             const UA_NodeId *eventNode, UA_EventFilter *filter,
             UA_EventFieldList *efl, UA_EventFilterResult *result, UA_Boolean *triggerEventOut) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
@@ -1087,16 +1087,18 @@ filterEvent(UA_Server *server, UA_Session *session, UA_UInt32 monId,
     }
     UA_Boolean whereClausePassed = res != UA_STATUSCODE_BADNOMATCH;
     UA_Boolean overwriteRetain = false;
-    UA_ConditionBranch *branch = UA_getConditionBranch(server, eventNode);
+    UA_ConditionBranch *branch = historicalEvent ? NULL : UA_getConditionBranch(server, eventNode);
     if (branch)
     {
-       res =  UA_ConditionBranch_filter (server, branch, monId, whereClausePassed, &overwriteRetain, triggerEventOut);
+       UA_Boolean triggerEvent = true;
+       res =  UA_ConditionBranch_filter (server, branch, monId, whereClausePassed, &overwriteRetain, &triggerEvent);
        if (res != UA_STATUSCODE_GOOD)
        {
            UA_EventFieldList_clear(efl);
            UA_EventFilterResult_clear(result);
            return res;
        }
+       if (triggerEventOut) *triggerEventOut = triggerEvent;
     }
     else if (!whereClausePassed)
     {

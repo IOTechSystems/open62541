@@ -1585,21 +1585,6 @@ UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditio
     return ret;
 }
 
-UA_StatusCode
-UA_Server_Condition_setRetain (UA_Server *server, UA_NodeId conditionId, UA_Boolean retain)
-{
-    UA_LOCK (&server->serviceMutex);
-    UA_ConditionBranch *branch = getConditionBranch(server, &conditionId);
-    if (!branch)
-    {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNODEIDUNKNOWN;
-    }
-    UA_StatusCode ret = UA_ConditionBranch_State_setRetain(branch, server, retain);
-    UA_UNLOCK(&server->serviceMutex);
-    return ret;
-}
-
 static UA_StatusCode
 condition_reset (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment)
 {
