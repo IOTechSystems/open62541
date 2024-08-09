@@ -270,7 +270,7 @@ setHistoricalEvent(UA_Server *server, const UA_NodeId *origin,
     UA_EventFilter *filter = (UA_EventFilter*) historicalEventFilterValue.data;
     UA_EventFieldList efl;
     UA_EventFilterResult result;
-    retval = filterEvent(server, true, &server->adminSession, 0, eventNodeId, filter, &efl, &result, NULL, NULL);
+    retval = filterEvent(server, true, &server->adminSession, 0, eventNodeId, filter, &efl, &result, NULL);
     if(retval == UA_STATUSCODE_GOOD)
         server->config.historyDatabase.setEvent(server, server->config.historyDatabase.context,
                                                 origin, emitNodeId, filter, &efl);
