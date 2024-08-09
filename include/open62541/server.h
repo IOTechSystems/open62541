@@ -337,6 +337,9 @@ struct UA_ServerConfig {
                                           void *nodeContext,
                                           UA_UInt32 attibuteId,
                                           UA_Boolean removed);
+# ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+    UA_Boolean supportsFilteredRetain;
+# endif
 #endif
 
     /**
@@ -1722,7 +1725,6 @@ UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, con
  */
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_setConfirmRequired(UA_Server *server, UA_NodeId conditionId);
-
 
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditionId);

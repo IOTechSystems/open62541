@@ -337,18 +337,23 @@ getAllInterfaceChildNodeIds(UA_Server *server, const UA_NodeId *objectNode, cons
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
+/*Forward Declaration */
+struct UA_ConditionBranch;
+typedef struct UA_ConditionBranch UA_ConditionBranch;
+
+UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId);
+
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId);
 
+UA_StatusCode
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut);
+
 void
 UA_ConditionList_delete(UA_Server *server);
 
-UA_Boolean
-isConditionOrBranch(UA_Server *server,
-                    const UA_NodeId *condition,
-                    const UA_NodeId *conditionSource,
-                    UA_Boolean *isCallerAC);
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
@@ -503,9 +508,10 @@ triggerEvent(UA_Server *server, const UA_NodeId eventNodeId,
 /* Filters the given event with the given filter and writes the results into a
  * notification */
 UA_StatusCode
-filterEvent(UA_Server *server, UA_Session *session,
+filterEvent(UA_Server *server, UA_Boolean historicalEvent, UA_Session *session, UA_UInt32 monId,
             const UA_NodeId *eventNode, UA_EventFilter *filter,
-            UA_EventFieldList *efl, UA_EventFilterResult *result);
+            UA_EventFieldList *efl, UA_EventFilterResult *result,
+            UA_Boolean *triggerEvent);
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_EVENTS */
 

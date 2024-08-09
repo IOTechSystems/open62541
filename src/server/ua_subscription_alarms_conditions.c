@@ -33,7 +33,13 @@ static void UA_ConditionEventInfo_delete (UA_ConditionEventInfo *p)
     UA_free (p);
 }
 
-typedef struct UA_ConditionBranch {
+typedef struct UA_ConditionBranchFilterEntry
+{
+    LIST_ENTRY (UA_ConditionBranchFilterEntry) listEntry;
+    UA_UInt32 monitoredItemId;
+}UA_ConditionBranchFilterEntry;
+
+struct UA_ConditionBranch {
     ZIP_ENTRY(UA_ConditionBranch) zipEntry;
     //Each condition has a list of branches
     LIST_ENTRY (UA_ConditionBranch) listEntry;
@@ -46,7 +52,9 @@ typedef struct UA_ConditionBranch {
     UA_Boolean isMainBranch;
     UA_Boolean lastEventRetainValue;
     UA_ByteString eventId;
-}UA_ConditionBranch;
+
+    LIST_HEAD (,UA_ConditionBranchFilterEntry) failedLastFilterList;
+};
 
 typedef struct UA_Condition {
     ZIP_ENTRY (UA_Condition) zipEntry;
@@ -219,6 +227,7 @@ ZIP_FUNCTIONS(UA_ConditionBranchTree, UA_ConditionBranch, zipEntry, UA_Condition
 #define CONDITION_FIELD_RECEIVETIME                            "ReceiveTime"
 #define CONDITION_FIELD_MESSAGE                                "Message"
 #define CONDITION_FIELD_SEVERITY                               "Severity"
+#define CONDITION_FIELD_SUPPORTSFILTEREDRETAIN                 "SupportsFilteredRetain"
 #define CONDITION_FIELD_CONDITIONNAME                          "ConditionName"
 #define CONDITION_FIELD_BRANCHID                               "BranchId"
 #define CONDITION_FIELD_RETAIN                                 "Retain"
@@ -410,6 +419,11 @@ static inline UA_Condition *getCondition (UA_Server *server, const UA_NodeId *co
 
 static inline UA_ConditionBranch *getConditionBranch (UA_Server *server, const UA_NodeId *branchId);
 
+inline UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId)
+{
+    return getConditionBranch(server, conditionBranchId);
+}
+
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId)
@@ -432,6 +446,20 @@ getConditionBranchFromConditionAndEvent(
     if (!condition) return NULL;
     return UA_Condition_GetBranchWithEventId(condition, eventId);
 }
+
+static UA_ConditionBranchFilterEntry*
+UA_ConditionBranch_getFailedFilterEntry (UA_ConditionBranch *branch, UA_UInt32 monId)
+{
+    UA_ConditionBranchFilterEntry *entry = NULL;
+    LIST_FOREACH(entry, &branch->failedLastFilterList, listEntry)
+    {
+        if (entry->monitoredItemId == monId) break;
+    }
+    return entry;
+}
+
+
+
 
 
 static UA_StatusCode
@@ -852,6 +880,59 @@ UA_ConditionBranch_State_Retain (const UA_ConditionBranch *branch, UA_Server *se
     return value;
 }
 
+static UA_StatusCode
+evaluateFilteredRetain (UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                        UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
+{
+    UA_Boolean overwriteRetain = false;
+    UA_Boolean triggerEvent = true;
+    /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5.2#_Ref106692035 */
+    UA_ConditionBranchFilterEntry *entry = UA_ConditionBranch_getFailedFilterEntry(branch, monId);
+    if (passed)
+    {
+        if (entry) LIST_REMOVE(entry, listEntry);
+        goto done;
+    }
+    /* already in list */
+    if (entry)
+    {
+        triggerEvent = false;
+        goto done;
+    }
+    entry = (UA_ConditionBranchFilterEntry*) UA_malloc(sizeof (*entry));
+    if (!entry) return UA_STATUSCODE_BADOUTOFMEMORY;
+    entry->monitoredItemId = monId;
+    LIST_INSERT_HEAD(&branch->failedLastFilterList, entry, listEntry);
+    overwriteRetain = true;
+done:
+    *overwriteRetainOut = overwriteRetain;
+    *triggerEventOut = triggerEvent;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
+{
+    UA_Boolean overwriteRetain = false;
+    UA_Boolean triggerEvent = true;
+    if (server->config.supportsFilteredRetain)
+    {
+        UA_StatusCode ret = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
+        if (ret != UA_STATUSCODE_GOOD) return ret;
+    }
+
+    UA_Boolean eventRetain = UA_ConditionBranch_State_Retain (branch,server);
+    UA_Boolean lastEventRetain = branch->lastEventRetainValue;
+    branch->lastEventRetainValue = eventRetain;
+    /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
+    * of the Retain field from True to False. */
+    if (lastEventRetain == false && eventRetain == false) triggerEvent = false;
+    *overwriteRetainOut = overwriteRetain;
+    *triggerEventOut = triggerEvent;
+    return UA_STATUSCODE_GOOD;
+}
+
 static inline UA_Boolean
 UA_ConditionBranch_State_Acked(const UA_ConditionBranch *branch, UA_Server *server)
 {
@@ -1202,27 +1283,19 @@ UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
         if (info->hasSeverity) UA_ConditionBranch_State_updateSeverity (branch, server, info->severity);
     }
 
-    /* Trigger the event for Condition*/
-    UA_Boolean eventRetain = UA_ConditionBranch_State_Retain(branch,server);
-    UA_Boolean lastEventRetain = branch->lastEventRetainValue;
-    branch->lastEventRetainValue = eventRetain;
-    /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
-     * of the Retain field from True to False. */
-    if (lastEventRetain == false && eventRetain == false)
-    {
-        return UA_STATUSCODE_GOOD;
-    }
+
 
     UA_ByteString_clear(&branch->eventId);
+    //Condition Nodes should not be deleted after triggering the event
     retval = triggerEvent(server, branch->id, branch->condition->sourceId, &branch->eventId, false);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Triggering condition event failed",);
     return retval;
 }
 
-static UA_StatusCode removeConditionBranch (UA_Server *server, UA_ConditionBranch *branch);
-
 static void
 UA_ConditionBranch_evaluateRetainState(UA_ConditionBranch *branch, UA_Server *server);
+
+static UA_StatusCode removeConditionBranch (UA_Server *server, UA_ConditionBranch *branch);
 
 static UA_StatusCode
 UA_ConditionBranch_notifyNewBranchState (UA_ConditionBranch *branch, UA_Server *server, const UA_ConditionEventInfo *info) {
@@ -1423,12 +1496,8 @@ conditionBranchAcknowledge(UA_Server *server, UA_ConditionBranch *branch, const 
 
     UA_StatusCode retval = UA_Condition_UserCallback_onAcked(server, branch->condition, &branch->id);
     if (retval != UA_STATUSCODE_GOOD) return retval;
-
     UA_ConditionBranch_State_setAckedState(branch, server, true);
-    UA_ConditionBranch_evaluateRetainState(branch, server);
-
     if (comment) conditionBranch_addComment (server, branch, comment);
-
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, ACKED_MESSAGE)
     };
@@ -1617,7 +1686,6 @@ condition_placeInService (UA_Server *server, UA_Condition *condition, const UA_L
     if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
     return UA_ConditionBranch_triggerEvent (condition->mainBranch, server, &info);
 }
-
 
 UA_StatusCode
 UA_Server_Condition_removeFromService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment)
@@ -1875,7 +1943,7 @@ static inline UA_Condition *getCondition (UA_Server *server, const UA_NodeId *co
     return ZIP_FIND(UA_ConditionTree, &server->conditions, &dummy_ptr);
 }
 
-static inline UA_ConditionBranch *getConditionBranch (UA_Server *server, const UA_NodeId *branchId)
+inline UA_ConditionBranch *getConditionBranch (UA_Server *server, const UA_NodeId *branchId)
 {
     UA_ConditionBranch dummy;
     dummy.id = *branchId;
@@ -2465,6 +2533,7 @@ static void alarmTryBranch (UA_Server *server, UA_Condition *condition)
 {
     if (!condition->canBranch) return;
     /* if condition requires acknowledgement branch*/
+    if (!condition->canBranch) return;
     if (!UA_ConditionBranch_State_Acked(condition->mainBranch, server) && UA_ConditionBranch_State_Retain(condition->mainBranch, server))
     {
         UA_StatusCode retval = UA_ConditionBranch_createBranch(condition->mainBranch, server);
@@ -2480,10 +2549,7 @@ static void alarmTryBranch (UA_Server *server, UA_Condition *condition)
 static void alarmActivate (UA_Server *server, UA_Condition *condition, const UA_ConditionEventInfo *info)
 {
     alarmTryBranch(server, condition);
-
     (void) UA_Condition_UserCallback_onActive(server, condition, &condition->mainBranch->id);
-    //TODO check error
-
     /* 5.8.17 In OneShotShelving, a user requests that an Alarm be Shelved for
      * its current Active state or if not Active its next Active state*/
     if (UA_Condition_State_isOneShotShelved(condition, server))
@@ -2596,7 +2662,6 @@ static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
                             const UA_ConditionEventInfo *info)
 {
     alarmTryBranch(server, condition);
-
     (void) UA_Condition_UserCallback_onInactive(server, condition, &condition->mainBranch->id);
 
     /* 5.8.17 The OneShotShelving will automatically clear when an Alarm returns to an inactive state. */
@@ -3786,6 +3851,18 @@ struct UA_ConditionTypeMetaData
 
 void initNs0ConditionAndAlarms (UA_Server *server)
 {
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+
+    UA_QualifiedName supportsFilteredRetainQN = UA_QUALIFIEDNAME(0, CONDITION_FIELD_SUPPORTSFILTEREDRETAIN);
+    UA_Variant value;
+    UA_Variant_setScalar(&value, (void *)(uintptr_t) &server->config.supportsFilteredRetain, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    UA_NodeId conditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
+    retval = setConditionField(server, conditionTypeId, &value, supportsFilteredRetainQN);
+    if (retval != UA_STATUSCODE_GOOD)
+    {
+        CONDITION_LOG_ERROR(retval, "Set SupportsFilteredRetain Field failed");
+    }
+
     /* Set callbacks for Method Fields of a condition. The current implementation
      * references methods without copying them when creating objects. So the
      * callbacks will be attached to the methods of the conditionType. */
@@ -3817,7 +3894,6 @@ void initNs0ConditionAndAlarms (UA_Server *server)
         {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE2}}
     };
 
-    UA_StatusCode retval = UA_STATUSCODE_GOOD;
     retval |= setMethodNode_callback(server, methodId[0], disableMethodCallback);
     retval |= setMethodNode_callback(server, methodId[1], enableMethodCallback);
     retval |= setMethodNode_callback(server, methodId[2], addCommentMethodCallback);

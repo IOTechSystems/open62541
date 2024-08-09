@@ -23,6 +23,13 @@ static void setup(void) {
     UA_ServerConfig_setDefault(UA_Server_getConfig(acserver));
 }
 
+static void setupSupportsFilteredRetain(void) {
+    setup();
+    UA_ServerConfig *config = UA_Server_getConfig(acserver);
+    config->supportsFilteredRetain = true;
+}
+
+
 static void teardown(void) {
     UA_Server_delete(acserver);
 }
@@ -99,7 +106,7 @@ isConditionSuppressed (UA_Server *server, UA_NodeId condition)
         server,
         condition,
         UA_QUALIFIEDNAME(0, "SuppressedState")
-                                                 );
+    );
 }
 
 static inline UA_Boolean
@@ -109,7 +116,7 @@ isConditionOutOfService (UA_Server *server, UA_NodeId condition)
         server,
         condition,
         UA_QUALIFIEDNAME(0, "OutOfServiceState")
-                                                 );
+    );
 }
 
 static inline UA_Boolean
@@ -238,7 +245,7 @@ START_TEST(conditionSequence1) {
         NULL,
         &alarmProperties,
         &conditionInstance
-                                        );
+    );
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     retval = UA_Server_Condition_setImplCallbacks(acserver, conditionInstance, &callbacks);
@@ -277,7 +284,7 @@ START_TEST(conditionSequence1) {
         req,
         NULL,
         conditionSequence1CB
-                                                                         );
+    );
     ck_assert_uint_eq(res.statusCode, UA_STATUSCODE_GOOD);
 
     UA_Boolean autoConfirm = false;
@@ -368,7 +375,7 @@ START_TEST(conditionSequence1) {
     retval = UA_Server_deleteCondition(
         acserver,
         conditionInstance
-                                      );
+    );
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 } END_TEST
 
@@ -533,7 +540,7 @@ START_TEST(conditionSequence2) {
         req,
         &ctx,
         conditionSequence2CB
-                                                                         );
+    );
     ck_assert_uint_eq(res.statusCode, UA_STATUSCODE_GOOD);
 
     uint32_t expectedEventCount = 0;
@@ -685,9 +692,370 @@ START_TEST(conditionSequence2) {
     ck_assert(ctx.mainBranchState.retain == false);
 
     retval = UA_Server_deleteCondition(
+            acserver,
+            conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+} END_TEST
+
+static void conditionSequence3CB (UA_Server *server, UA_UInt32 monId, void *monContext,
+                                  size_t nEventFields, const UA_Variant *eventFields)
+{
+    eventCount++;
+    UA_NodeId conditionId = *(UA_NodeId *) eventFields[0].data;
+    UA_Boolean retain = *(UA_Boolean*) eventFields[1].data;
+    *(UA_Boolean *)monContext = retain;
+}
+
+static void
+setupTwoOperandsFilter(UA_ContentFilterElement *element, UA_UInt32 firstOperandIndex, UA_UInt32 secondOperandIndex){
+    element->filterOperands[0].content.decoded.type = &UA_TYPES[UA_TYPES_ELEMENTOPERAND];
+    element->filterOperands[0].encoding = UA_EXTENSIONOBJECT_DECODED;
+    element->filterOperands[1].content.decoded.type = &UA_TYPES[UA_TYPES_ELEMENTOPERAND];
+    element->filterOperands[1].encoding = UA_EXTENSIONOBJECT_DECODED;
+    UA_ElementOperand *firstElementOperand = UA_ElementOperand_new();
+    UA_ElementOperand_init(firstElementOperand);
+    firstElementOperand->index = firstOperandIndex;
+    UA_ElementOperand *secondElementOperand = UA_ElementOperand_new();
+    UA_ElementOperand_init(secondElementOperand);
+    secondElementOperand->index = secondOperandIndex;
+    element->filterOperands[0].content.decoded.data = firstElementOperand;
+    element->filterOperands[1].content.decoded.data = secondElementOperand;
+}
+
+/* Based on https://reference.opcfoundation.org/Core/Part9/v105/docs/B.1.4
+ * For this test supportsFilteredRetain is true.
+ * */
+
+START_TEST(conditionSequence3) {
+
+    UA_StatusCode retval;
+    UA_ConditionProperties conditionProperties;
+    conditionProperties.name = UA_QUALIFIEDNAME(0, "Test Condition");
+    conditionProperties.hierarchialReferenceType = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);//UA_NODEID_NULL;
+    conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+    conditionProperties.canBranch = false;
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset(&alarmProperties, 0, sizeof(alarmProperties));
+    alarmProperties.isSuppressible = true;
+    alarmProperties.isServiceable = true;
+
+    UA_ConditionInputFns inputs = {0};
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    retval = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        inputs,
+        NULL,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Create monitored event */
+    UA_MonitoredItemCreateRequest req;
+    UA_MonitoredItemCreateRequest_init(&req);
+    req.itemToMonitor.nodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+    req.monitoringMode = UA_MONITORINGMODE_REPORTING;
+    req.itemToMonitor.attributeId = UA_ATTRIBUTEID_EVENTNOTIFIER;
+    req.requestedParameters.samplingInterval = 250;
+    req.requestedParameters.discardOldest = true;
+    req.requestedParameters.queueSize = 1;
+
+    UA_SimpleAttributeOperand select[2];
+
+    size_t i = 0;
+    UA_SimpleAttributeOperand_init(&select[i]);
+    select[i].typeDefinitionId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
+    select[i].attributeId = UA_ATTRIBUTEID_NODEID;
+    i++;
+
+    UA_QualifiedName retainQN = UA_QUALIFIEDNAME(0, "Retain");
+    UA_SimpleAttributeOperand_init(&select[i]);
+    select[i].typeDefinitionId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
+    select[i].attributeId = UA_ATTRIBUTEID_VALUE;
+    select[i].browsePathSize = 1;
+    select[i].browsePath = &retainQN;
+    i++;
+
+    //(only report when Suppressed state == false and OutOfServiceState == false)
+    UA_ContentFilterElement whereClauseElements[3];
+
+    UA_Boolean val = false;
+    UA_LiteralOperand literalOperand;
+    UA_Variant_setScalar(&literalOperand.value, &val, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    UA_ExtensionObject literalOperandEO;
+    literalOperandEO.content.decoded.data = &literalOperand;
+    literalOperandEO.content.decoded.type = &UA_TYPES[UA_TYPES_LITERALOPERAND];
+    literalOperandEO.encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
+
+    //or
+    UA_ExtensionObject filterOperands0[2];
+    UA_ExtensionObject_init(&filterOperands0[0]);
+    filterOperands0[0].encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
+    filterOperands0[0].content.decoded.type = &UA_TYPES[UA_TYPES_ELEMENTOPERAND];
+    UA_ElementOperand idx1ElementOperand;
+    idx1ElementOperand.index = 1;
+    filterOperands0[0].content.decoded.data = &idx1ElementOperand;
+
+    UA_ExtensionObject_init(&filterOperands0[1]);
+    filterOperands0[1].encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
+    filterOperands0[1].content.decoded.type = &UA_TYPES[UA_TYPES_ELEMENTOPERAND];
+    UA_ElementOperand idx2ElementOperand;
+    idx2ElementOperand.index = 2;
+    filterOperands0[1].content.decoded.data = &idx2ElementOperand;
+
+    whereClauseElements[0].filterOperator = UA_FILTEROPERATOR_AND;
+    whereClauseElements[0].filterOperandsSize = 2;
+    whereClauseElements[0].filterOperands = filterOperands0;
+
+    //SuppressedState == False
+    UA_ExtensionObject filterOperands1[2];
+    UA_ExtensionObject_init(&filterOperands1[0]);
+    filterOperands1[0].encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
+    filterOperands1[0].content.decoded.type = &UA_TYPES[UA_TYPES_SIMPLEATTRIBUTEOPERAND];
+    UA_SimpleAttributeOperand suppressedStateOperand;
+    UA_SimpleAttributeOperand_init(&suppressedStateOperand);
+    suppressedStateOperand.attributeId = UA_ATTRIBUTEID_VALUE;
+    suppressedStateOperand.typeDefinitionId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE);
+    UA_QualifiedName suppressedStateIdPath[2];
+    suppressedStateIdPath[0] = UA_QUALIFIEDNAME(0, "SuppressedState");
+    suppressedStateIdPath[1] = UA_QUALIFIEDNAME(0, "Id");
+    suppressedStateOperand.browsePath = suppressedStateIdPath;
+    suppressedStateOperand.browsePathSize = 2;
+    filterOperands1[0].content.decoded.data = &suppressedStateOperand;
+    filterOperands1[1] = literalOperandEO;
+    whereClauseElements[1].filterOperator = UA_FILTEROPERATOR_EQUALS;
+    whereClauseElements[1].filterOperandsSize = 2;
+    whereClauseElements[1].filterOperands = filterOperands1;
+
+    //OutOfServiceState == False
+    UA_ExtensionObject filterOperands2[2];
+    UA_ExtensionObject_init(&filterOperands2[0]);
+    filterOperands2[0].encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
+    filterOperands2[0].content.decoded.type = &UA_TYPES[UA_TYPES_SIMPLEATTRIBUTEOPERAND];
+    UA_SimpleAttributeOperand outOfServiceStateOperand;
+    UA_SimpleAttributeOperand_init(&outOfServiceStateOperand);
+    outOfServiceStateOperand.attributeId = UA_ATTRIBUTEID_VALUE;
+    outOfServiceStateOperand.typeDefinitionId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE);
+    UA_QualifiedName outOfServicePath[2];
+    outOfServicePath[0] = UA_QUALIFIEDNAME(0, "OutOfServiceState");
+    outOfServicePath[1] = UA_QUALIFIEDNAME(0, "Id");
+    outOfServiceStateOperand.browsePath = outOfServicePath;
+    outOfServiceStateOperand.browsePathSize = 2;
+    filterOperands2[0].content.decoded.data = &outOfServiceStateOperand;
+
+    filterOperands2[1] = literalOperandEO;
+    whereClauseElements[2].filterOperator = UA_FILTEROPERATOR_EQUALS;
+    whereClauseElements[2].filterOperandsSize = 2;
+    whereClauseElements[2].filterOperands = filterOperands2;
+
+    UA_ContentFilter whereClause;
+    whereClause.elements = whereClauseElements;
+    whereClause.elementsSize = 3;
+
+    UA_EventFilter filter;
+    UA_EventFilter_init(&filter);
+    filter.selectClausesSize = i;
+    filter.selectClauses = select;
+    filter.whereClause = whereClause;
+
+    req.requestedParameters.filter.content.decoded.type = &UA_TYPES[UA_TYPES_EVENTFILTER];
+    req.requestedParameters.filter.content.decoded.data = &filter;
+    req.requestedParameters.filter.encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
+
+    UA_Boolean retainSent = false;
+    UA_MonitoredItemCreateResult res = UA_Server_createEventMonitoredItem(
+        acserver,
+        UA_TIMESTAMPSTORETURN_NEITHER,
+        req,
+        &retainSent,
+        conditionSequence3CB
+    );
+    ck_assert_uint_eq(res.statusCode, UA_STATUSCODE_GOOD);
+
+    uint32_t expectedEventCount = 0;
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+
+    /* Initial State of Condition */
+    ck_assert(isConditionEnabled(acserver, conditionInstance) == true);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 1. Alarm Goes Active */
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    expectedEventCount++;
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == true);
+
+    /* 2. Placed OutOfService */
+    retval = UA_Server_Condition_removeFromService(acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    expectedEventCount++;
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == false);
+
+    /* 3. Alarm Suppressed; No event since OutOfService */
+    retval = UA_Server_Condition_suppress(acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == true);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == false);
+
+    /* 4. Alarm goes inactive; No event since OutOfService */
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == true);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 5. Alarm Not Suppressed; No event since out of service*/
+    retval = UA_Server_Condition_unsuppress(acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 6. Alarm goes active; No event since out of service*/
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == false);
+
+    /* 7. Alarm no longer OutOfService; Event generated */
+    retval = UA_Server_Condition_placeInService(acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    expectedEventCount++;
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == true);
+
+    /* 8. Alarm goes inactive */
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    expectedEventCount++;
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 9. Alarm Suppressed, No event since not active */
+    retval = UA_Server_Condition_suppress(acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == true);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 10. Alarm goes active, No event since suppressed */
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == true);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == false);
+
+    /* 11. Alarm goes inactive, No event since suppressed */
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == true);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 12. Alarm no longer suppressed */
+    retval = UA_Server_Condition_unsuppress (acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 13. Alarm placed out of service */
+    retval = UA_Server_Condition_removeFromService (acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 14. Alarm goes active; No event since out of service */
+    retval = UA_Server_Condition_updateActive (acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+    ck_assert(retainSent == false);
+
+    /* 15. Alarm goes inactive; No event since out of service */
+    retval = UA_Server_Condition_updateActive (acserver, conditionInstance, NULL, false);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    /* 16. Alarm no longer out of service */
+    retval = UA_Server_Condition_placeInService(acserver, conditionInstance, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq (expectedEventCount, eventCount);
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    ck_assert(isConditionSuppressed(acserver, conditionInstance) == false);
+    ck_assert(isConditionOutOfService(acserver, conditionInstance) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+    ck_assert(retainSent == false);
+
+    retval = UA_Server_deleteCondition(
         acserver,
         conditionInstance
-                                      );
+    );
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 } END_TEST
 
@@ -703,6 +1071,11 @@ int main(void) {
     tcase_add_test(tc_call, conditionSequence2);
     tcase_add_checked_fixture(tc_call, setup, teardown);
     suite_add_tcase(s, tc_call);
+
+    TCase *tc_call1 = tcase_create("Alarms and Conditions Supports Filtered Retain True");
+    tcase_add_test(tc_call1, conditionSequence3);
+    tcase_add_checked_fixture(tc_call1, setupSupportsFilteredRetain, teardown);
+    suite_add_tcase(s, tc_call1);
 #endif
 
     SRunner *sr = srunner_create(s);
