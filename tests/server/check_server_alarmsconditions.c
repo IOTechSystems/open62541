@@ -143,7 +143,7 @@ START_TEST(createDelete) {
     conditionProperties.hierarchialReferenceType = UA_NODEID_NULL;
     conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
 
-    UA_ConditionInputFns inputs = {0};
+    UA_ConditionFns fns = {0};
     // Loop to increase the chance of capturing dead pointers
     for(UA_UInt16 i = 0; i < 3; ++i)
     {
@@ -153,8 +153,7 @@ START_TEST(createDelete) {
             UA_NODEID_NULL,
             UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE),
             &conditionProperties,
-            inputs,
-            NULL,
+            fns,
             NULL,
             &conditionInstance
                                             );
@@ -234,15 +233,14 @@ START_TEST(conditionSequence1) {
     memset (&alarmProperties, 0, sizeof(alarmProperties));
     alarmProperties.acknowledgeableConditionProperties.confirmable = true;
 
-    UA_ConditionInputFns inputs = {0};
+    UA_ConditionFns fns = {0};
     UA_NodeId conditionInstance = UA_NODEID_NULL;
     retval = __UA_Server_createCondition(
         acserver,
         UA_NODEID_NULL,
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
-        inputs,
-        NULL,
+        fns,
         &alarmProperties,
         &conditionInstance
     );
@@ -446,15 +444,14 @@ START_TEST(conditionSequence2) {
     memset (&alarmProperties, 0, sizeof(alarmProperties));
     alarmProperties.acknowledgeableConditionProperties.confirmable = true;
 
-    UA_ConditionInputFns inputs = {0};
+    UA_ConditionFns fns = {0};
     UA_NodeId conditionInstance = UA_NODEID_NULL;
     retval = __UA_Server_createCondition(
         acserver,
         UA_NODEID_NULL,
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
-        inputs,
-        NULL,
+        fns,
         &alarmProperties,
         &conditionInstance
                                         );
@@ -732,7 +729,7 @@ START_TEST(conditionSequence3) {
     UA_StatusCode retval;
     UA_ConditionProperties conditionProperties;
     conditionProperties.name = UA_QUALIFIEDNAME(0, "Test Condition");
-    conditionProperties.hierarchialReferenceType = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);//UA_NODEID_NULL;
+    conditionProperties.hierarchialReferenceType = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
     conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
     conditionProperties.canBranch = false;
 
@@ -741,15 +738,14 @@ START_TEST(conditionSequence3) {
     alarmProperties.isSuppressible = true;
     alarmProperties.isServiceable = true;
 
-    UA_ConditionInputFns inputs = {0};
+    UA_ConditionFns fns = {0};
     UA_NodeId conditionInstance = UA_NODEID_NULL;
     retval = __UA_Server_createCondition(
         acserver,
         UA_NODEID_NULL,
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
-        inputs,
-        NULL,
+        fns,
         &alarmProperties,
         &conditionInstance
     );
