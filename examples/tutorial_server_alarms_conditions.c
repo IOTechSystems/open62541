@@ -104,8 +104,18 @@ static UA_StatusCode onCondition1Active (
     return UA_Server_Condition_setAcknowledgeRequired(server, *conditionId);
 }
 
+static UA_StatusCode onCondition1Acked (
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    void *context
+)
+{
+    return UA_Server_Condition_setConfirmRequired(server, *conditionId);
+}
+
 UA_ConditionImplCallbacks condition1Impl = {
-    .onActive = onCondition1Active
+    .onActive = onCondition1Active,
+    .onAcked = onCondition1Acked
 };
 
 static UA_StatusCode
