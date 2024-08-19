@@ -1093,7 +1093,7 @@ UA_Condition_State_Latched(const UA_Condition *condition, UA_Server *server)
 static inline UA_Boolean
 UA_Condition_State_Enabled(const UA_Condition *condition, UA_Server *server)
 {
-    return isTwoStateVariableInTrueState(server, &condition->mainBranch->id, &fieldConfirmedStateQN);
+    return isTwoStateVariableInTrueState(server, &condition->mainBranch->id, &fieldEnabledStateQN);
 }
 
 static inline UA_Boolean
@@ -2080,6 +2080,9 @@ newConditionInstanceEntry (UA_Server *server, const UA_NodeId *conditionNodeId, 
     {
         removeCondition(server, condition);
     }
+
+
+
     return status;
 }
 
@@ -3446,7 +3449,7 @@ setupConditionNodes (UA_Server *server, const UA_NodeId *condition,
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Set ConditionName Field failed",);
 
     /* Set EnabledState */
-    retval = setTwoStateVariable (server, condition, fieldEnabledStateQN, true, ENABLED_TEXT);
+    retval = setTwoStateVariable (server, condition, fieldEnabledStateQN, false, DISABLED_TEXT);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Enabled state failed",);
 
     /* Set Retain*/
