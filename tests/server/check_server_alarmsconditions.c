@@ -139,6 +139,32 @@ START_TEST(createDelete) {
     UA_StatusCode retval;
 
     UA_ConditionProperties conditionProperties;
+    conditionProperties.name = UA_QUALIFIEDNAME(0, "Condition create multiple");
+    conditionProperties.hierarchialReferenceType = UA_NODEID_NULL;
+    conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+
+    UA_ConditionFns fns = {0};
+    for(UA_UInt16 i = 0; i < 10; ++i)
+    {
+        UA_NodeId conditionInstance = UA_NODEID_NULL;
+        retval = __UA_Server_createCondition(
+            acserver,
+            UA_NODEID_NULL,
+            UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE),
+            &conditionProperties,
+            fns,
+            NULL,
+            &conditionInstance
+                                            );
+        ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+        ck_assert_msg(!UA_NodeId_isNull(&conditionInstance), "ConditionId is null");
+    }
+} END_TEST
+
+START_TEST(createMultiple) {
+    UA_StatusCode retval;
+
+    UA_ConditionProperties conditionProperties;
     conditionProperties.name = UA_QUALIFIEDNAME(0, "Condition createDelete");
     conditionProperties.hierarchialReferenceType = UA_NODEID_NULL;
     conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
@@ -167,7 +193,6 @@ START_TEST(createDelete) {
         ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     }
 } END_TEST
-
 
 typedef struct
 {
@@ -454,7 +479,10 @@ START_TEST(conditionSequence2) {
         fns,
         &alarmProperties,
         &conditionInstance
-                                        );
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, true);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     retval = UA_Server_Condition_setImplCallbacks(acserver, conditionInstance, &callbacks);
@@ -749,6 +777,9 @@ START_TEST(conditionSequence3) {
         &alarmProperties,
         &conditionInstance
     );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, true);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     /* Create monitored event */
@@ -1063,6 +1094,7 @@ int main(void) {
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     TCase *tc_call = tcase_create("Alarms and Conditions");
     tcase_add_test(tc_call, createDelete);
+    tcase_add_test(tc_call, createMultiple);
     tcase_add_test(tc_call, conditionSequence1);
     tcase_add_test(tc_call, conditionSequence2);
     tcase_add_checked_fixture(tc_call, setup, teardown);
