@@ -1640,6 +1640,7 @@ typedef struct UA_ConditionEventInfo {
 typedef UA_StatusCode (*UA_ConditionEvaluateFn)(
     UA_Server *server,
     const UA_NodeId *conditionId,
+    void *conditionCtx,
     const void *input
 );
 
