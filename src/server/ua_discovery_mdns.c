@@ -821,6 +821,7 @@ static UA_StatusCode
 addMdnsRecordForNetworkLayer(UA_DiscoveryManager *dm, const UA_String *appName,
                              const UA_String *discoveryUrl) {
     UA_String hostname = UA_STRING_NULL;
+    char hoststr[256]; /* check with UA_MAXHOSTNAME_LENGTH */
     UA_UInt16 port = 4840;
     UA_String path = UA_STRING_NULL;
     UA_StatusCode retval =
@@ -832,6 +833,12 @@ addMdnsRecordForNetworkLayer(UA_DiscoveryManager *dm, const UA_String *appName,
         return retval;
     }
 
+    if (hostname.length == 0) {
+	gethostname(hoststr, sizeof(hoststr)-1);
+	hoststr[sizeof(hoststr)-1] = '\0';
+	hostname.data = (unsigned char *) hoststr;
+	hostname.length = strlen(hoststr);
+    }
     retval = UA_Discovery_addRecord(dm, appName, &hostname, port,
                                     &path, UA_DISCOVERY_TCP, true,
                                     dm->serverConfig->mdnsConfig.serverCapabilities,
@@ -1261,11 +1268,16 @@ UA_Discovery_addRecord(UA_DiscoveryManager *dm, const UA_String *servername,
 
         listEntry->txtSet = true;
 
-        UA_STACKARRAY(char, newUrl, 10 + hostnameLen + 8 + path->length + 1);
-        mp_snprintf(newUrl, 10 + hostnameLen + 8 + path->length + 1,
-                    "opc.tcp://%.*s:%d%s%.*s", (int) hostnameLen,
-                    hostname->data, port, path->length > 0 ? "/" : "",
-                    (int) path->length, path->data);
+        const size_t newUrlSize = 10 + hostnameLen + 8 + path->length + 1;
+        UA_STACKARRAY(char, newUrl, newUrlSize);
+        memset(newUrl, 0, newUrlSize);
+        if(path->length > 0) {
+            mp_snprintf(newUrl, newUrlSize, "opc.tcp://%.*s:%d%s%.*s", (int)hostnameLen,
+                        hostname->data, port, "/", (int)path->length, path->data);
+        } else {
+            mp_snprintf(newUrl, newUrlSize, "opc.tcp://%.*s:%d", (int)hostnameLen,
+                        hostname->data, port);
+        }
         listEntry->serverOnNetwork.discoveryUrl = UA_String_fromChars(newUrl);
         listEntry->srvSet = true;
     }

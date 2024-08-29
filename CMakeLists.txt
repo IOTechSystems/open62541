@@ -40,7 +40,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # overwritten with more detailed information if git is available.
 set(OPEN62541_VER_MAJOR 1)
 set(OPEN62541_VER_MINOR 4)
-set(OPEN62541_VER_PATCH 1)
+set(OPEN62541_VER_PATCH 4)
 set(OPEN62541_VER_LABEL "-undefined") # like "-rc1" or "-g4538abcd" or "-g4538abcd-dirty"
 set(OPEN62541_VER_COMMIT "unknown-commit")
 
@@ -495,10 +495,11 @@ endif()
 ######################
 
 set(open62541_LIBRARIES "")
+set(open62541_PUBLIC_LIBRARIES "")
 if("${UA_ARCHITECTURE}" STREQUAL "posix")
     list(APPEND open62541_LIBRARIES "m")
-    if(UA_MULTITHREADING OR UA_BUILD_UNIT_TESTS)
-        list(APPEND open62541_LIBRARIES "pthread")
+    if(UA_MULTITHREADING GREATER_EQUAL 100 OR UA_BUILD_UNIT_TESTS)
+        list(APPEND open62541_PUBLIC_LIBRARIES "pthread")
     endif()
     if(NOT APPLE AND (NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD"))
         list(APPEND open62541_LIBRARIES "rt")
@@ -1110,11 +1111,11 @@ set(UA_NODESET_DIR ${PROJECT_SOURCE_DIR}/deps/ua-nodeset CACHE STRING "The path 
 
 if(UA_NAMESPACE_ZERO STREQUAL "FULL")
     # Use the "full" schema files also for datatypes and statuscodes
-    set(UA_SCHEMA_DIR ${UA_NODESET_DIR}/Schema)
+    set(UA_SCHEMA_DIR ${UA_NODESET_DIR}/Schema CACHE INTERNAL "")
 
     # Set the full Nodeset for NS0
     if(NOT UA_FILE_NS0)
-        set(UA_FILE_NS0 ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.xml)
+        set(UA_FILE_NS0 ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.xml CACHE INTERNAL "")
     endif()
 
     # Check that the submodule was checked out or manually downloaded into the folder
@@ -1128,11 +1129,11 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
     endif()
 else()
     # Directory with the schema files for installation
-    set(UA_SCHEMA_DIR ${PROJECT_SOURCE_DIR}/tools/schema)
+    set(UA_SCHEMA_DIR ${PROJECT_SOURCE_DIR}/tools/schema CACHE INTERNAL "")
 
     # Set the reduced Nodeset for NS0
     if(NOT UA_FILE_NS0)
-        set(UA_FILE_NS0 ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.Reduced.xml)
+        set(UA_FILE_NS0 ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.Reduced.xml CACHE INTERNAL "")
     endif()
 
     # Set feature-specific datatypes definitions and nodesets
@@ -1421,7 +1422,8 @@ SET_TARGET_PROPERTIES(open62541 PROPERTIES
                       VERSION "${OPEN62541_VER_MAJOR}.${OPEN62541_VER_MINOR}.${OPEN62541_VER_PATCH}")
 
 # DLL requires linking to dependencies
-target_link_libraries(open62541 ${open62541_LIBRARIES})
+target_link_libraries(open62541 PUBLIC ${open62541_PUBLIC_LIBRARIES})
+target_link_libraries(open62541 PRIVATE ${open62541_LIBRARIES})
 
 ##########################
 # Build Selected Targets #
@@ -1491,7 +1493,6 @@ install(TARGETS open62541
 
 set(open62541_install_tools_dir share/open62541)
 set(open62541_install_schema_dir share/open62541/schema)
-set(open62541_crypto_plugin ${UA_ENABLE_ENCRYPTION})
 
 # Create open62541Config.cmake
 include(CMakePackageConfigHelpers)
@@ -1500,8 +1501,7 @@ configure_package_config_file("${CMAKE_CURRENT_SOURCE_DIR}/tools/cmake/open62541
                               "${CMAKE_CURRENT_BINARY_DIR}/open62541Config.cmake"
                               INSTALL_DESTINATION "${cmake_configfile_install}"
                               PATH_VARS open62541_install_tools_dir
-                                        open62541_install_schema_dir
-                                        open62541_crypto_plugin)
+                                        open62541_install_schema_dir)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/open62541Config.cmake"
               "${CMAKE_CURRENT_SOURCE_DIR}/tools/cmake/open62541Macros.cmake"
         DESTINATION "${cmake_configfile_install}")
@@ -1527,10 +1527,18 @@ export(TARGETS open62541
 if(UA_ENABLE_AMALGAMATION)
     set(PC_EXTRA_CFLAGS "-DUA_ENABLE_AMALGAMATION")
 endif()
-set(pkgcfglibs "-lopen62541")
-foreach(lib ${open62541_LIBRARIES})
-    set(pkgcfglibs "${pkgcfglibs} -l${lib}")
+
+set(pkgcfgpubliclibs "")
+foreach(lib ${open62541_PUBLIC_LIBRARIES})
+    set(pkgcfgpubliclibs "${pkgcfgpubliclibs}-l${lib} ")
 endforeach()
+
+if(BUILD_SHARED_LIBS)
+    foreach(lib ${open62541_LIBRARIES})
+        set(pkgcfgpubliclibs "${pkgcfgpubliclibs}-l${lib} ")
+    endforeach()
+endif()
+
 configure_file(tools/open62541.pc.in ${PROJECT_BINARY_DIR}/src_generated/open62541.pc @ONLY)
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
@@ -1538,6 +1546,7 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 endif()
 
+# Install nodeset compiler
 install(DIRECTORY "tools/certs" "tools/nodeset_compiler"
         DESTINATION ${open62541_install_tools_dir}
         FILES_MATCHING
@@ -1547,6 +1556,7 @@ install(DIRECTORY "tools/certs" "tools/nodeset_compiler"
         PATTERN ".git*" EXCLUDE
         PERMISSIONS OWNER_READ OWNER_EXECUTE GROUP_READ GROUP_EXECUTE)
 
+# Install schemas
 # Trailing slash to prevent "schema/schema" nesting
 install(DIRECTORY ${UA_SCHEMA_DIR}/
         DESTINATION ${open62541_install_schema_dir}
@@ -1557,6 +1567,7 @@ install(DIRECTORY ${UA_SCHEMA_DIR}/
         PATTERN "NodeIds.csv"
         PERMISSIONS OWNER_READ GROUP_READ)
 
+# Install python tools
 set(UA_install_tools_files "tools/generate_datatypes.py"
                            "tools/generate_nodeid_header.py"
                            "tools/generate_statuscode_descriptions.py")
