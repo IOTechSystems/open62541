@@ -138,10 +138,10 @@ conditionRetain (UA_Server *server, UA_NodeId condition)
 START_TEST(createMultiple) {
     UA_StatusCode retval;
 
-    UA_ConditionProperties conditionProperties;
-    conditionProperties.name = UA_QUALIFIEDNAME(0, "Condition create multiple");
-    conditionProperties.hierarchialReferenceType = UA_NODEID_NULL;
-    conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Condition create multiple")
+    };
 
     UA_ConditionFns fns = {0};
     for(UA_UInt16 i = 0; i < 10; ++i)
@@ -154,6 +154,7 @@ START_TEST(createMultiple) {
             &conditionProperties,
             fns,
             NULL,
+            NULL,
             &conditionInstance
         );
         UA_Server_Condition_enable(acserver, conditionInstance, true);
@@ -165,10 +166,10 @@ START_TEST(createMultiple) {
 START_TEST(createDelete) {
     UA_StatusCode retval;
 
-    UA_ConditionProperties conditionProperties;
-    conditionProperties.name = UA_QUALIFIEDNAME(0, "Condition createDelete");
-    conditionProperties.hierarchialReferenceType = UA_NODEID_NULL;
-    conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Condition createDelete")
+    };
 
     UA_ConditionFns fns = {0};
     // Loop to increase the chance of capturing dead pointers
@@ -182,8 +183,9 @@ START_TEST(createDelete) {
             &conditionProperties,
             fns,
             NULL,
+            NULL,
             &conditionInstance
-                                            );
+        );
         ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
         ck_assert_msg(!UA_NodeId_isNull(&conditionInstance), "ConditionId is null");
 
@@ -249,11 +251,11 @@ static void conditionSequence1CB (UA_Server *server, UA_UInt32 monId, void *monC
 START_TEST(conditionSequence1) {
 
     UA_StatusCode retval;
-    UA_ConditionProperties conditionProperties;
-    conditionProperties.name = UA_QUALIFIEDNAME(0, "Test Condition");
-    conditionProperties.hierarchialReferenceType = UA_NODEID_NULL;
-    conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
-    conditionProperties.canBranch = false;
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
 
     UA_AlarmConditionProperties alarmProperties;
     memset (&alarmProperties, 0, sizeof(alarmProperties));
@@ -267,6 +269,7 @@ START_TEST(conditionSequence1) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
         fns,
+        (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
     );
@@ -460,11 +463,11 @@ START_TEST(conditionSequence2) {
     memset(&ctx, 0, sizeof(ctx));
 
     UA_StatusCode retval;
-    UA_ConditionProperties conditionProperties;
-    conditionProperties.name = UA_QUALIFIEDNAME(0, "Test Condition");
-    conditionProperties.hierarchialReferenceType = UA_NODEID_NULL;
-    conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
-    conditionProperties.canBranch = true;
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = true
+    };
 
     UA_AlarmConditionProperties alarmProperties;
     memset (&alarmProperties, 0, sizeof(alarmProperties));
@@ -478,6 +481,7 @@ START_TEST(conditionSequence2) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
         fns,
+        (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
     );
@@ -756,11 +760,11 @@ setupTwoOperandsFilter(UA_ContentFilterElement *element, UA_UInt32 firstOperandI
 START_TEST(conditionSequence3) {
 
     UA_StatusCode retval;
-    UA_ConditionProperties conditionProperties;
-    conditionProperties.name = UA_QUALIFIEDNAME(0, "Test Condition");
-    conditionProperties.hierarchialReferenceType = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
-    conditionProperties.source = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
-    conditionProperties.canBranch = false;
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
 
     UA_AlarmConditionProperties alarmProperties;
     memset(&alarmProperties, 0, sizeof(alarmProperties));
@@ -775,6 +779,7 @@ START_TEST(conditionSequence3) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
         fns,
+        (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
     );
