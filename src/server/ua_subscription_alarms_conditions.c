@@ -1364,8 +1364,11 @@ enabledEvaluateCondition (UA_Server *server, UA_Condition* condition)
     if (!condition->fns.getInput) return;
     UA_UNLOCK(&server->serviceMutex);
     void *input = condition->fns.getInput(server, &condition->mainBranch->id, condition->context);
-    if (input && condition->fns.evaluate) (void) condition->fns.evaluate (server, &condition->mainBranch->id, condition->context, input);
-    if (condition->fns.inputFree) condition->fns.inputFree (input, condition->context);
+    if (input)
+    {
+        if (condition->fns.evaluate) (void) condition->fns.evaluate (server, &condition->mainBranch->id, condition->context, input);
+        if (condition->fns.inputFree) condition->fns.inputFree (input, condition->context);
+    }
     UA_LOCK(&server->serviceMutex);
 }
 
