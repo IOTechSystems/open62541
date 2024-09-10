@@ -2090,17 +2090,6 @@ addCondition_finish(
 
     if (!UA_NodeId_isNull(&conditionProperties->sourceNode))
     {
-        /* Make sure the ConditionSource has HasEventSource or one of its SubTypes ReferenceType. If the source has no
-         * reference type then create a has event source from the server to the source */
-        UA_NodeId serverObject = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
-        if (!UA_NodeId_equal(&serverObject, &conditionProperties->sourceNode) &&
-            !doesHasEventSourceReferenceExist(server, conditionProperties->sourceNode))
-        {
-            UA_NodeId hasEventSourceId = UA_NODEID_NUMERIC(0, UA_NS0ID_HASEVENTSOURCE);
-            retval = addRef(server, serverObject, hasEventSourceId, conditionProperties->sourceNode, true);
-            CONDITION_ASSERT_RETURN_RETVAL(retval, "Creating HasHasEventSource Reference to the Server Object failed",);
-        }
-
         /* create HasCondition Reference (HasCondition should be forward from the
          * ConditionSourceNode to the Condition. else, HasCondition should be
          * forward from the ConditionSourceNode to the ConditionType Node) */
