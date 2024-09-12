@@ -1366,7 +1366,12 @@ enabledEvaluateCondition (UA_Server *server, UA_Condition* condition)
     void *input = condition->fns.getInput(server, &condition->mainBranch->id, condition->context);
     if (input)
     {
-        if (condition->fns.evaluate) (void) condition->fns.evaluate (server, &condition->mainBranch->id, condition->context, input);
+        if (condition->fns.evaluate)
+        {
+            UA_StatusCode status = condition->fns.evaluate (server, &condition->mainBranch->id, condition->context, input);
+            CONDITION_LOG_ERROR(status, "Condition evaluation failed.");
+
+        }
         if (condition->fns.inputFree) condition->fns.inputFree (input, condition->context);
     }
     UA_LOCK(&server->serviceMutex);
@@ -1868,30 +1873,6 @@ UA_ConditionList_delete(UA_Server *server) {
     /* Free memory allocated for RefreshEvents NodeIds */
     UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_START_IDX]);
     UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_END_IDX]);
-}
-
-/* Check whether the Condition Source Node has "EventSource" or one of its
- * subtypes inverse reference. */
-static UA_Boolean
-doesHasEventSourceReferenceExist(UA_Server *server, const UA_NodeId nodeToCheck) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    UA_NodeId hasEventSourceId = UA_NODEID_NUMERIC(0, UA_NS0ID_HASEVENTSOURCE);
-    const UA_Node* node = UA_NODESTORE_GET(server, &nodeToCheck);
-    if(!node)
-        return false;
-    for(size_t i = 0; i < node->head.referencesSize; i++) {
-        UA_Byte refTypeIndex = node->head.references[i].referenceTypeIndex;
-        if((refTypeIndex == UA_REFERENCETYPEINDEX_HASEVENTSOURCE ||
-            isNodeInTree_singleRef(server, UA_NODESTORE_GETREFERENCETYPEID(server, refTypeIndex),
-                                   &hasEventSourceId, UA_REFERENCETYPEINDEX_HASSUBTYPE)) &&
-           (node->head.references[i].isInverse == true)) {
-            UA_NODESTORE_RELEASE(server, node);
-            return true;
-        }
-    }
-    UA_NODESTORE_RELEASE(server, node);
-    return false;
 }
 
 static inline UA_Condition *getCondition (UA_Server *server, const UA_NodeId *conditionId)
