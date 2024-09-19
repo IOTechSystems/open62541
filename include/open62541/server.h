@@ -2191,7 +2191,7 @@ UA_Server_createExclusiveRateOfChangeAlarm(
     UA_NodeId conditionId,
     const UA_CreateConditionProperties *conditionProperties,
     UA_ConditionFns conditionFns,
-    const UA_LevelAlarmProperties *properties,
+    const UA_RateOfChangeAlarmProperties *properties,
     UA_NodeId* outConditionId
 )
 {
