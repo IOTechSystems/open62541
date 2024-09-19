@@ -4590,6 +4590,7 @@ UA_StatusCode
 UA_Server_nonExclusiveLimitAlarmEvaluate_default (
     UA_Server *server,
     const UA_NodeId *conditionId,
+    void * ctx,
     const UA_Double *input
 )
 {
