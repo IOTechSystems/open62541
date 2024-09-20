@@ -143,7 +143,6 @@ START_TEST(createMultiple) {
         .browseName = UA_QUALIFIEDNAME(0, "Condition create multiple")
     };
 
-    UA_ConditionFns fns = {0};
     for(UA_UInt16 i = 0; i < 10; ++i)
     {
         UA_NodeId conditionInstance = UA_NODEID_NULL;
@@ -152,7 +151,6 @@ START_TEST(createMultiple) {
             UA_NODEID_NULL,
             UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE),
             &conditionProperties,
-            fns,
             NULL,
             NULL,
             &conditionInstance
@@ -171,7 +169,6 @@ START_TEST(createDelete) {
         .browseName = UA_QUALIFIEDNAME(0, "Condition createDelete")
     };
 
-    UA_ConditionFns fns = {0};
     // Loop to increase the chance of capturing dead pointers
     for(UA_UInt16 i = 0; i < 3; ++i)
     {
@@ -181,7 +178,6 @@ START_TEST(createDelete) {
             UA_NODEID_NULL,
             UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE),
             &conditionProperties,
-            fns,
             NULL,
             NULL,
             &conditionInstance
@@ -261,14 +257,12 @@ START_TEST(conditionSequence1) {
     memset (&alarmProperties, 0, sizeof(alarmProperties));
     alarmProperties.acknowledgeableConditionProperties.confirmable = true;
 
-    UA_ConditionFns fns = {0};
     UA_NodeId conditionInstance = UA_NODEID_NULL;
     retval = __UA_Server_createCondition(
         acserver,
         UA_NODEID_NULL,
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
-        fns,
         (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
@@ -473,14 +467,12 @@ START_TEST(conditionSequence2) {
     memset (&alarmProperties, 0, sizeof(alarmProperties));
     alarmProperties.acknowledgeableConditionProperties.confirmable = true;
 
-    UA_ConditionFns fns = {0};
     UA_NodeId conditionInstance = UA_NODEID_NULL;
     retval = __UA_Server_createCondition(
         acserver,
         UA_NODEID_NULL,
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
-        fns,
         (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
@@ -771,14 +763,12 @@ START_TEST(conditionSequence3) {
     alarmProperties.isSuppressible = true;
     alarmProperties.isServiceable = true;
 
-    UA_ConditionFns fns = {0};
     UA_NodeId conditionInstance = UA_NODEID_NULL;
     retval = __UA_Server_createCondition(
         acserver,
         UA_NODEID_NULL,
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
-        fns,
         (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance

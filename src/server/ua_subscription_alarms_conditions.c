@@ -62,7 +62,7 @@ typedef struct UA_Condition {
     UA_ConditionBranch *mainBranch;
     UA_NodeId sourceId;
     void *context;
-    UA_ConditionFns fns;
+    UA_ConditionEvaluateFns fns;
     UA_UInt64 onDelayCallbackId;
     UA_UInt64 offDelayCallbackId;
     UA_ConditionEventInfo *_delayCallbackInfo;
@@ -1966,8 +1966,7 @@ fail:
 
 static UA_StatusCode
 newConditionEntry (UA_Server *server, const UA_NodeId *conditionNodeId,
-                   const UA_CreateConditionProperties *conditionProperties, UA_ConditionFns conditionFns,
-                   UA_Condition **out)
+                   const UA_CreateConditionProperties *conditionProperties, UA_Condition **out)
 {
     /*make sure entry doesn't exist*/
     if (getCondition(server, conditionNodeId))
@@ -1979,7 +1978,6 @@ newConditionEntry (UA_Server *server, const UA_NodeId *conditionNodeId,
     UA_Condition *condition = UA_Condition_new();
     status = UA_NodeId_copy (&conditionProperties->sourceNode, (UA_NodeId *) &condition->sourceId);
     if (status != UA_STATUSCODE_GOOD) goto fail;
-    condition->fns = conditionFns;
     condition->canBranch = conditionProperties->canBranch;
     *out = condition;
     return UA_STATUSCODE_GOOD;
@@ -1989,11 +1987,10 @@ fail:
 }
 
 static UA_StatusCode
-newConditionInstanceEntry (UA_Server *server, const UA_NodeId *conditionNodeId, const UA_CreateConditionProperties *conditionProperties,
-                           UA_ConditionFns conditionFns)
+newConditionInstanceEntry (UA_Server *server, const UA_NodeId *conditionNodeId, const UA_CreateConditionProperties *conditionProperties)
 {
     UA_Condition *condition = NULL;
-    UA_StatusCode status = newConditionEntry(server, conditionNodeId, conditionProperties, conditionFns, &condition);
+    UA_StatusCode status = newConditionEntry(server, conditionNodeId, conditionProperties, &condition);
     if (status != UA_STATUSCODE_GOOD) return status;
     /*Could just pass this out of newConditionEntry*/
     if (!condition) return UA_STATUSCODE_BADINTERNALERROR;
@@ -2052,22 +2049,21 @@ static UA_StatusCode setConditionProperties (
 static UA_StatusCode
 addCondition_finish(
     UA_Server *server,
-    const UA_NodeId conditionId,
+    const UA_NodeId *conditionId,
     const UA_NodeId *conditionType,
     const UA_CreateConditionProperties *conditionProperties,
-    UA_ConditionFns conditionFns,
     UA_ConditionTypeSetupFn setupNodesFn,
     const void *setupNodesUserData
 ) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_StatusCode retval = addNode_finish(server, &server->adminSession, &conditionId);
+    UA_StatusCode retval = addNode_finish(server, &server->adminSession, conditionId);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Finish node failed",);
 
-    retval = setConditionProperties(server, conditionType, &conditionId, conditionProperties);
+    retval = setConditionProperties(server, conditionType, conditionId, conditionProperties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     UA_UNLOCK(&server->serviceMutex);
-    retval = setupNodesFn ? setupNodesFn (server, &conditionId, setupNodesUserData) : UA_STATUSCODE_GOOD;
+    retval = setupNodesFn ? setupNodesFn (server, conditionId, setupNodesUserData) : UA_STATUSCODE_GOOD;
     UA_LOCK(&server->serviceMutex);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setup Nodes failed",);
 
@@ -2078,7 +2074,7 @@ addCondition_finish(
          * forward from the ConditionSourceNode to the ConditionType Node) */
         UA_NodeId hasCondition = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCONDITION);
         if(!UA_NodeId_isNull(&conditionProperties->hierarchialReferenceType)) {
-            retval = addRef(server, conditionProperties->sourceNode, hasCondition, conditionId, true);
+            retval = addRef(server, conditionProperties->sourceNode, hasCondition, *conditionId, true);
             CONDITION_ASSERT_RETURN_RETVAL(retval, "Creating HasCondition Reference failed",);
         } else {
             retval = addRef(server, conditionProperties->sourceNode, hasCondition, *conditionType, true);
@@ -2091,9 +2087,24 @@ addCondition_finish(
     }
 
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setup Condition failed",);
-    return newConditionInstanceEntry (server, &conditionId, conditionProperties, conditionFns);
+    return newConditionInstanceEntry (server, conditionId, conditionProperties);
 }
 
+UA_StatusCode
+__UA_Server_addCondition_finish(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    const UA_NodeId *conditionType,
+    const UA_CreateConditionProperties *conditionProperties,
+    UA_ConditionTypeSetupFn setupNodesFn,
+    const void *setupNodesUserData
+)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = addCondition_finish(server, conditionId, conditionType, conditionProperties, setupNodesFn, setupNodesUserData);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
+}
 
 static UA_StatusCode
 addCondition_begin(UA_Server *server, const UA_NodeId conditionId,
@@ -2125,10 +2136,19 @@ addCondition_begin(UA_Server *server, const UA_NodeId conditionId,
         properties->browseName, conditionType, &oAttr,
         &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES], NULL, outNodeId
     );
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding Condition failed", );
-
-
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding Condition failed",);
     return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+__UA_Server_addCondition_begin(UA_Server *server, const UA_NodeId conditionId,
+                   const UA_NodeId conditionType,
+                   const UA_CreateConditionProperties *properties, UA_NodeId *outNodeId)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = addCondition_begin(server, conditionId, conditionType, properties, outNodeId);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
 }
 
 /* Create condition instance. The function checks first whether the passed
@@ -2140,13 +2160,12 @@ addCondition_begin(UA_Server *server, const UA_NodeId conditionId,
  * Otherwise, UA_NODEID_NULL should be passed to make the condition unexposed. */
 UA_StatusCode
 __UA_Server_createCondition(UA_Server *server,
-                          const UA_NodeId conditionId,
-                          const UA_NodeId conditionType,
-                          const UA_CreateConditionProperties *conditionProperties,
-                          UA_ConditionFns conditionFns,
-                          UA_ConditionTypeSetupFn setupFn,
-                          const void *setupData,
-                          UA_NodeId *outNodeId) {
+                            const UA_NodeId conditionId,
+                            const UA_NodeId conditionType,
+                            const UA_CreateConditionProperties *conditionProperties,
+                            UA_ConditionTypeSetupFn setupFn,
+                            const void *setupData,
+                            UA_NodeId *outNodeId) {
     if(!outNodeId) {
         UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
                      "outNodeId cannot be NULL!");
@@ -2156,13 +2175,13 @@ __UA_Server_createCondition(UA_Server *server,
     UA_LOCK(&server->serviceMutex);
     UA_StatusCode retval = addCondition_begin(server, conditionId, conditionType,
                                               conditionProperties, outNodeId);
-    UA_UNLOCK(&server->serviceMutex);
     if(retval != UA_STATUSCODE_GOOD)
+    {
+        UA_UNLOCK(&server->serviceMutex);
         return retval;
+    }
 
-    UA_LOCK(&server->serviceMutex);
-    retval = addCondition_finish(server, *outNodeId, &conditionType, conditionProperties,
-                                 conditionFns, setupFn, setupData);
+    retval = addCondition_finish (server, outNodeId, &conditionType, conditionProperties, setupFn, setupData);
     UA_UNLOCK(&server->serviceMutex);
     return retval;
 }
@@ -2180,6 +2199,21 @@ UA_Server_deleteCondition(UA_Server *server, const UA_NodeId conditionId)
     UA_StatusCode ret = removeCondition(server, cond);
     UA_UNLOCK(&server->serviceMutex);
     return ret;
+}
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setEvaluateFns (UA_Server *server, UA_NodeId conditionId, UA_ConditionEvaluateFns fns)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_Condition *cond = getCondition(server, &conditionId);
+    if (!cond)
+    {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADNODEIDUNKNOWN;
+    }
+    cond->fns = fns;
+    UA_UNLOCK(&server->serviceMutex);
+    return UA_STATUSCODE_GOOD;
 }
 
 UA_StatusCode

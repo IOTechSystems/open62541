@@ -165,20 +165,20 @@ addExclusiveLimitAlarmCondition (UA_Server *server) {
         .highLimit = highLimit
     };
 
-
-    UA_ConditionFns fns;
-    fns.getInput = sourceNodeGetInputDouble;
-    fns.inputFree = sourceNodeInputFreeDouble;
-    fns.evaluate = (UA_ConditionEvaluateFn) UA_Server_exclusiveLimitAlarmEvaluate_default;
-
     retval = UA_Server_createExclusiveLimitAlarm (
         server,
         UA_NODEID_NULL,
         &properties,
-        fns,
         &alarmProperties,
         &conditionInstance_1
     );
+
+    UA_ConditionEvaluateFns fns;
+    fns.getInput = sourceNodeGetInputDouble;
+    fns.inputFree = sourceNodeInputFreeDouble;
+    fns.evaluate = (UA_ConditionEvaluateFn) UA_Server_exclusiveLimitAlarmEvaluate_default;
+
+    retval = UA_Server_Condition_setEvaluateFns(server, conditionInstance_1, fns);
 
     retval = UA_Server_Condition_setCallbacks(server, conditionInstance_1, &condition1Impl);
 
