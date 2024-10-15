@@ -1162,12 +1162,27 @@ UA_Condition_State_setEnabledState(UA_Condition *condition, UA_Server *server, U
 }
 
 static inline UA_StatusCode
-UA_Condition_State_setActiveState (UA_Condition *condition, UA_Server *server, UA_Boolean active)
+Condition_State_setActiveState (UA_Server *server, const UA_NodeId * condition, UA_Boolean active)
 {
     return setTwoStateVariable (
-        server, &condition->mainBranch->id, fieldActiveStateQN, active,
+        server, condition, fieldActiveStateQN, active,
         active ? ACTIVE_TEXT : INACTIVE_TEXT
     );
+}
+
+static inline UA_StatusCode
+UA_Condition_State_setActiveState (UA_Condition *condition, UA_Server *server, UA_Boolean active)
+{
+    return Condition_State_setActiveState (server, &condition->mainBranch->id, active);
+}
+
+inline UA_StatusCode 
+UA_Server_Condition_setActiveState (UA_Server *server, UA_NodeId conditionId, UA_Boolean active)
+{
+    UA_LOCK (&server->serviceMutex);
+    UA_StatusCode status = Condition_State_setActiveState (server, &conditionId, active);
+    UA_UNLOCK (&server->serviceMutex);
+    return status;
 }
 
 static inline UA_StatusCode

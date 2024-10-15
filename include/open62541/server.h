@@ -1732,6 +1732,10 @@ UA_Server_Condition_setContext(UA_Server *server, UA_NodeId conditionId, void *c
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_getContext(UA_Server *server, UA_NodeId conditionId, void **conditionContext);
 
+/*
+    Condition Methods
+*/
+
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_enable(UA_Server *server, UA_NodeId conditionId, UA_Boolean enable);
 
@@ -1754,6 +1758,10 @@ UA_StatusCode UA_EXPORT
 UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
 
 /*
+    Condition direct State Maniputation
+*/
+
+/*
  * Set the condition confirmed state where a confirmation is required. The logic for setting this is Server specific, so
  * the only time a conditions ConfirmedState will be set to false is when a server implementation uses this function .
  */
@@ -1764,14 +1772,22 @@ UA_StatusCode UA_EXPORT
 UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditionId);
 
 UA_StatusCode UA_EXPORT
+UA_Server_Condition_getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setActiveState (UA_Server *server, UA_NodeId conditionId, UA_Boolean active);
+
+/* 
+    Condition Event Generation
+*/
+
+UA_StatusCode UA_EXPORT
 UA_Server_Condition_notifyStateChange(UA_Server *server, UA_NodeId condition, const UA_ConditionEventInfo *info);
 
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_updateActive(UA_Server *server, UA_NodeId conditionId,
                                  const UA_ConditionEventInfo *info, UA_Boolean isActive);
 
-UA_StatusCode UA_EXPORT
-UA_Server_Condition_getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);
 
 typedef UA_StatusCode (*UA_ConditionBranchIterCb)(
     UA_Server *server,
