@@ -472,6 +472,9 @@ setDefaultConfig(UA_ServerConfig *conf, UA_UInt16 portNumber) {
     /* Limits for MonitoredItems */
     conf->samplingIntervalLimits = UA_DURATIONRANGE(50.0, 24.0 * 3600.0 * 1000.0);
     conf->queueSizeLimits = UA_UINT32RANGE(1, 100);
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+    conf->supportsFilteredRetain = false;
+#endif
 #endif
 
 #ifdef UA_ENABLE_DISCOVERY
