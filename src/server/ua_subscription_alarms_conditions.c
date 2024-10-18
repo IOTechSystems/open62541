@@ -913,60 +913,6 @@ UA_ConditionBranch_State_Retain (const UA_ConditionBranch *branch, UA_Server *se
     return value;
 }
 
-static UA_StatusCode
-evaluateFilteredRetain (UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
-                        UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
-{
-    UA_Boolean overwriteRetain = false;
-    UA_Boolean triggerEvent = true;
-    /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5.2#_Ref106692035 */
-    UA_ConditionBranchFilterEntry *entry = UA_ConditionBranch_getFailedFilterEntry(branch, monId);
-    if (passed)
-    {
-        if (entry) LIST_REMOVE(entry, listEntry);
-        UA_free (entry);
-        goto done;
-    }
-    /* already in list */
-    if (entry)
-    {
-        triggerEvent = false;
-        goto done;
-    }
-    entry = (UA_ConditionBranchFilterEntry*) UA_malloc(sizeof (*entry));
-    if (!entry) return UA_STATUSCODE_BADOUTOFMEMORY;
-    entry->monitoredItemId = monId;
-    LIST_INSERT_HEAD(&branch->failedLastFilterList, entry, listEntry);
-    overwriteRetain = true;
-done:
-    *overwriteRetainOut = overwriteRetain;
-    *triggerEventOut = triggerEvent;
-    return UA_STATUSCODE_GOOD;
-}
-
-UA_StatusCode
-UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
-                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
-{
-    UA_Boolean overwriteRetain = false;
-    UA_Boolean triggerEvent = true;
-    if (server->config.supportsFilteredRetain)
-    {
-        UA_StatusCode ret = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
-        if (ret != UA_STATUSCODE_GOOD) return ret;
-    }
-
-    UA_Boolean eventRetain = UA_ConditionBranch_State_Retain (branch,server);
-    UA_Boolean lastEventRetain = branch->lastEventRetainValue;
-    branch->lastEventRetainValue = eventRetain;
-    /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
-    * of the Retain field from True to False. */
-    if (lastEventRetain == false && eventRetain == false) triggerEvent = false;
-    *overwriteRetainOut = overwriteRetain;
-    *triggerEventOut = triggerEvent;
-    return UA_STATUSCODE_GOOD;
-}
-
 static inline UA_Boolean
 UA_ConditionBranch_State_Acked(const UA_ConditionBranch *branch, UA_Server *server)
 {
@@ -1307,6 +1253,71 @@ UA_Condition_State_getMaxTimeShelved (UA_Condition *condition, UA_Server *server
 {
     return getDurationValueOfConditionField(server, &condition->mainBranch->id, fieldMaxTimeShelvedQN, maxTimeShelved);
 }
+
+static UA_StatusCode
+evaluateFilteredRetain (UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                        UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
+{
+    UA_Boolean overwriteRetain = false;
+    UA_Boolean triggerEvent = true;
+    /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5.2#_Ref106692035 */
+    UA_ConditionBranchFilterEntry *entry = UA_ConditionBranch_getFailedFilterEntry(branch, monId);
+    if (passed)
+    {
+        if (entry) LIST_REMOVE(entry, listEntry);
+        UA_free (entry);
+        goto done;
+    }
+    /* already in list */
+    if (entry)
+    {
+        triggerEvent = false;
+        goto done;
+    }
+    entry = (UA_ConditionBranchFilterEntry*) UA_malloc(sizeof (*entry));
+    if (!entry) return UA_STATUSCODE_BADOUTOFMEMORY;
+    entry->monitoredItemId = monId;
+    LIST_INSERT_HEAD(&branch->failedLastFilterList, entry, listEntry);
+    overwriteRetain = true;
+done:
+    *overwriteRetainOut = overwriteRetain;
+    *triggerEventOut = triggerEvent;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
+{
+    UA_Boolean overwriteRetain = false;
+    UA_Boolean triggerEvent = true;
+    if (server->config.supportsFilteredRetain)
+    {
+        UA_StatusCode ret = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
+        if (ret != UA_STATUSCODE_GOOD) return ret;
+    }
+
+    UA_Boolean enabled = UA_Condition_State_Enabled (branch->condition, server);
+    if (enabled)
+    {
+        UA_Boolean eventRetain = UA_ConditionBranch_State_Retain (branch,server);
+        UA_Boolean lastEventRetain = branch->lastEventRetainValue;
+        branch->lastEventRetainValue = eventRetain;
+        /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
+        * of the Retain field from True to False. */
+        if (lastEventRetain == false && eventRetain == false) triggerEvent = false;
+    }
+    else
+    {
+        /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5#:~:text=However%2C%20no%20Event%20Notifications%20will%20be%20generated%20while%20the%20Condition%20instance%20is%20disabled. */
+        triggerEvent = false;
+    }
+
+    *overwriteRetainOut = overwriteRetain;
+    *triggerEventOut = triggerEvent;
+    return UA_STATUSCODE_GOOD;
+}
+
 
 static UA_StatusCode
 UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
