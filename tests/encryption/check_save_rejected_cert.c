@@ -371,7 +371,7 @@ static void setup(void) {
     size_t issuerListSize = 0;
     UA_ByteString *issuerList = NULL;
 
-    /* Loading of a revocation list currently unsupported */
+    /* Revocation lists are supported, but not used here */
     UA_ByteString *revocationList = NULL;
     size_t revocationListSize = 0;
 
@@ -466,7 +466,7 @@ START_TEST(encryption_connect_reject_cert) {
 #ifdef __linux__
     /* Secure client connect */
     retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
-    ck_assert_uint_eq(retval, UA_STATUSCODE_BADSECURITYCHECKSFAILED);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADCERTIFICATETIMEINVALID);
 
     char rejectedFileName [256] = {0};
     strcat(rejectedFileName, "./");
