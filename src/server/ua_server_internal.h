@@ -26,19 +26,10 @@
 #include "ua_session.h"
 #include "ua_services.h"
 #include "ua_server_async.h"
-#include "util/ua_util_internal.h"
+#include "../util/ua_util_internal.h"
 #include "ziptree.h"
 
 _UA_BEGIN_DECLS
-
-#ifdef UA_ENABLE_PUBSUB
-#include "ua_pubsub.h"
-#endif
-
-#ifdef UA_ENABLE_DISCOVERY
-struct UA_DiscoveryManager;
-typedef struct UA_DiscoveryManager UA_DiscoveryManager;
-#endif
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS
 #include "ua_subscription.h"
@@ -60,6 +51,64 @@ typedef struct {
 #endif /* !UA_ENABLE_SUBSCRIPTIONS */
 
 /********************/
+/* GDS Transaction  */
+/********************/
+
+typedef enum {
+    UA_GDSTRANSACIONSTATE_FRESH,
+    UA_GDSTRANSACIONSTATE_PENDING,
+} UA_GDSTransactionState;
+
+typedef struct {
+    UA_ByteString certificate;
+    UA_ByteString privateKey;
+    UA_NodeId certificateGroup;
+    UA_NodeId certificateType;
+} UA_GDSCertificateInfo;
+
+typedef struct {
+    UA_Server *server;
+    UA_NodeId sessionId;
+    UA_GDSTransactionState state;
+
+    UA_ByteString localCsrCertificate;
+
+    size_t certGroupSize;
+    UA_CertificateGroup *certGroups;
+
+    size_t certificateInfosSize;
+    UA_GDSCertificateInfo *certificateInfos;
+
+    /* Callback to close all SecureChannels after calling applyChanges
+     * and freeing the transaction. */
+    UA_DelayedCallback dc;
+} UA_GDSTransaction;
+
+UA_StatusCode
+UA_GDSTransaction_init(UA_GDSTransaction *transaction,
+                       UA_Server *server,
+                       const UA_NodeId sessionId);
+
+/* Returns the appropriate CertificateGroup from the transaction.
+ * If the CertificateGroup does not exist in the transaction, it will be created. */
+UA_CertificateGroup*
+UA_GDSTransaction_getCertificateGroup(UA_GDSTransaction *transaction,
+                                      const UA_CertificateGroup *certGroup);
+
+UA_StatusCode
+UA_GDSTransaction_addCertificateInfo(UA_GDSTransaction *transaction,
+                                     const UA_NodeId certificateGroupId,
+                                     const UA_NodeId certificateTypeId,
+                                     const UA_ByteString *certificate,
+                                     const UA_ByteString *privateKey);
+
+void
+UA_GDSTransaction_clear(UA_GDSTransaction *transaction);
+
+void
+UA_GDSTransaction_delete(UA_GDSTransaction *transaction);
+
+/********************/
 /* Server Component */
 /********************/
 
@@ -76,23 +125,22 @@ typedef struct UA_ServerComponent {
     UA_String name;
     ZIP_ENTRY(UA_ServerComponent) treeEntry;
     UA_LifecycleState state;
+    UA_Server *server; /* Every ServerComponent has a backpointer to the server */
 
     /* Starting fails if the server is not also already started */
-    UA_StatusCode (*start)(UA_Server *server,
-                           struct UA_ServerComponent *sc);
+    UA_StatusCode (*start)(struct UA_ServerComponent *sc, UA_Server *server);
 
     /* Stopping is asynchronous and might need a few iterations of the main-loop
      * to succeed. */
-    void (*stop)(UA_Server *server,
-                 struct UA_ServerComponent *sc);
+    void (*stop)(struct UA_ServerComponent *sc);
 
-    /* Clean up the ServerComponent. Can fail if it is not stopped. */
-    UA_StatusCode (*free)(UA_Server *server,
-                          struct UA_ServerComponent *sc);
+    /* Clean up the ServerComponent. Can fail if it is not stopped. This does
+     * not free the memory and does not remove from the ziptree. */
+    UA_StatusCode (*clear)(struct UA_ServerComponent *sc);
 
     /* To be set by the server. So the component can notify the server about
      * asynchronous state changes. */
-    void (*notifyState)(UA_Server *server, struct UA_ServerComponent *sc,
+    void (*notifyState)(struct UA_ServerComponent *sc,
                         UA_LifecycleState state);
 } UA_ServerComponent;
 
@@ -151,6 +199,11 @@ struct UA_Server {
      * equipped with all possible access rights (Session Id: 1). */
     UA_Session adminSession;
 
+    /* SecureChannels */
+    TAILQ_HEAD(, UA_SecureChannel) channels;
+    UA_UInt32 lastChannelId;
+    UA_UInt32 lastTokenId;
+
     /* Namespaces */
     size_t namespacesSize;
     UA_String *namespaces;
@@ -179,11 +232,6 @@ struct UA_Server {
 # endif
 #endif
 
-    /* Publish/Subscribe */
-#ifdef UA_ENABLE_PUBSUB
-    UA_PubSubManager pubSubManager;
-#endif
-
 #if UA_MULTITHREADING >= 100
     UA_Lock serviceMutex;
 #endif
@@ -191,6 +239,9 @@ struct UA_Server {
     /* Statistics */
     UA_SecureChannelStatistics secureChannelStatistics;
     UA_ServerDiagnosticsSummaryDataType serverDiagnosticsSummary;
+
+    /* Transaction for certificate management */
+    UA_GDSTransaction transaction;
 };
 
 /***********************/
@@ -231,10 +282,7 @@ sendServiceFault(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 request
  * server matched by the security policy uri. */
 UA_SecurityPolicy *
 getSecurityPolicyByUri(const UA_Server *server,
-                       const UA_ByteString *securityPolicyUri);
-
-UA_UInt32
-generateSecureChannelTokenId(UA_Server *server);
+                       const UA_String *securityPolicyUri);
 
 /********************/
 /* Session Handling */
@@ -282,10 +330,11 @@ getSessionById(UA_Server *server, const UA_NodeId *sessionId);
  * multithreading and the nodestore.*/
 typedef UA_StatusCode (*UA_EditNodeCallback)(UA_Server*, UA_Session*,
                                              UA_Node *node, void*);
-UA_StatusCode UA_Server_editNode(UA_Server *server, UA_Session *session,
-                                 const UA_NodeId *nodeId,
-                                 UA_EditNodeCallback callback,
-                                 void *data);
+UA_StatusCode
+UA_Server_editNode(UA_Server *server, UA_Session *session, const UA_NodeId *nodeId,
+                   UA_UInt32 attributeMask, UA_ReferenceTypeSet references,
+                   UA_BrowseDirection referenceDirections,
+                   UA_EditNodeCallback callback, void *data);
 
 /*********************/
 /* Utility Functions */
@@ -547,12 +596,15 @@ addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
                     void *data, UA_Double interval_ms, UA_UInt64 *callbackId);
 
 #ifdef UA_ENABLE_DISCOVERY
-UA_ServerComponent *
-UA_DiscoveryManager_new(UA_Server *server);
+UA_ServerComponent * UA_DiscoveryManager_new(void);
 #endif
 
-UA_ServerComponent *
-UA_BinaryProtocolManager_new(UA_Server *server);
+UA_ServerComponent * UA_BinaryProtocolManager_new(UA_Server *server);
+
+
+#ifdef UA_ENABLE_PUBSUB
+UA_ServerComponent * UA_PubSubManager_new(UA_Server *server);
+#endif
 
 /***********/
 /* RefTree */
@@ -781,6 +833,15 @@ UA_NODESTORE_GET(UA_Server *server, const UA_NodeId *nodeId) {
                 UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
 }
 
+/* Get the editable node with all attributes and references */
+static UA_INLINE UA_Node *
+UA_NODESTORE_GET_EDIT(UA_Server *server, const UA_NodeId *nodeId) {
+    return server->config.nodestore.
+        getEditNode(server->config.nodestore.context, nodeId,
+                    UA_NODEATTRIBUTESMASK_ALL, UA_REFERENCETYPESET_ALL,
+                    UA_BROWSEDIRECTION_BOTH);
+}
+
 /* Get the node with all attributes and references */
 static UA_INLINE const UA_Node *
 UA_NODESTORE_GETFROMREF(UA_Server *server, UA_NodePointer target) {
@@ -792,6 +853,10 @@ UA_NODESTORE_GETFROMREF(UA_Server *server, UA_NodePointer target) {
 #define UA_NODESTORE_GET_SELECTIVE(server, nodeid, attrMask, refs, refDirs) \
     server->config.nodestore.getNode(server->config.nodestore.context,      \
                                      nodeid, attrMask, refs, refDirs)
+
+#define UA_NODESTORE_GET_EDIT_SELECTIVE(server, nodeid, attrMask, refs, refDirs) \
+    server->config.nodestore.getEditNode(server->config.nodestore.context,       \
+                                         nodeid, attrMask, refs, refDirs)
 
 #define UA_NODESTORE_GETFROMREF_SELECTIVE(server, target, attrMask, refs, refDirs) \
     server->config.nodestore.getNodeFromPtr(server->config.nodestore.context,      \

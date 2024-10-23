@@ -7,6 +7,7 @@
  */
 
 #include <open62541/client_config_default.h>
+#include <open62541/plugin/accesscontrol_default.h>
 #include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/server_config_default.h>
@@ -76,6 +77,16 @@ static void setup(void) {
     UA_CertificateGroup_AcceptAll(&config->secureChannelPKI);
     UA_CertificateGroup_AcceptAll(&config->sessionPKI);
 
+    /* Manually add the Basic128Rsa15 SecurityPolicy.
+     * It does not get added by default as it is considered unsecure. */
+    UA_ServerConfig_addSecurityPolicyBasic128Rsa15(config, &certificate, &privateKey);
+    UA_ServerConfig_addAllEndpoints(config);
+
+    /* Manually redo the AccessControl.
+     * It takes the already defined SecurityPolicies for the valid UserIdentityTokens.
+     * Otherwise Basic128Rsa15 will not work. */
+    UA_AccessControl_default(config, true, NULL, 0, NULL);
+
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
@@ -87,6 +98,42 @@ static void setup(void) {
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
 }
+
+#ifdef __linux__ /* Linux only so far */
+static void setup2(void) {
+    running = true;
+
+    /* Load certificate and private key */
+    UA_ByteString certificate;
+    certificate.length = CERT_DER_LENGTH;
+    certificate.data = CERT_DER_DATA;
+
+    UA_ByteString privateKey;
+    privateKey.length = KEY_DER_LENGTH;
+    privateKey.data = KEY_DER_DATA;
+
+    char storePathDir[4096];
+    getcwd(storePathDir, 4096);
+
+    const UA_String storePath = UA_STRING(storePathDir);
+    server =
+        UA_Server_newForUnitTestWithSecurityPolicies_Filestore(4840, &certificate,
+                                                               &privateKey, storePath);
+    ck_assert(server != NULL);
+
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    UA_CertificateGroup_AcceptAll(&config->secureChannelPKI);
+    UA_CertificateGroup_AcceptAll(&config->sessionPKI);
+
+    /* Set the ApplicationUri used in the certificate */
+    UA_String_clear(&config->applicationDescription.applicationUri);
+    config->applicationDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
+
+    UA_Server_run_startup(server);
+    THREAD_CREATE(server_thread, serverloop);
+}
+#endif
 
 static void teardown(void) {
     running = false;
@@ -153,6 +200,23 @@ START_TEST(encryption_connect) {
                                          revocationList, revocationListSize);
     cc->certificateVerification.clear(&cc->certificateVerification);
     UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+
+    /* Manually add the Basic128Rsa15 SecurityPolicy.
+     * It does not get added by default as it is considered unsecure. */
+    cc->securityPolicies = (UA_SecurityPolicy *)
+        UA_realloc(cc->securityPolicies, sizeof(UA_SecurityPolicy) *
+                   (cc->securityPoliciesSize + 1));
+    UA_SecurityPolicy_Basic128Rsa15(&cc->securityPolicies[cc->securityPoliciesSize],
+                                    certificate, privateKey, cc->logging);
+    cc->securityPoliciesSize++;
+
+    cc->authSecurityPolicies = (UA_SecurityPolicy *)
+        UA_realloc(cc->authSecurityPolicies, sizeof(UA_SecurityPolicy) *
+                   (cc->authSecurityPoliciesSize + 1));
+    UA_SecurityPolicy_Basic128Rsa15(&cc->authSecurityPolicies[cc->authSecurityPoliciesSize],
+                                    certificate, privateKey, cc->logging);
+    cc->authSecurityPoliciesSize++;
+
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15");
     ck_assert(client != NULL);
@@ -235,6 +299,23 @@ START_TEST(encryption_connect_pem) {
                                          revocationList, revocationListSize);
     cc->certificateVerification.clear(&cc->certificateVerification);
     UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+
+    /* Manually add the Basic128Rsa15 SecurityPolicy.
+     * It does not get added by default as it is considered unsecure. */
+    cc->securityPolicies = (UA_SecurityPolicy *)
+        UA_realloc(cc->securityPolicies, sizeof(UA_SecurityPolicy) *
+                   (cc->securityPoliciesSize + 1));
+    UA_SecurityPolicy_Basic128Rsa15(&cc->securityPolicies[cc->securityPoliciesSize],
+                                    certificate, privateKey, cc->logging);
+    cc->securityPoliciesSize++;
+
+    cc->authSecurityPolicies = (UA_SecurityPolicy *)
+        UA_realloc(cc->authSecurityPolicies, sizeof(UA_SecurityPolicy) *
+                   (cc->authSecurityPoliciesSize + 1));
+    UA_SecurityPolicy_Basic128Rsa15(&cc->authSecurityPolicies[cc->authSecurityPoliciesSize],
+                                    certificate, privateKey, cc->logging);
+    cc->authSecurityPoliciesSize++;
+
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15");
     ck_assert(client != NULL);
@@ -268,6 +349,17 @@ static Suite* testSuite_encryption(void) {
     tcase_add_test(tc_encryption, encryption_connect_pem);
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_encryption);
+
+#ifdef __linux__ /* Linux only so far */
+    TCase *tc_encryption_filestore = tcase_create("Encryption basic128rsa15 security policy filestore");
+    tcase_add_checked_fixture(tc_encryption_filestore, setup2, teardown);
+#ifdef UA_ENABLE_ENCRYPTION
+    tcase_add_test(tc_encryption_filestore, encryption_connect);
+    tcase_add_test(tc_encryption_filestore, encryption_connect_pem);
+#endif /* UA_ENABLE_ENCRYPTION */
+    suite_add_tcase(s,tc_encryption_filestore);
+#endif
+
     return s;
 }
 

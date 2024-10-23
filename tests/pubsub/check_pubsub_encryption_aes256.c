@@ -10,7 +10,7 @@
 #include <open62541/plugin/securitypolicy_default.h>
 
 #include "test_helpers.h"
-#include "ua_pubsub.h"
+#include "ua_pubsub_internal.h"
 #include "ua_server_internal.h"
 
 #include <check.h>
@@ -118,8 +118,9 @@ START_TEST(SinglePublishDataSetField) {
 
     UA_Server_setWriterGroupEncryptionKeys(server, writerGroup3, 1, sk, ek, kn);
 
-    UA_WriterGroup *wg = UA_WriterGroup_findWGbyId(server, writerGroup3);
-    UA_WriterGroup_publishCallback(server, wg);
+    UA_PubSubManager *psm = getPSM(server);
+    UA_WriterGroup *wg = UA_WriterGroup_find(psm, writerGroup3);
+    UA_WriterGroup_publishCallback(psm, wg);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 } END_TEST
 

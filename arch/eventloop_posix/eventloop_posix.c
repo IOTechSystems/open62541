@@ -18,24 +18,13 @@
 /*********/
 
 static UA_DateTime
-UA_EventLoopPOSIX_nextCyclicTime(UA_EventLoop *public_el) {
+UA_EventLoopPOSIX_nextTimer(UA_EventLoop *public_el) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)public_el;
-    return UA_Timer_nextRepeatedTime(&el->timer);
+    return UA_Timer_next(&el->timer);
 }
 
 static UA_StatusCode
-UA_EventLoopPOSIX_addTimedCallback(UA_EventLoop *public_el,
-                                   UA_Callback callback,
-                                   void *application, void *data,
-                                   UA_DateTime date,
-                                   UA_UInt64 *callbackId) {
-    UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)public_el;
-    return UA_Timer_addTimedCallback(&el->timer, callback, application,
-                                     data, date, callbackId);
-}
-
-static UA_StatusCode
-UA_EventLoopPOSIX_addCyclicCallback(UA_EventLoop *public_el,
+UA_EventLoopPOSIX_addTimer(UA_EventLoop *public_el,
                                     UA_Callback cb,
                                     void *application, void *data,
                                     UA_Double interval_ms,
@@ -43,77 +32,119 @@ UA_EventLoopPOSIX_addCyclicCallback(UA_EventLoop *public_el,
                                     UA_TimerPolicy timerPolicy,
                                     UA_UInt64 *callbackId) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)public_el;
-    return UA_Timer_addRepeatedCallback(&el->timer, cb, application,
-                                        data, interval_ms,
-                                        public_el->dateTime_nowMonotonic(public_el),
-                                        baseTime, timerPolicy, callbackId);
+    return UA_Timer_add(&el->timer, cb, application, data, interval_ms,
+                        public_el->dateTime_nowMonotonic(public_el),
+                        baseTime, timerPolicy, callbackId);
 }
 
 static UA_StatusCode
-UA_EventLoopPOSIX_modifyCyclicCallback(UA_EventLoop *public_el,
-                                       UA_UInt64 callbackId,
-                                       UA_Double interval_ms,
-                                       UA_DateTime *baseTime,
-                                       UA_TimerPolicy timerPolicy) {
+UA_EventLoopPOSIX_modifyTimer(UA_EventLoop *public_el,
+                              UA_UInt64 callbackId,
+                              UA_Double interval_ms,
+                              UA_DateTime *baseTime,
+                              UA_TimerPolicy timerPolicy) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)public_el;
-    return UA_Timer_changeRepeatedCallback(&el->timer, callbackId, interval_ms,
-                                           public_el->dateTime_nowMonotonic(public_el),
-                                           baseTime, timerPolicy);
+    return UA_Timer_modify(&el->timer, callbackId, interval_ms,
+                           public_el->dateTime_nowMonotonic(public_el),
+                           baseTime, timerPolicy);
 }
 
 static void
-UA_EventLoopPOSIX_removeCyclicCallback(UA_EventLoop *public_el,
-                                       UA_UInt64 callbackId) {
+UA_EventLoopPOSIX_removeTimer(UA_EventLoop *public_el,
+                              UA_UInt64 callbackId) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)public_el;
-    UA_Timer_removeCallback(&el->timer, callbackId);
+    UA_Timer_remove(&el->timer, callbackId);
 }
 
 void
 UA_EventLoopPOSIX_addDelayedCallback(UA_EventLoop *public_el,
                                      UA_DelayedCallback *dc) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)public_el;
-    UA_DelayedCallback *old;
-    do {
-        old = el->delayedCallbacks;
-        dc->next = old;
-    } while(UA_atomic_cmpxchg((void * volatile *)&el->delayedCallbacks, old, dc) != old);
+    dc->next = NULL;
+
+    /* el->delayedTail points either to prev->next or to the head.
+     * We need to update two locations:
+     * 1: el->delayedTail = &dc->next;
+     * 2: *oldtail = dc; (equal to &dc->next)
+     *
+     * Once we have (1), we "own" the previous-to-last entry. No need to worry
+     * about (2), we can adjust it with a delay. This makes the queue
+     * "eventually consistent". */
+    UA_DelayedCallback **oldtail = (UA_DelayedCallback**)
+        UA_atomic_xchg((void**)&el->delayedTail, &dc->next);
+    UA_atomic_xchg((void**)oldtail, &dc->next);
+}
+
+/* Resets the delayed queue and returns the previous head and tail */
+static void
+resetDelayedQueue(UA_EventLoopPOSIX *el, UA_DelayedCallback **oldHead,
+                  UA_DelayedCallback **oldTail) {
+    if(el->delayedHead1 <= (UA_DelayedCallback *)0x01 &&
+       el->delayedHead2 <= (UA_DelayedCallback *)0x01)
+        return; /* The queue is empty */
+
+    UA_Boolean active1 = (el->delayedHead1 != (UA_DelayedCallback*)0x01);
+    UA_DelayedCallback **activeHead = (active1) ? &el->delayedHead1 : &el->delayedHead2;
+    UA_DelayedCallback **inactiveHead = (active1) ? &el->delayedHead2 : &el->delayedHead1;
+
+    /* Switch active/inactive by resetting the sentinel values. The (old) active
+     * head points to an element which we return. Parallel threads continue to
+     * add elements to the queue "below" the first element. */
+    UA_atomic_xchg((void**)inactiveHead, NULL);
+    *oldHead = (UA_DelayedCallback *)
+        UA_atomic_xchg((void**)activeHead, (void*)0x01);
+
+    /* Make the tail point to the (new) active head. Return the value of last
+     * tail. When iterating over the queue elements, we need to find this tail
+     * as the last element. If we find a NULL next-pointer before hitting the
+     * tail spinlock until the pointer updates (eventually consistent). */
+    *oldTail = (UA_DelayedCallback*)
+        UA_atomic_xchg((void**)&el->delayedTail, inactiveHead);
 }
 
 static void
 UA_EventLoopPOSIX_removeDelayedCallback(UA_EventLoop *public_el,
-                                     UA_DelayedCallback *dc) {
+                                        UA_DelayedCallback *dc) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)public_el;
     UA_LOCK(&el->elMutex);
-    UA_DelayedCallback **prev = &el->delayedCallbacks;
-    while(*prev) {
-        if(*prev == dc) {
-            *prev = (*prev)->next;
-            UA_UNLOCK(&el->elMutex);
-            return;
-        }
-        prev = &(*prev)->next;
+
+    /* Reset and get the old head and tail */
+    UA_DelayedCallback *cur = NULL, *tail = NULL;
+    resetDelayedQueue(el, &cur, &tail);
+
+    /* Loop until we reach the tail (or head and tail are both NULL) */
+    UA_DelayedCallback *next;
+    for(; cur; cur = next) {
+        /* Spin-loop until the next-pointer of cur is updated.
+         * The element pointed to by tail must appear eventually. */
+        next = cur->next;
+        while(!next && cur != tail)
+            next = (UA_DelayedCallback *)UA_atomic_load((void**)&cur->next);
+        if(cur == dc)
+            continue;
+        UA_EventLoopPOSIX_addDelayedCallback(public_el, cur);
     }
+
     UA_UNLOCK(&el->elMutex);
 }
 
-/* Process and then free registered delayed callbacks */
 static void
 processDelayed(UA_EventLoopPOSIX *el) {
     UA_LOG_TRACE(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
                  "Process delayed callbacks");
 
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
-    /* First empty the linked list in the el. So a delayed callback can add
-     * (itself) to the list. New entries are then processed during the next
-     * iteration. */
-    UA_DelayedCallback *dc = el->delayedCallbacks, *next = NULL;
-    el->delayedCallbacks = NULL;
+    /* Reset and get the old head and tail */
+    UA_DelayedCallback *dc = NULL, *tail = NULL;
+    resetDelayedQueue(el, &dc, &tail);
 
+    /* Loop until we reach the tail (or head and tail are both NULL) */
+    UA_DelayedCallback *next;
     for(; dc; dc = next) {
         next = dc->next;
-        /* Delayed Callbacks might have no callback set. We don't return a
-         * StatusCode during "add" and don't validate. So test here. */
+        while(!next && dc != tail)
+            next = (UA_DelayedCallback *)UA_atomic_load((void**)&dc->next);
         if(!dc->callback)
             continue;
         UA_UNLOCK(&el->elMutex);
@@ -136,8 +167,8 @@ UA_EventLoopPOSIX_start(UA_EventLoopPOSIX *el) {
         return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    UA_LOG_INFO(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
-                "Starting the EventLoop");
+    UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
+                 "Starting the EventLoop");
 
     /* Setting the clock source */
     const UA_Int32 *cs = (const UA_Int32*)
@@ -231,7 +262,7 @@ UA_EventLoopPOSIX_start(UA_EventLoopPOSIX *el) {
 
 static void
 checkClosed(UA_EventLoopPOSIX *el) {
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     UA_EventSource *es = el->eventLoop.eventSources;
     while(es) {
@@ -241,7 +272,7 @@ checkClosed(UA_EventLoopPOSIX *el) {
     }
 
     /* Not closed until all delayed callbacks are processed */
-    if(el->delayedCallbacks != NULL)
+    if(el->delayedHead1 != NULL && el->delayedHead2 != NULL)
         return;
 
     /* Close the self-pipe when everything else is done */
@@ -257,8 +288,8 @@ checkClosed(UA_EventLoopPOSIX *el) {
     close(el->epollfd);
 #endif
 
-    UA_LOG_INFO(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
-                "The EventLoop has stopped");
+    UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
+                 "The EventLoop has stopped");
 }
 
 static void
@@ -272,8 +303,8 @@ UA_EventLoopPOSIX_stop(UA_EventLoopPOSIX *el) {
         return;
     }
 
-    UA_LOG_INFO(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
-                "Stopping the EventLoop");
+    UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
+                 "Stopping the EventLoop");
 
     /* Set to STOPPING to prevent "normal use" */
     *(UA_EventLoopState*)(uintptr_t)&el->eventLoop.state =
@@ -313,7 +344,7 @@ UA_EventLoopPOSIX_run(UA_EventLoopPOSIX *el, UA_UInt32 timeout) {
     if(el->eventLoop.state == UA_EVENTLOOPSTATE_FRESH ||
        el->eventLoop.state == UA_EVENTLOOPSTATE_STOPPED) {
         UA_LOG_WARNING(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
-                       "Cannot iterate a stopped EventLoop");
+                       "Cannot run a stopped EventLoop");
         el->executing = false;
         UA_UNLOCK(&el->elMutex);
         return UA_STATUSCODE_BADINTERNALERROR;
@@ -341,7 +372,7 @@ UA_EventLoopPOSIX_run(UA_EventLoopPOSIX *el, UA_UInt32 timeout) {
      * itself). In that case we don't want to wait (indefinitely) for an event
      * to happen. Process queued events but don't sleep. Then process the
      * delayed callbacks in the next iteration. */
-    if(el->delayedCallbacks != NULL)
+    if(el->delayedHead1 != NULL && el->delayedHead2 != NULL)
         timeout = 0;
 
     /* Compute the remaining time */
@@ -528,6 +559,10 @@ UA_EventLoop_new_POSIX(const UA_Logger *logger) {
     UA_LOCK_INIT(&el->elMutex);
     UA_Timer_init(&el->timer);
 
+    /* Initialize the queue */
+    el->delayedTail = &el->delayedHead1;
+    el->delayedHead2 = (UA_DelayedCallback*)0x01; /* sentinel value */
+
 #ifdef _WIN32
     /* Start the WSA networking subsystem on Windows */
     WSADATA wsaData;
@@ -549,11 +584,10 @@ UA_EventLoop_new_POSIX(const UA_Logger *logger) {
     el->eventLoop.dateTime_localTimeUtcOffset =
         UA_EventLoopPOSIX_DateTime_localTimeUtcOffset;
 
-    el->eventLoop.nextCyclicTime = UA_EventLoopPOSIX_nextCyclicTime;
-    el->eventLoop.addCyclicCallback = UA_EventLoopPOSIX_addCyclicCallback;
-    el->eventLoop.modifyCyclicCallback = UA_EventLoopPOSIX_modifyCyclicCallback;
-    el->eventLoop.removeCyclicCallback = UA_EventLoopPOSIX_removeCyclicCallback;
-    el->eventLoop.addTimedCallback = UA_EventLoopPOSIX_addTimedCallback;
+    el->eventLoop.nextTimer = UA_EventLoopPOSIX_nextTimer;
+    el->eventLoop.addTimer = UA_EventLoopPOSIX_addTimer;
+    el->eventLoop.modifyTimer = UA_EventLoopPOSIX_modifyTimer;
+    el->eventLoop.removeTimer = UA_EventLoopPOSIX_removeTimer;
     el->eventLoop.addDelayedCallback = UA_EventLoopPOSIX_addDelayedCallback;
     el->eventLoop.removeDelayedCallback = UA_EventLoopPOSIX_removeDelayedCallback;
 
@@ -697,7 +731,7 @@ flushSelfPipe(UA_SOCKET s) {
 
 UA_StatusCode
 UA_EventLoopPOSIX_registerFD(UA_EventLoopPOSIX *el, UA_RegisteredFD *rfd) {
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
     UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
                  "Registering fd: %u", (unsigned)rfd->fd);
 
@@ -718,13 +752,13 @@ UA_EventLoopPOSIX_registerFD(UA_EventLoopPOSIX *el, UA_RegisteredFD *rfd) {
 UA_StatusCode
 UA_EventLoopPOSIX_modifyFD(UA_EventLoopPOSIX *el, UA_RegisteredFD *rfd) {
     /* Do nothing, it is enough if the data was changed in the rfd */
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
     return UA_STATUSCODE_GOOD;
 }
 
 void
 UA_EventLoopPOSIX_deregisterFD(UA_EventLoopPOSIX *el, UA_RegisteredFD *rfd) {
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
     UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_EVENTLOOP,
                  "Unregistering fd: %u", (unsigned)rfd->fd);
 
@@ -759,7 +793,7 @@ UA_EventLoopPOSIX_deregisterFD(UA_EventLoopPOSIX *el, UA_RegisteredFD *rfd) {
 
 static UA_FD
 setFDSets(UA_EventLoopPOSIX *el, fd_set *readset, fd_set *writeset, fd_set *errset) {
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     FD_ZERO(readset);
     FD_ZERO(writeset);
@@ -791,7 +825,7 @@ setFDSets(UA_EventLoopPOSIX *el, fd_set *readset, fd_set *writeset, fd_set *errs
 UA_StatusCode
 UA_EventLoopPOSIX_pollFDs(UA_EventLoopPOSIX *el, UA_DateTime listenTimeout) {
     UA_assert(listenTimeout >= 0);
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     fd_set readset, writeset, errset;
     UA_FD highestfd = setFDSets(el, &readset, &writeset, &errset);
@@ -990,7 +1024,7 @@ UA_EventLoopPOSIX_pollFDs(UA_EventLoopPOSIX *el, UA_DateTime listenTimeout) {
 
 #endif /* defined(UA_HAVE_EPOLL) */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 int UA_EventLoopPOSIX_pipe(SOCKET fds[2]) {
     struct sockaddr_in inaddr;
     memset(&inaddr, 0, sizeof(inaddr));
@@ -1010,7 +1044,12 @@ int UA_EventLoopPOSIX_pipe(SOCKET fds[2]) {
     fds[0] = socket(AF_INET, SOCK_STREAM, 0);
     int err = connect(fds[0], (struct sockaddr*)&addr, len);
     fds[1] = accept(lst, 0, 0);
+#ifdef __WIN32
     closesocket(lst);
+#endif
+#ifdef __APPLE__
+    close(lst);
+#endif
 
     UA_EventLoopPOSIX_setNoSigPipe(fds[0]);
     UA_EventLoopPOSIX_setReusable(fds[0]);

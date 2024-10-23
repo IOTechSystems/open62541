@@ -13,6 +13,7 @@
 
 #include <open62541/client_highlevel.h>
 #include <open62541/client_highlevel_async.h>
+#include "../util/ua_util_internal.h"
 
 /* The highlevel client API is an "outer onion layer". This file does not
  * include ua_client_internal.h on purpose. */
@@ -25,7 +26,7 @@ UA_Client_NamespaceGetIndex(UA_Client *client, UA_String *namespaceUri,
     UA_ReadValueId id;
     UA_ReadValueId_init(&id);
     id.attributeId = UA_ATTRIBUTEID_VALUE;
-    id.nodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_NAMESPACEARRAY);
+    id.nodeId = UA_NS0ID(SERVER_NAMESPACEARRAY);
     request.nodesToRead = &id;
     request.nodesToReadSize = 1;
 
@@ -873,11 +874,24 @@ AttributeReadCallback(UA_Client *client, void *userdata,
         goto finish;
     }
 
-    /* Check we have a scalar value of the right datatype */
-    if(!dv->hasValue ||
-       !UA_Variant_hasScalarType(&dv->value, ctx->resultType)) {
+    /* Check we have a value */
+    if(!dv->hasValue) {
         res = UA_STATUSCODE_BADINTERNALERROR;
         goto finish;
+    }
+
+    /* Check the type. Try to adjust "in situ" if no match. */
+    if(!UA_Variant_hasScalarType(&dv->value, ctx->resultType)) {
+        /* Remember the old pointer, adjustType can "unwrap" a type but won't
+         * free the wrapper. Because the server code still keeps the wrapper. */
+        void *oldVal = dv->value.data;
+        adjustType(&dv->value, ctx->resultType);
+        if(dv->value.data != oldVal)
+            UA_free(oldVal);
+        if(!UA_Variant_hasScalarType(&dv->value, ctx->resultType)) {
+            res = UA_STATUSCODE_BADINTERNALERROR;
+            goto finish;
+        }
     }
 
     /* Callback into userland */

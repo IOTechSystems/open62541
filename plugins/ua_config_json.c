@@ -451,8 +451,11 @@ PARSE_JSON(MdnsConfigurationField) {
                 parseJsonJumpTable[UA_SERVERCONFIGFIELD_STRINGARRAY](ctx, &config->mdnsConfig.serverCapabilities, &config->mdnsConfig.serverCapabilitiesSize);
             else if(strcmp(field_str, "mdnsInterfaceIP") == 0)
                 parseJsonJumpTable[UA_SERVERCONFIGFIELD_STRING](ctx, &config->mdnsInterfaceIP, NULL);
+            /* mdnsIpAddressList and mdnsIpAddressListSize are only available if UA_HAS_GETIFADDR is not defined: */
+# if !defined(UA_HAS_GETIFADDR)
             else if(strcmp(field_str, "mdnsIpAddressList") == 0)
                 parseJsonJumpTable[UA_SERVERCONFIGFIELD_UINT32ARRAY](ctx, &config->mdnsIpAddressList, &config->mdnsIpAddressListSize);
+# endif
             else {
                 UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Unknown field name.");
             }
@@ -790,7 +793,7 @@ PARSE_JSON(SecurityPkiField) {
     UA_NodeId defaultApplicationGroup =
            UA_NODEID_NUMERIC(0, UA_NS0ID_SERVERCONFIGURATION_CERTIFICATEGROUPS_DEFAULTAPPLICATIONGROUP);
     retval = UA_CertificateGroup_Filestore(&config->secureChannelPKI, &defaultApplicationGroup,
-                                           &pkiFolder, config->logging, &paramsMap);
+                                           pkiFolder, config->logging, &paramsMap);
     if(retval != UA_STATUSCODE_GOOD) {
         UA_String_clear(&pkiFolder);
         return retval;
@@ -799,7 +802,7 @@ PARSE_JSON(SecurityPkiField) {
     UA_NodeId defaultUserTokenGroup =
             UA_NODEID_NUMERIC(0, UA_NS0ID_SERVERCONFIGURATION_CERTIFICATEGROUPS_DEFAULTUSERTOKENGROUP);
     retval = UA_CertificateGroup_Filestore(&config->sessionPKI, &defaultUserTokenGroup,
-                                            &pkiFolder, config->logging, &paramsMap);
+                                            pkiFolder, config->logging, &paramsMap);
     if(retval != UA_STATUSCODE_GOOD) {
         UA_String_clear(&pkiFolder);
         return retval;
@@ -1025,7 +1028,7 @@ UA_ServerConfig_updateFromFile(UA_ServerConfig *config, const UA_ByteString json
 #ifdef UA_ENABLE_ENCRYPTION
 static UA_ByteString
 loadCertificateFile(const char *const path) {
-    UA_ByteString fileContents = UA_STRING_NULL;
+    UA_ByteString fileContents = UA_BYTESTRING_NULL;
 
     /* Open the file */
     FILE *fp = fopen(path, "rb");

@@ -10,6 +10,8 @@
 
 #include <stdio.h>
 
+#include "mp_printf.h"
+
 /* ANSI escape sequences for color output taken from here:
  * https://stackoverflow.com/questions/3219393/stdlib-and-colored-output-in-c*/
 
@@ -48,7 +50,7 @@ logCategoryNames[UA_LOGCATEGORIES] =
 # ifdef UA_ARCHITECTURE_POSIX
 UA_Lock logLock = UA_LOCK_STATIC_INIT;
 # else
-void * volatile logSpinLock = NULL;
+void * logSpinLock = NULL;
 static UA_INLINE void spinLock(void) {
     while(UA_atomic_cmpxchg(&logSpinLock, NULL, (void*)0x1) != NULL) {}
 }
@@ -85,13 +87,16 @@ UA_Log_Stdout_log(void *context, UA_LogLevel level, UA_LogCategory category,
 # endif
 #endif
 
+#define STDOUT_LOGBUFSIZE 512
+    char logbuf[STDOUT_LOGBUFSIZE];
+
     /* Log */
     printf("[%04u-%02u-%02u %02u:%02u:%02u.%03u (UTC%+05d)] %s/%s" ANSI_COLOR_RESET "\t",
            dts.year, dts.month, dts.day, dts.hour, dts.min, dts.sec, dts.milliSec,
            (int)(tOffset / UA_DATETIME_SEC / 36), logLevelNames[logLevelSlot],
            logCategoryNames[category]);
-    vprintf(msg, args);
-    printf("\n");
+    mp_vsnprintf(logbuf, STDOUT_LOGBUFSIZE, msg, args);
+    printf("%s\n", logbuf);
     fflush(stdout);
 
     /* Unlock */

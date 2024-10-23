@@ -20,6 +20,11 @@ _UA_BEGIN_DECLS
 
 #ifdef UA_ENABLE_DISCOVERY
 
+#ifdef UA_ENABLE_DISCOVERY
+struct UA_DiscoveryManager;
+typedef struct UA_DiscoveryManager UA_DiscoveryManager;
+#endif
+
 typedef struct registeredServer {
     LIST_ENTRY(registeredServer) pointers;
     UA_RegisteredServer registeredServer;
@@ -79,8 +84,6 @@ struct UA_DiscoveryManager {
 
     UA_UInt64 discoveryCallbackId;
 
-    UA_Server *server; /* backpointer */
-
     /* Outstanding requests. So they can be cancelled during shutdown. */
     asyncRegisterRequest registerRequests[UA_MAXREGISTERREQUESTS];
 
@@ -117,8 +120,7 @@ struct UA_DiscoveryManager {
 };
 
 void
-UA_DiscoveryManager_setState(UA_Server *server,
-                             UA_DiscoveryManager *dm,
+UA_DiscoveryManager_setState(UA_DiscoveryManager *dm,
                              UA_LifecycleState state);
 
 #ifdef UA_ENABLE_DISCOVERY_MULTICAST
@@ -132,9 +134,9 @@ UA_DiscoveryManager_setState(UA_Server *server,
  * serversOnNetwork list so that a client finds it when calling
  * FindServersOnNetwork. */
 void
-UA_Discovery_updateMdnsForDiscoveryUrl(UA_DiscoveryManager *dm, const UA_String *serverName,
+UA_Discovery_updateMdnsForDiscoveryUrl(UA_DiscoveryManager *dm, const UA_String serverName,
                                        const UA_MdnsDiscoveryConfiguration *mdnsConfig,
-                                       const UA_String *discoveryUrl, UA_Boolean isOnline,
+                                       const UA_String discoveryUrl, UA_Boolean isOnline,
                                        UA_Boolean updateTxt);
 
 void UA_DiscoveryManager_startMulticast(UA_DiscoveryManager *dm);
@@ -144,16 +146,13 @@ void UA_DiscoveryManager_sendMulticastMessages(UA_DiscoveryManager *dm);
 UA_StatusCode
 UA_DiscoveryManager_addEntryToServersOnNetwork(UA_DiscoveryManager *dm,
                                                const char *fqdnMdnsRecord,
-                                               const char *serverName,
-                                               size_t serverNameLen,
+                                               UA_String serverName,
                                                struct serverOnNetwork **addedEntry);
 
 UA_StatusCode
 UA_DiscoveryManager_removeEntryFromServersOnNetwork(UA_DiscoveryManager *dm,
                                                     const char *fqdnMdnsRecord,
-                                                    const char *serverName,
-                                                    size_t serverNameLen);
-
+                                                    UA_String serverName);
 
 void mdns_record_received(const struct resource *r, void *data);
 

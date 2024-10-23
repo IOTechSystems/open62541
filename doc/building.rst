@@ -248,7 +248,8 @@ Detailed SDK Features
    Enable dynamic addition and removal of nodes at runtime
 
 **UA_ENABLE_AMALGAMATION**
-   Compile a single-file release into the files :file:`open62541.c` and :file:`open62541.h`. Not recommended for installation.
+   Compile a single-file release into the files :file:`open62541.c` and :file:`open62541.h`.
+   Invoke the CMake target to generate the amalgamation as ``make open62541-amalgamation``.
 
 **UA_ENABLE_IMMUTABLE_NODES**
    Nodes in the information model are not edited but copied and replaced. The
@@ -323,14 +324,6 @@ PubSub Build Options
    Enable the information model representation of the PubSub configuration. For
    more details take a look at the following section `PubSub Information Model
    Representation`. Disabled by default.
-
-**UA_ENABLE_PUBSUB_MONITORING**
-   Enable the experimental PubSub monitoring. This feature provides a basic
-   framework to implement monitoring/timeout checks for PubSub components.
-   Initially the MessageReceiveTimeout check of a DataSetReader is provided. It
-   uses the internal server callback implementation. The monitoring backend can
-   be changed by the application to satisfy realtime requirements. Disabled by
-   default.
 
 Debug Build Options
 ^^^^^^^^^^^^^^^^^^^

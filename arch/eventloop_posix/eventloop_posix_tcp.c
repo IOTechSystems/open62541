@@ -56,7 +56,7 @@ TCP_setNoNagle(UA_FD sockfd) {
 /* Test if the ConnectionManager can be stopped */
 static void
 TCP_checkStopped(UA_POSIXConnectionManager *pcm) {
-    UA_LOCK_ASSERT(&((UA_EventLoopPOSIX*)pcm->cm.eventSource.eventLoop)->elMutex, 1);
+    UA_LOCK_ASSERT(&((UA_EventLoopPOSIX*)pcm->cm.eventSource.eventLoop)->elMutex);
 
     if(pcm->fdsSize == 0 &&
        pcm->cm.eventSource.state == UA_EVENTSOURCESTATE_STOPPING) {
@@ -139,7 +139,7 @@ static void
 TCP_connectionSocketCallback(UA_ConnectionManager *cm, TCP_FD *conn,
                              short event) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)cm->eventSource.eventLoop;
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
                  "TCP %u\t| Activity on the socket",
@@ -238,7 +238,7 @@ static void
 TCP_listenSocketCallback(UA_ConnectionManager *cm, TCP_FD *conn, short event) {
     UA_POSIXConnectionManager *pcm = (UA_POSIXConnectionManager*)cm;
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)cm->eventSource.eventLoop;
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
                  "TCP %u\t| Callback on server socket",
@@ -250,7 +250,7 @@ TCP_listenSocketCallback(UA_ConnectionManager *cm, TCP_FD *conn, short event) {
     UA_FD newsockfd = accept(conn->rfd.fd, (struct sockaddr*)&remote, &remote_size);
     if(newsockfd == UA_INVALID_FD) {
         /* Temporary error -- retry */
-        if(UA_ERRNO == UA_INTERRUPTED)
+        if(UA_IS_TEMPORARY_ACCEPT_ERROR(UA_ERRNO))
             return;
 
         /* Close the listen socket */
@@ -354,7 +354,7 @@ TCP_registerListenSocket(UA_POSIXConnectionManager *pcm, struct addrinfo *ai,
                          UA_ConnectionManager_connectionCallback connectionCallback,
                          UA_Boolean validate, UA_Boolean reuseaddr) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)pcm->cm.eventSource.eventLoop;
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     /* Translate INADDR_ANY to IPv4/IPv6 address */
     char addrstr[UA_MAXHOSTNAME_LENGTH];
@@ -384,26 +384,11 @@ TCP_registerListenSocket(UA_POSIXConnectionManager *pcm, struct addrinfo *ai,
         return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    /* If the INADDR_ANY is used, use the local hostname */
-    char hoststr[UA_MAXHOSTNAME_LENGTH];
-    if(hostname) {
-        UA_LOG_INFO(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
-                    "TCP %u\t| Creating listen socket for \"%s\" on port %u",
-                    (unsigned)listenSocket, hostname, port);
-    } else {
-        gethostname(hoststr, UA_MAXHOSTNAME_LENGTH);
-        hostname = hoststr;
-        UA_LOG_INFO(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
-                    "TCP %u\t| Creating listen socket for \"%s\" "
-                    "(with local hostname \"%s\") on port %u",
-                    (unsigned)listenSocket, addrstr, hostname, port);
-    }
-
     /* Some Linux distributions have net.ipv6.bindv6only not activated. So
      * sockets can double-bind to IPv4 and IPv6. This leads to problems. Use
      * AF_INET6 sockets only for IPv6. */
-    int optval = 1;
 #if UA_IPV6
+    int optval = 1;
     if(ai->ai_family == AF_INET6 &&
        UA_setsockopt(listenSocket, IPPROTO_IPV6, IPV6_V6ONLY,
                      (const char*)&optval, sizeof(optval)) == -1) {
@@ -445,6 +430,31 @@ TCP_registerListenSocket(UA_POSIXConnectionManager *pcm, struct addrinfo *ai,
 
     /* Bind socket to address */
     int ret = bind(listenSocket, ai->ai_addr, (socklen_t)ai->ai_addrlen);
+
+    /* Get the port being used if dynamic porting was used */
+    if(port == 0) {
+        struct sockaddr_in sin;
+        memset(&sin, 0, sizeof(sin));
+        socklen_t len = sizeof(sin);
+        getsockname(listenSocket, (struct sockaddr *)&sin, &len);
+        port = ntohs(sin.sin_port);
+    }
+
+    /* If the INADDR_ANY is used, use the local hostname */
+    char hoststr[UA_MAXHOSTNAME_LENGTH];
+    if(hostname) {
+        UA_LOG_INFO(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
+                    "TCP %u\t| Creating listen socket for \"%s\" on port %u",
+                    (unsigned)listenSocket, hostname, port);
+    } else {
+        gethostname(hoststr, UA_MAXHOSTNAME_LENGTH);
+        hostname = hoststr;
+        UA_LOG_INFO(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
+                    "TCP %u\t| Creating listen socket for \"%s\" "
+                    "(with local hostname \"%s\") on port %u",
+                    (unsigned)listenSocket, addrstr, hostname, port);
+    }
+
     if(ret < 0) {
         UA_LOG_SOCKET_ERRNO_WRAP(
            UA_LOG_WARNING(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
@@ -532,7 +542,7 @@ TCP_registerListenSockets(UA_POSIXConnectionManager *pcm, const char *hostname,
                           UA_UInt16 port, void *application, void *context,
                           UA_ConnectionManager_connectionCallback connectionCallback,
                           UA_Boolean validate, UA_Boolean reuseaddr) {
-    UA_LOCK_ASSERT(&((UA_EventLoopPOSIX*)pcm->cm.eventSource.eventLoop)->elMutex, 1);
+    UA_LOCK_ASSERT(&((UA_EventLoopPOSIX*)pcm->cm.eventSource.eventLoop)->elMutex);
 
     /* Create a string for the port */
     char portstr[6];
@@ -584,7 +594,7 @@ static void
 TCP_shutdown(UA_ConnectionManager *cm, TCP_FD *conn) {
     /* Already closing - nothing to do */
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)cm->eventSource.eventLoop;
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     if(conn->rfd.dc.callback) {
         UA_LOG_DEBUG(el->eventLoop.logger, UA_LOGCATEGORY_NETWORK,
@@ -607,9 +617,8 @@ TCP_shutdown(UA_ConnectionManager *cm, TCP_FD *conn) {
     dc->application = cm;
     dc->context = conn;
 
-    /* Don't use the "public" el->addDelayedCallback. It takes a lock. */
-    dc->next = el->delayedCallbacks;
-    el->delayedCallbacks = dc;
+    /* Adding a delayed callback does not take a lock */
+    UA_EventLoopPOSIX_addDelayedCallback((UA_EventLoop*)el, dc);
 }
 
 static UA_StatusCode
@@ -699,7 +708,7 @@ TCP_openPassiveConnection(UA_POSIXConnectionManager *pcm, const UA_KeyValueMap *
                           UA_ConnectionManager_connectionCallback connectionCallback,
                           UA_Boolean validate) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)pcm->cm.eventSource.eventLoop;
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     /* Get the port parameter */
     const UA_UInt16 *port = (const UA_UInt16*)
@@ -758,7 +767,7 @@ TCP_openActiveConnection(UA_POSIXConnectionManager *pcm, const UA_KeyValueMap *p
                          UA_ConnectionManager_connectionCallback connectionCallback,
                          UA_Boolean validate) {
     UA_EventLoopPOSIX *el = (UA_EventLoopPOSIX*)pcm->cm.eventSource.eventLoop;
-    UA_LOCK_ASSERT(&el->elMutex, 1);
+    UA_LOCK_ASSERT(&el->elMutex);
 
     /* Get the connection parameters */
     char hostname[UA_MAXHOSTNAME_LENGTH];
@@ -1016,8 +1025,8 @@ TCP_eventSourceStop(UA_ConnectionManager *cm) {
 
     UA_LOCK(&el->elMutex);
 
-    UA_LOG_INFO(cm->eventSource.eventLoop->logger, UA_LOGCATEGORY_NETWORK,
-                "TCP\t| Shutting down the ConnectionManager");
+    UA_LOG_DEBUG(cm->eventSource.eventLoop->logger, UA_LOGCATEGORY_NETWORK,
+                 "TCP\t| Shutting down the ConnectionManager");
 
     /* Prevent new connections to open */
     cm->eventSource.state = UA_EVENTSOURCESTATE_STOPPING;

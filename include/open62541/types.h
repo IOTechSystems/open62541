@@ -119,16 +119,16 @@ typedef uint64_t UA_UInt64;
  * ^^^^^
  * An IEEE single precision (32 bit) floating point value. */
 typedef float UA_Float;
-#define UA_FLOAT_MIN FLT_MIN;
-#define UA_FLOAT_MAX FLT_MAX;
+#define UA_FLOAT_MIN FLT_MIN
+#define UA_FLOAT_MAX FLT_MAX
 
 /**
  * Double
  * ^^^^^^
  * An IEEE double precision (64 bit) floating point value. */
 typedef double UA_Double;
-#define UA_DOUBLE_MIN DBL_MIN;
-#define UA_DOUBLE_MAX DBL_MAX;
+#define UA_DOUBLE_MIN DBL_MIN
+#define UA_DOUBLE_MAX DBL_MAX
 
 /**
  * .. _statuscode:
@@ -434,6 +434,10 @@ UA_INLINABLE(UA_NodeId
     return id;
 })
 
+/* Shorthand for standard-defined NodeIds in Namespace 0.
+ * See the generated nodeids.h for the full list. */
+#define UA_NS0ID(ID) UA_NODEID_NUMERIC(0, UA_NS0ID_##ID)
+
 UA_INLINABLE(UA_NodeId
              UA_NODEID_STRING(UA_UInt16 nsIndex, char *chars), {
     UA_NodeId id;
@@ -537,11 +541,16 @@ UA_INLINABLE(UA_ExpandedNodeId
 #endif
 
 /** The following functions are shorthand for creating ExpandedNodeIds. */
+
 UA_INLINABLE(UA_ExpandedNodeId
              UA_EXPANDEDNODEID_NUMERIC(UA_UInt16 nsIndex, UA_UInt32 identifier), {
     UA_ExpandedNodeId id; id.nodeId = UA_NODEID_NUMERIC(nsIndex, identifier);
     id.serverIndex = 0; id.namespaceUri = UA_STRING_NULL; return id;
 })
+
+/* Shorthand for standard-defined NodeIds in Namespace 0.
+ * See the generated nodeids.h for the full list. */
+#define UA_NS0EXID(ID) UA_EXPANDEDNODEID_NUMERIC(0, UA_NS0ID_##ID)
 
 UA_INLINABLE(UA_ExpandedNodeId
              UA_EXPANDEDNODEID_STRING(UA_UInt16 nsIndex, char *chars), {
@@ -1094,7 +1103,7 @@ typedef struct UA_DataTypeArray {
  * If the member is an array, the offset points to the (size_t) length field.
  * (The array pointer comes after the length field without any padding.) */
 #ifdef UA_ENABLE_TYPEDESCRIPTION
-UA_Boolean
+UA_Boolean UA_EXPORT
 UA_DataType_getStructMember(const UA_DataType *type,
                             const char *memberName,
                             size_t *outOffset,
@@ -1105,7 +1114,7 @@ UA_DataType_getStructMember(const UA_DataType *type,
 /* Test if the data type is a numeric builtin data type (via the typeKind field
  * of UA_DataType). This includes integers and floating point numbers. Not
  * included are Boolean, DateTime, StatusCode and Enums. */
-UA_Boolean
+UA_Boolean UA_EXPORT
 UA_DataType_isNumeric(const UA_DataType *type);
 
 /**
@@ -1236,8 +1245,13 @@ UA_encodeBinary(const void *p, const UA_DataType *type,
  * Zero-out the entire structure initially to ensure code-compatibility when
  * more fields are added in a later release. */
 typedef struct {
-    const UA_DataTypeArray *customTypes; /* Begin of a linked list with custom
-                                          * datatype definitions */
+    /* Begin of a linked list with custom datatype definitions */
+    const UA_DataTypeArray *customTypes;
+
+    /* Override calloc for arena-based memory allocation. Note that allocated
+     * memory is not freed if decoding fails afterwards. */
+    void *callocContext;
+    void * (*calloc)(void *callocContext, size_t nelem, size_t elsize);
 } UA_DecodeBinaryOptions;
 
 /* Decodes a data structure from the input buffer in the binary format. It is

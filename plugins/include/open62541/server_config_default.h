@@ -28,8 +28,9 @@ UA_ConnectionConfig UA_ConnectionConfig_default;
 /* Creates a new server config with one endpoint and custom buffer size.
  *
  * The config will set the tcp network layer to the given port and adds a single
- * endpoint with the security policy ``SecurityPolicy#None`` to the server. A
- * server certificate may be supplied but is optional.
+ * endpoint with the security policy ``SecurityPolicy#None`` to the server.
+ * If the port is set to 0, it will be dynamically assigned.
+ * A server certificate may be supplied but is optional.
  * Additionally you can define a custom buffer size for send and receive buffer.
  *
  * @param portNumber The port number for the tcp network layer
@@ -91,7 +92,7 @@ UA_ServerConfig_setDefaultWithFilestore(UA_ServerConfig *conf,
                                         UA_UInt16 portNumber,
                                         const UA_ByteString *certificate,
                                         const UA_ByteString *privateKey,
-                                        const UA_String *storePath);
+                                        const UA_String storePath);
 
 #endif
 
@@ -124,6 +125,7 @@ UA_ServerConfig_setBasics(UA_ServerConfig *conf);
  * Use the various UA_ServerConfig_addXxx functions to add them.
  * The config will set the tcp network layer to the given port if the
  * eventloop is not already set.
+ * If the port is set to 0, it will be dynamically assigned.
  *
  * @param conf The configuration to manipulate
  * @param portNumber The port number for the tcp network layer
@@ -228,10 +230,6 @@ UA_ServerConfig_addSecurityPolicyAes256Sha256RsaPss(UA_ServerConfig *config,
  * @param config The configuration to manipulate
  * @param certificate The server certificate.
  * @param privateKey The private key that corresponds to the certificate.
- * @param trustList The trustList for client certificate validation.
- * @param trustListSize The trustList size.
- * @param revocationList The revocationList for client certificate validation.
- * @param revocationListSize The revocationList size.
  */
 UA_EXPORT UA_StatusCode
 UA_ServerConfig_addAllSecurityPolicies(UA_ServerConfig *config,
@@ -242,6 +240,40 @@ UA_EXPORT UA_StatusCode
 UA_ServerConfig_addAllSecureSecurityPolicies(UA_ServerConfig *config,
                                        const UA_ByteString *certificate,
                                        const UA_ByteString *privateKey);
+
+#ifdef __linux__ /* Linux only so far */
+
+/* Adds a filestore security policy based on a given security policy to the server.
+ *
+ * Certificate verification should be configured before calling this
+ * function. See PKI plugin.
+ *
+ * @param config The configuration to manipulate.
+ * @param innerPolicy The policy that should be used as the base.
+ * @param storePath The path to the pki folder.
+ */
+UA_EXPORT UA_StatusCode
+UA_ServerConfig_addSecurityPolicy_Filestore(UA_ServerConfig *config,
+                                            UA_SecurityPolicy *innerPolicy,
+                                            const UA_String storePath);
+
+/* Adds all supported security policies and sets up certificate
+ * validation procedures.
+ *
+ * Certificate verification should be configured before calling this
+ * function. See PKI plugin.
+ *
+ * @param config The configuration to manipulate
+ * @param certificate The server certificate.
+ * @param privateKey The private key that corresponds to the certificate.
+ * @param storePath The path to the pki folder.
+ */
+UA_EXPORT UA_StatusCode
+UA_ServerConfig_addSecurityPolicies_Filestore(UA_ServerConfig *config,
+                                              const UA_ByteString *certificate,
+                                              const UA_ByteString *privateKey,
+                                              const UA_String storePath);
+#endif
 
 #endif
 

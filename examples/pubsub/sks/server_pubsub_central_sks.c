@@ -11,7 +11,6 @@
 #include <open62541/server.h>
 #include <open62541/server_config_default.h>
 
-#include <signal.h>
 #include <stdlib.h>
 
 #include "common.h"
@@ -130,14 +129,13 @@ getUserExecutableOnObject_sks(UA_Server *server, UA_AccessControl *ac,
  * security groups. The SKS will check if the user credentials used to establish
  * the session have the access to the requested security group managed by SKS.
  */
-static UA_StatusCode
+static void
 addSecurityGroup(UA_Server *server, UA_NodeId *outNodeId) {
     UA_Duration keyLifeTimeMinutes = DEMO_KEYLIFETIME_MINUTES;
     UA_UInt32 maxFutureKeyCount = DEMO_MAXFUTUREKEYCOUNT;
     UA_UInt32 maxPastKeyCount = DEMO_MAXPASTKEYCOUNT;
     char *securityGroupName = DEMO_SECURITYGROUPNAME;
-    UA_NodeId securityGroupParent =
-        UA_NODEID_NUMERIC(0, UA_NS0ID_PUBLISHSUBSCRIBE_SECURITYGROUPS);
+    UA_NodeId securityGroupParent = UA_NS0ID(PUBLISHSUBSCRIBE_SECURITYGROUPS);
 
     UA_SecurityGroupConfig config;
     memset(&config, 0, sizeof(UA_SecurityGroupConfig));
@@ -147,7 +145,7 @@ addSecurityGroup(UA_Server *server, UA_NodeId *outNodeId) {
     config.maxFutureKeyCount = maxFutureKeyCount;
     config.maxPastKeyCount = maxPastKeyCount;
 
-    return UA_Server_addSecurityGroup(server, securityGroupParent, &config, outNodeId);
+    UA_Server_addSecurityGroup(server, securityGroupParent, &config, outNodeId);
 }
 
 /*
@@ -163,14 +161,6 @@ setSecurityGroupRolePermission(UA_Server *server, UA_NodeId securityGroupNodeId,
 
     UA_ByteString allowedUsername = UA_STRING((char *)nodeContext);
     return UA_Server_setNodeContext(server, securityGroupNodeId, &allowedUsername);
-}
-
-UA_Boolean running = true;
-
-static void
-stopHandler(int sign) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "Received Ctrl-C");
-    running = 0;
 }
 
 static void
@@ -200,9 +190,6 @@ usage(char *progname) {
 
 int
 main(int argc, char **argv) {
-    signal(SIGINT, stopHandler); /* catches ctrl-c */
-    signal(SIGTERM, stopHandler);
-
     for(int i = 1; i < argc; i++) {
         if(strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
@@ -387,15 +374,15 @@ main(int argc, char **argv) {
     if(res != UA_STATUSCODE_GOOD)
         goto cleanup;
 #else /* On Linux we can monitor the pki folder and reload when changes are made */
-    UA_String *pkiStoreFolder = NULL;
-    if(pkiFolder) {
-        pkiStoreFolder = UA_String_new();
-        *pkiStoreFolder = UA_STRING_ALLOC(pkiFolder);
+    if(!pkiFolder) {
+        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                                 "Path to the Pki folder must be specified.");
+        goto cleanup;
     }
+    UA_String pkiStoreFolder = UA_STRING(pkiFolder);
     UA_StatusCode res = UA_ServerConfig_setDefaultWithFilestore(
         &config, port, &certificate, &privateKey, pkiStoreFolder);
-    if(pkiStoreFolder)
-        UA_String_clear(pkiStoreFolder);
+    UA_String_clear(&pkiStoreFolder);
     if(res != UA_STATUSCODE_GOOD)
         goto cleanup;
 #endif /* __linux__ */
@@ -464,20 +451,14 @@ main(int argc, char **argv) {
         goto cleanup;
     }
 
-    /* Add SecurityGroup on SKS server */
     UA_NodeId outNodeId;
-    res = addSecurityGroup(server, &outNodeId);
-    if(res != UA_STATUSCODE_GOOD)
-        goto cleanup;
+    addSecurityGroup(server, &outNodeId);
 
-    /* set user access permissions on securitygroup*/
     char *username = "user1";
-    res = setSecurityGroupRolePermission(server, outNodeId, username);
-    if(res != UA_STATUSCODE_GOOD)
-        goto cleanup;
+    setSecurityGroupRolePermission(server, outNodeId, username);
 
-    /* run server */
-    res = UA_Server_run(server, &running);
+    UA_Server_enableAllPubSubComponents(server);
+    UA_Server_runUntilInterrupt(server);
 
 cleanup:
     if(server)

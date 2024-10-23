@@ -55,9 +55,15 @@ typedef SSIZE_T ssize_t;
 #define UA_AGAIN EAGAIN /* the same as wouldblock on nearly every system */
 #define UA_INPROGRESS WSAEINPROGRESS
 #define UA_WOULDBLOCK WSAEWOULDBLOCK
+#define UA_CONNRESET WSAECONNRESET
+#define UA_NOBUFS WSAENOBUFS
+#define UA_MFILE WSAEMFILE
 #define UA_POLLIN POLLRDNORM
 #define UA_POLLOUT POLLWRNORM
 #define UA_SHUT_RDWR SD_BOTH
+
+#define UA_IS_TEMPORARY_ACCEPT_ERROR(err) \
+    ((err) == UA_INTERRUPTED || (err) == UA_CONNRESET || (err) == UA_NOBUFS || (err) == UA_MFILE)
 
 #define UA_getnameinfo(sa, salen, host, hostlen, serv, servlen, flags) \
     getnameinfo(sa, (socklen_t)salen, host, (DWORD)hostlen, serv, (DWORD)servlen, flags)
@@ -124,6 +130,10 @@ typedef SSIZE_T ssize_t;
 # endif
 #endif
 
+#if defined (__APPLE__)
+typedef int SOCKET;
+#endif
+
 #define UA_IPV6 1
 #define UA_SOCKET int
 #define UA_INVALID_SOCKET -1
@@ -132,9 +142,16 @@ typedef SSIZE_T ssize_t;
 #define UA_AGAIN EAGAIN /* the same as wouldblock on nearly every system */
 #define UA_INPROGRESS EINPROGRESS
 #define UA_WOULDBLOCK EWOULDBLOCK
+#define UA_CONNABORTED ECONNABORTED
+#define UA_MFILE EMFILE
+#define UA_NFILE ENFILE
+#define UA_NOBUFS ENOBUFS
 #define UA_POLLIN POLLIN
 #define UA_POLLOUT POLLOUT
 #define UA_SHUT_RDWR SHUT_RDWR
+
+#define UA_IS_TEMPORARY_ACCEPT_ERROR(err) \
+    ((err) == UA_INTERRUPTED || (err) == UA_CONNABORTED || (err) == UA_MFILE || (err) == UA_NFILE || (err) == UA_NOBUFS)
 
 #define UA_getnameinfo(sa, salen, host, hostlen, serv, servlen, flags) \
     getnameinfo(sa, salen, host, hostlen, serv, servlen, flags)
@@ -148,9 +165,7 @@ typedef SSIZE_T ssize_t;
 #define UA_getsockopt getsockopt
 #define UA_setsockopt setsockopt
 #define UA_inet_pton inet_pton
-#if UA_IPV6
-# define UA_if_nametoindex if_nametoindex
-#endif
+#define UA_if_nametoindex if_nametoindex
 
 #define UA_clean_errno(STR_FUN) \
     (errno == 0 ? (char*) "None" : (STR_FUN)(errno))
@@ -240,8 +255,19 @@ typedef struct {
     /* Timer */
     UA_Timer timer;
 
-    /* Linked List of Delayed Callbacks */
-    UA_DelayedCallback *delayedCallbacks;
+    /* Singly-linked FIFO queue (lock-free multi-producer single-consumer) of
+     * delayed callbacks. Insertion happens by chasing the tail-pointer. We
+     * "check out" the current queue and reset by switching the tail to the
+     * alternative head-pointer.
+     *
+     * This could be a simple singly-linked list. But we want to do in-order
+     * processing so we can wait until the worker jobs already in the queue get
+     * finished before.
+     *
+     * The currently unused head gets marked with the 0x01 sentinel. */
+    UA_DelayedCallback *delayedHead1;
+    UA_DelayedCallback *delayedHead2;
+    UA_DelayedCallback **delayedTail;
 
     /* Flag determining whether the eventloop is currently within the
      * "run" method */
@@ -316,7 +342,7 @@ UA_EventLoopPOSIX_setReusable(UA_FD sockfd);
 
 /* Windows has no pipes. Use a local TCP connection for the self-pipe trick.
  * https://stackoverflow.com/a/3333565 */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 int UA_EventLoopPOSIX_pipe(SOCKET fds[2]);
 #else
 # define UA_EventLoopPOSIX_pipe(fds) pipe2(fds, O_NONBLOCK)
