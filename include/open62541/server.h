@@ -1723,7 +1723,6 @@ typedef UA_StatusCode (*UA_ConditionTypeSetupFn)(
     const void *userdata
 );
 
-
 /* Create condition instance. The function checks first whether the passed
  * conditionType is a subType of ConditionType. Then checks whether the
  * condition source has HasEventSource reference to its parent. If not, a

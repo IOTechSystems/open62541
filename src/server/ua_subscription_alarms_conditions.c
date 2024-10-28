@@ -505,12 +505,6 @@ setConditionField(UA_Server *server, const UA_NodeId condition,
                   const UA_Variant* value, const UA_QualifiedName fieldName);
 
 static UA_StatusCode
-setConditionVariableFieldProperty(UA_Server *server, const UA_NodeId condition,
-                                  const UA_Variant* value,
-                                  const UA_QualifiedName variableFieldName,
-                                  const UA_QualifiedName variablePropertyName);
-
-static UA_StatusCode
 addOptionalField(UA_Server *server, const UA_NodeId object,
                  const UA_NodeId conditionType, const UA_QualifiedName fieldName,
                  UA_NodeId *outOptionalNode);
