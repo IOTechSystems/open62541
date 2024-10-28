@@ -200,7 +200,7 @@ addExclusiveLimitAlarmCondition (UA_Server *server) {
 
     retval = UA_Server_Condition_setCallbacks(server, conditionInstance_1, &condition1Impl);
 
-    retval = UA_Server_Condition_enable (server, conditionInstance_1, true);
+    retval = UA_Server_Condition_enable (server, conditionInstance_1, true, NULL);
     return retval;
 }
 

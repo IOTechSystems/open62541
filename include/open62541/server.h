@@ -1789,25 +1789,25 @@ UA_Server_Condition_getContext(UA_Server *server, UA_NodeId conditionId, void **
 */
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_enable(UA_Server *server, UA_NodeId conditionId, UA_Boolean enable);
+UA_Server_Condition_enable(UA_Server *server, UA_NodeId conditionId, UA_Boolean enable, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_acknowledge(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
+UA_Server_Condition_acknowledge(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_confirm(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
+UA_Server_Condition_confirm(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_suppress(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
+UA_Server_Condition_suppress(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_unsuppress(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
+UA_Server_Condition_unsuppress(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_removeFromService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
+UA_Server_Condition_removeFromService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
+UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 /*
     Condition Evaluation and Event Generation
