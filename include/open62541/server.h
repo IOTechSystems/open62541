@@ -1833,8 +1833,6 @@ typedef struct UA_AlarmConditionProperties
     UA_Duration offDelay;
     UA_Boolean hasReAlarmTime;
     UA_Duration reAlarmTime;
-    UA_Boolean hasReAlarmRepeatCount;
-    UA_Int16 reAlarmRepeatCount;
 } UA_AlarmConditionProperties;
 
 UA_StatusCode UA_EXPORT

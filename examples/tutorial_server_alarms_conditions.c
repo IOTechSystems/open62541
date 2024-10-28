@@ -153,9 +153,7 @@ addExclusiveLimitAlarmCondition (UA_Server *server) {
         //.maxTimeShelved = &test,
         //.onDelay = &test,
         //.offDelay = &test,
-        //.reAlarmRepeatCount = &repeatCount,
         //.reAlarmTime = &reAlarmTime
-
     };
 
     UA_Double highLimit = 20.0f;

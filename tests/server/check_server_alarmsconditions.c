@@ -1195,10 +1195,10 @@ int main(void) {
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     TCase *tc = tcase_create("Alarms and Conditions");
-//    tcase_add_test(tc, createDelete);
-//    tcase_add_test(tc, createMultiple);
-//    tcase_add_test(tc, conditionSequence1);
-//    tcase_add_test(tc, conditionSequence2);
+    tcase_add_test(tc, createDelete);
+    tcase_add_test(tc, createMultiple);
+    tcase_add_test(tc, conditionSequence1);
+    tcase_add_test(tc, conditionSequence2);
     tcase_add_test(tc, enableDisable);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);

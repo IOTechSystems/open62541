@@ -1117,6 +1117,14 @@ Condition_State_setActiveState (UA_Server *server, const UA_NodeId * condition, 
 }
 
 static inline UA_StatusCode
+Condition_State_setReAlarmRepeatCount (UA_Server *server, const UA_NodeId * condition, UA_Int16 count)
+{
+    UA_Variant val;
+    UA_Variant_setScalar(&val, &count, &UA_TYPES[UA_TYPES_INT16]);
+    return setConditionField (server, *condition, &val, fieldReAlarmRepeatCountQN);
+}
+
+static inline UA_StatusCode
 UA_Condition_State_setActiveState (UA_Condition *condition, UA_Server *server, UA_Boolean active)
 {
     return Condition_State_setActiveState (server, &condition->mainBranch->id, active);
@@ -2556,13 +2564,6 @@ static void UA_Condition_createReAlarmCallback (UA_Condition *condition, UA_Serv
     UA_StatusCode retval = UA_Condition_State_getReAlarmTime (condition, server, &reAlarmTime);
     if (retval != UA_STATUSCODE_GOOD) return;
 
-    UA_Int16 repeatCount = 0;
-    retval = UA_Condition_State_getReAlarmRepeatCount(condition, server, &repeatCount);
-    if (retval != UA_STATUSCODE_GOOD || condition->reAlarmCount >= repeatCount)
-    {
-        return;
-    }
-
     retval = addTimedCallback(
         server,
         reAlarmCallback,
@@ -2616,6 +2617,7 @@ static void reAlarmCallback (UA_Server *server, void *data)
     UA_LOCK(&server->serviceMutex);
     UA_Condition *condition = (UA_Condition*) data;
     condition->reAlarmCount++;
+    Condition_State_setReAlarmRepeatCount (server, &condition->mainBranch->id, condition->reAlarmCount);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, REALARM_MESSAGE)
     };
@@ -2719,8 +2721,12 @@ static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
     }
 
     removeCallback(server, condition->reAlarmCallbackId);
-    condition->reAlarmCount = 0;
 
+    if (condition->reAlarmCount != 0)
+    {
+        condition->reAlarmCount = 0;
+        Condition_State_setReAlarmRepeatCount (server, &condition->mainBranch->id, condition->reAlarmCount);
+    }
     UA_Condition_State_setActiveState (condition, server, false);
     UA_ConditionBranch_evaluateRetainState(condition->mainBranch, server);
     UA_ConditionBranch_triggerEvent(condition->mainBranch, server, info);
@@ -3658,13 +3664,12 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->reAlarmTime, &UA_TYPES[UA_TYPES_DURATION]);
         retval = setConditionField (server, *condition, &value, fieldReAlarmTimeQN);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set ReAlarmTime Field failed",);
-    }
-    if (properties->hasReAlarmRepeatCount)
-    {
+
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldReAlarmRepeatCountQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding ReAlarmRepeatCount optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->reAlarmRepeatCount, &UA_TYPES[UA_TYPES_INT16]);
+        UA_Int16 repeatCount = 0;
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &repeatCount, &UA_TYPES[UA_TYPES_INT16]);
         retval = setConditionField (server, *condition, &value, fieldReAlarmRepeatCountQN);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set ReAlarmTimeRepeatCount Field failed",);
     }
