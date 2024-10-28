@@ -631,29 +631,21 @@ readObjectPropertyUInt16 (UA_Server *server, UA_NodeId id, UA_QualifiedName prop
     return retval;
 }
 
-static UA_StatusCode
+static inline UA_StatusCode
 setTwoStateVariable (UA_Server *server, const UA_NodeId *condition, UA_QualifiedName field,
-                          UA_Boolean idValue, const char *state)
+                          UA_Boolean idValue, UA_LocalizedText state)
 {
-    /* Update Enabled State */
-    UA_Variant value;
-    UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    retval = setConditionVariableFieldProperty(server, *condition, &value,
-                                               field, stateVariableIdQN);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting State Id failed",);
-
-    UA_LocalizedText stateText = UA_LOCALIZEDTEXT(LOCALE, (char *) (uintptr_t) state);
-    UA_Variant_setScalar(&value, &stateText, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = setConditionField (server, *condition, &value, field);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "set State text failed",);
-    return retval;
+    UA_NodeId stateId;
+    UA_StatusCode ret = getNodeIdWithBrowseName(server, condition, field, &stateId);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    ret = writeTwoStateVariable(server, stateId, state, idValue);
+    UA_NodeId_clear (&stateId);
+    return ret;
 }
 
-
-static UA_StatusCode
+static inline UA_StatusCode
 setOptionalTwoStateVariable (UA_Server *server, const UA_NodeId *condition, UA_QualifiedName field,
-                                UA_Boolean idValue, const char *state)
+                                UA_Boolean idValue, UA_LocalizedText state)
 {
    if (!fieldExists(server, condition, &field))return UA_STATUSCODE_GOOD;
    return setTwoStateVariable (server, condition, field, idValue, state);
@@ -1012,7 +1004,7 @@ static inline UA_StatusCode
 UA_ConditionBranch_State_setAckedState(UA_ConditionBranch *branch, UA_Server *server, UA_Boolean acked)
 {
     return setTwoStateVariable (
-        server, &branch->id, fieldAckedStateQN, acked, acked ? ACKED_TEXT : UNACKED_TEXT
+        server, &branch->id, fieldAckedStateQN, acked, UA_LOCALIZEDTEXT(LOCALE, acked ? ACKED_TEXT : UNACKED_TEXT)
     );
 }
 
@@ -1020,7 +1012,7 @@ static inline UA_StatusCode
 UA_ConditionBranch_State_setConfirmedState(UA_ConditionBranch *branch, UA_Server *server, UA_Boolean confirmed)
 {
     return setOptionalTwoStateVariable (
-        server, &branch->id, fieldConfirmedStateQN, confirmed, confirmed ? CONFIRMED_TEXT: UNCONFIRMED_TEXT
+        server, &branch->id, fieldConfirmedStateQN, confirmed, UA_LOCALIZEDTEXT(LOCALE, confirmed ? CONFIRMED_TEXT: UNCONFIRMED_TEXT)
     );
 }
 
@@ -1103,7 +1095,7 @@ UA_Condition_State_setEnabledState(UA_Condition *condition, UA_Server *server, U
 {
     return setTwoStateVariable (
         server, &condition->mainBranch->id, fieldEnabledStateQN, enabled,
-        enabled ? ENABLED_TEXT : DISABLED_TEXT
+        UA_LOCALIZEDTEXT (LOCALE, enabled ? ENABLED_TEXT : DISABLED_TEXT)
     );
 }
 
@@ -1112,7 +1104,7 @@ Condition_State_setActiveState (UA_Server *server, const UA_NodeId * condition, 
 {
     return setTwoStateVariable (
         server, condition, fieldActiveStateQN, active,
-        active ? ACTIVE_TEXT : INACTIVE_TEXT
+        UA_LOCALIZEDTEXT (LOCALE, active ? ACTIVE_TEXT : INACTIVE_TEXT)
     );
 }
 
@@ -1130,21 +1122,12 @@ UA_Condition_State_setActiveState (UA_Condition *condition, UA_Server *server, U
     return Condition_State_setActiveState (server, &condition->mainBranch->id, active);
 }
 
-inline UA_StatusCode 
-UA_Server_Condition_setActiveState (UA_Server *server, UA_NodeId conditionId, UA_Boolean active)
-{
-    UA_LOCK (&server->serviceMutex);
-    UA_StatusCode status = Condition_State_setActiveState (server, &conditionId, active);
-    UA_UNLOCK (&server->serviceMutex);
-    return status;
-}
-
 static inline UA_StatusCode
 UA_Condition_State_setLatchedState (UA_Condition *condition, UA_Server *server, UA_Boolean latched)
 {
     return setOptionalTwoStateVariable (
         server, &condition->mainBranch->id, fieldLatchedStateQN, latched,
-        latched ? LATCHED_TEXT: NOT_LATCHED_TEXT
+        UA_LOCALIZEDTEXT (LOCALE, latched ? LATCHED_TEXT: NOT_LATCHED_TEXT)
     );
 }
 
@@ -1153,7 +1136,7 @@ UA_Condition_State_setSuppressedState (UA_Condition *condition, UA_Server *serve
 {
     return setOptionalTwoStateVariable (
         server, &condition->mainBranch->id, fieldSuppressedStateQN, suppressed,
-        suppressed ? SUPPRESSED_TEXT : NOT_SUPPRESSED_TEXT
+        UA_LOCALIZEDTEXT (LOCALE, suppressed ? SUPPRESSED_TEXT : NOT_SUPPRESSED_TEXT)
     );
 }
 
@@ -1162,7 +1145,7 @@ UA_Condition_State_setOutOfServiceState (UA_Condition *condition, UA_Server *ser
 {
     return setOptionalTwoStateVariable (
         server, &condition->mainBranch->id, fieldOutOfServiceStateQN, outOfService,
-        outOfService ? OUT_OF_SERVICE_TEXT : IN_SERVICE_TEXT
+        UA_LOCALIZEDTEXT (LOCALE, outOfService ? OUT_OF_SERVICE_TEXT : IN_SERVICE_TEXT)
     );
 }
 
@@ -1549,6 +1532,21 @@ done:
     UA_ConditionBranch_State_setRetain(branch, server, retain);
 }
 
+UA_StatusCode
+UA_Server_Condition_evaluateRetainState (UA_Server *server, UA_NodeId conditionId)
+{
+    UA_LOCK (&server->serviceMutex);
+    UA_ConditionBranch *branch = getConditionBranch(server, &conditionId);
+    if (!branch)
+    {
+        UA_LOCK (&server->serviceMutex);
+        return UA_STATUSCODE_BADNODEIDUNKNOWN;
+    }
+    UA_ConditionBranch_evaluateRetainState(branch, server);
+    UA_LOCK (&server->serviceMutex);
+    return UA_STATUSCODE_GOOD;
+}
+
 static UA_StatusCode
 conditionBranchAcknowledge(UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment)
 {
@@ -1612,37 +1610,6 @@ UA_Server_Condition_confirm(UA_Server *server, UA_NodeId conditionId, const UA_L
         return UA_STATUSCODE_BADNODEIDUNKNOWN;
     }
     UA_StatusCode ret = conditionBranchConfirm(server, branch, comment);
-    UA_UNLOCK(&server->serviceMutex);
-    return ret;
-}
-
-UA_StatusCode
-UA_Server_Condition_setConfirmRequired(UA_Server *server, UA_NodeId conditionId)
-{
-    UA_LOCK (&server->serviceMutex);
-    UA_ConditionBranch *branch = getConditionBranch(server, &conditionId);
-    if (!branch)
-    {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNODEIDUNKNOWN;
-    }
-    UA_StatusCode ret = UA_ConditionBranch_State_setConfirmedState (branch, server, false);
-    UA_UNLOCK(&server->serviceMutex);
-    return ret;
-}
-
-UA_StatusCode
-UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditionId)
-{
-    UA_LOCK (&server->serviceMutex);
-    UA_ConditionBranch *branch = getConditionBranch(server, &conditionId);
-    if (!branch)
-    {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNODEIDUNKNOWN;
-    }
-    UA_StatusCode ret = UA_STATUSCODE_GOOD;
-    ret = UA_ConditionBranch_State_setAckedState(branch, server, false);
     UA_UNLOCK(&server->serviceMutex);
     return ret;
 }
@@ -2075,7 +2042,7 @@ static UA_StatusCode setConditionProperties (
     }
 
     /* Set EnabledState */
-    retval = setTwoStateVariable (server, conditionId, fieldEnabledStateQN, false, DISABLED_TEXT);
+    retval = setTwoStateVariable (server, conditionId, fieldEnabledStateQN, false, UA_LOCALIZEDTEXT(LOCALE, DISABLED_TEXT));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Enabled state failed",);
     return retval;
 }
@@ -2498,60 +2465,11 @@ addOptionalField(UA_Server *server, const UA_NodeId object,
 }
 
 /* Set the value of condition field (only scalar). */
-static UA_StatusCode
+static inline UA_StatusCode
 setConditionField(UA_Server *server, const UA_NodeId condition,
                   const UA_Variant* value, const UA_QualifiedName fieldName) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    if(value->arrayLength != 0 || value->data <= UA_EMPTY_ARRAY_SENTINEL) {
-      //TODO implement logic for array variants!
-      CONDITION_ASSERT_RETURN_RETVAL(UA_STATUSCODE_BADNOTIMPLEMENTED,
-                                     "Set Condition Field with Array value not implemented",);
-    }
-
-    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, condition, 1, &fieldName);
-    if(bpr.statusCode != UA_STATUSCODE_GOOD)
-        return bpr.statusCode;
-
-    UA_StatusCode retval = writeValueAttribute(server, bpr.targets[0].targetId.nodeId, value);
-    UA_BrowsePathResult_clear(&bpr);
-
-    return retval;
-}
-
-static UA_StatusCode
-setConditionVariableFieldProperty(UA_Server *server, const UA_NodeId condition,
-                                  const UA_Variant* value,
-                                  const UA_QualifiedName variableFieldName,
-                                  const UA_QualifiedName variablePropertyName) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    if(value->arrayLength != 0 || value->data <= UA_EMPTY_ARRAY_SENTINEL) {
-        //TODO implement logic for array variants!
-        CONDITION_ASSERT_RETURN_RETVAL(UA_STATUSCODE_BADNOTIMPLEMENTED,
-                                       "Set Property of Condition Field with Array value not implemented",);
-    }
-
-    /* 1) find Variable Field of the Condition*/
-    UA_BrowsePathResult bprConditionVariableField =
-        browseSimplifiedBrowsePath(server, condition, 1, &variableFieldName);
-    if(bprConditionVariableField.statusCode != UA_STATUSCODE_GOOD)
-        return bprConditionVariableField.statusCode;
-
-    /* 2) find Property of the Variable Field of the Condition*/
-    UA_BrowsePathResult bprVariableFieldProperty =
-        browseSimplifiedBrowsePath(server, bprConditionVariableField.targets->targetId.nodeId,
-                                   1, &variablePropertyName);
-    if(bprVariableFieldProperty.statusCode != UA_STATUSCODE_GOOD) {
-        UA_BrowsePathResult_clear(&bprConditionVariableField);
-        return bprVariableFieldProperty.statusCode;
-    }
-
-    UA_StatusCode retval =
-        writeValueAttribute(server, bprVariableFieldProperty.targets[0].targetId.nodeId, value);
-    UA_BrowsePathResult_clear(&bprConditionVariableField);
-    UA_BrowsePathResult_clear(&bprVariableFieldProperty);
-    return retval;
+    return writeValueSimplifiedBrowsePath(server, condition, *value , 1, &fieldName);
 }
 
 // -------- Interact with condition
@@ -3462,7 +3380,7 @@ setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditio
                                               const UA_AcknowledgeableConditionProperties *properties)
 {
     UA_NodeId acknowledgeableConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE);
-    UA_StatusCode retval = setTwoStateVariable (server, condition, fieldAckedStateQN, true, ACKED_TEXT);
+    UA_StatusCode retval = setTwoStateVariable (server, condition, fieldAckedStateQN, true, UA_LOCALIZEDTEXT(LOCALE,ACKED_TEXT));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Acked state failed",);
     /* add optional field ConfirmedState*/
     if (properties->confirmable)
@@ -3471,7 +3389,7 @@ setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditio
                                   fieldConfirmedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding ConfirmedState optional Field failed",);
 
-        retval = setTwoStateVariable (server, condition, fieldConfirmedStateQN, true, CONFIRMED_TEXT);
+        retval = setTwoStateVariable (server, condition, fieldConfirmedStateQN, true, UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Confirmed state failed",);
 
         /* add reference from Condition to Confirm Method */
@@ -3529,7 +3447,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
 
     UA_NodeId alarmConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE);
     UA_Variant value;
-    setTwoStateVariable (server, condition, fieldActiveStateQN, false, INACTIVE_TEXT);
+    setTwoStateVariable (server, condition, fieldActiveStateQN, false, UA_LOCALIZEDTEXT(LOCALE, INACTIVE_TEXT));
     if (!UA_NodeId_isNull(&properties->inputNode))
     {
         UA_Variant_setScalar(&value,(void *)(uintptr_t) &properties->inputNode, &UA_TYPES[UA_TYPES_NODEID]);
@@ -3542,7 +3460,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldLatchedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding LatchedState optional Field failed",);
-        setTwoStateVariable (server, condition, fieldLatchedStateQN, false, NOT_LATCHED_TEXT);
+        setTwoStateVariable (server, condition, fieldLatchedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_LATCHED_TEXT));
 
         /* add reference from Condition to Reset Method */
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
@@ -3563,7 +3481,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldSuppressedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SuppressedState optional Field failed",);
-        setTwoStateVariable(server, condition, fieldSuppressedStateQN, false, NOT_SUPPRESSED_TEXT);
+        setTwoStateVariable(server, condition, fieldSuppressedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_SUPPRESSED_TEXT));
 
         /* add reference from Condition to Suppress Method */
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
@@ -3596,7 +3514,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldOutOfServiceStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OutOfServiceState optional Field failed",);
-        setTwoStateVariable(server, condition, fieldOutOfServiceStateQN, false, IN_SERVICE_TEXT);
+        setTwoStateVariable(server, condition, fieldOutOfServiceStateQN, false, UA_LOCALIZEDTEXT(LOCALE,IN_SERVICE_TEXT));
 
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
         UA_NodeId place = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE);
@@ -3985,7 +3903,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowLowStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional LowLowState Field failed",);
-        setTwoStateVariable(server, condition, fieldLowLowStateQN, false, INACTIVE_LOWLOW_TEXT);
+        setTwoStateVariable(server, condition, fieldLowLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOWLOW_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowState failed",);
     }
 
@@ -3993,7 +3911,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional LowState Field failed",);
-        setTwoStateVariable(server, condition, fieldLowStateQN, false, INACTIVE_LOW_TEXT);
+        setTwoStateVariable(server, condition, fieldLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOW_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowState failed",);
     }
 
@@ -4001,7 +3919,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldHighStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional HighState Field failed",);
-        setTwoStateVariable(server, condition, fieldHighStateQN, false, INACTIVE_HIGH_TEXT);
+        setTwoStateVariable(server, condition, fieldHighStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_HIGH_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighState failed",);
 
     }
@@ -4010,7 +3928,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldHighHighStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional HighHighState Field failed",);
-        setTwoStateVariable(server, condition, fieldHighHighStateQN, false, INACTIVE_HIGHHIGH_TEXT);
+        setTwoStateVariable(server, condition, fieldHighHighStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_HIGHHIGH_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighHighState failed",);
     }
     return retval;
@@ -4204,21 +4122,6 @@ void initNs0ConditionAndAlarms (UA_Server *server)
         writeIsAbstractAttribute(server, refreshStartEventTypeNodeId, false);
         writeIsAbstractAttribute(server, refreshEndEventTypeNodeId, false);
     }
-}
-
-UA_StatusCode
-UA_Server_Condition_getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out)
-{
-    UA_QualifiedName inputNodeQN = UA_QUALIFIEDNAME(0, "InputNode");
-    UA_BrowsePathResult bpr =  UA_Server_browseSimplifiedBrowsePath(server, conditionId, 1, &inputNodeQN);
-    if (bpr.statusCode != UA_STATUSCODE_GOOD || bpr.targetsSize != 1) return bpr.statusCode;
-    UA_Variant sourceNodeId;
-    UA_StatusCode status = UA_Server_readValue(server, bpr.targets[0].targetId.nodeId, &sourceNodeId);
-    UA_BrowsePathResult_clear(&bpr);
-    if (status != UA_STATUSCODE_GOOD || sourceNodeId.type != &UA_TYPES[UA_TYPES_NODEID]) return status;
-    status = UA_Server_readValue(server, *(UA_NodeId*) sourceNodeId.data, out);
-    UA_Variant_clear(&sourceNodeId);
-    return status;
 }
 
 void
@@ -4585,7 +4488,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWSTATEBIT) != lowStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowStateQN, lowStateVal,
-                                          lowStateVal ? ACTIVE_LOW_TEXT : INACTIVE_LOW_TEXT);
+                                          UA_LOCALIZEDTEXT(LOCALE, lowStateVal ? ACTIVE_LOW_TEXT : INACTIVE_LOW_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 
@@ -4593,7 +4496,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWLOWSTATEBIT) != lowLowStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowLowStateQN, lowLowStateVal,
-                                              lowLowStateVal ? ACTIVE_LOWLOW_TEXT : INACTIVE_LOWLOW_TEXT);
+                                          UA_LOCALIZEDTEXT(LOCALE, lowLowStateVal ? ACTIVE_LOWLOW_TEXT : INACTIVE_LOWLOW_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 
@@ -4602,7 +4505,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHSTATEBIT) != highStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowStateQN, highStateVal,
-                                          highStateVal ? ACTIVE_HIGH_TEXT : INACTIVE_HIGH_TEXT);
+                                          UA_LOCALIZEDTEXT(LOCALE, highStateVal ? ACTIVE_HIGH_TEXT : INACTIVE_HIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 
@@ -4610,7 +4513,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHHIGHSTATEBIT) != highHighStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowLowStateQN, highHighStateVal,
-                                          highHighStateVal ? ACTIVE_HIGHHIGH_TEXT : INACTIVE_HIGHHIGH_TEXT);
+                                          UA_LOCALIZEDTEXT(LOCALE, highHighStateVal ? ACTIVE_HIGHHIGH_TEXT : INACTIVE_HIGHHIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 

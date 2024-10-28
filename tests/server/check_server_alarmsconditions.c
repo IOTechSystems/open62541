@@ -201,11 +201,17 @@ typedef struct
     UA_Boolean active;
 }ConditionState;
 
-
 static UA_StatusCode onAcked(UA_Server *server, const UA_NodeId *id, void *ctx)
 {
     UA_Boolean *autoConfirm = (UA_Boolean *)ctx;
-    if(!*autoConfirm)  UA_Server_Condition_setConfirmRequired(server, *id);
+    if(!*autoConfirm)
+    {
+        UA_NodeId confirmedId;
+        UA_Server_getNodeIdWithBrowseName(server, id, UA_QUALIFIEDNAME(0, "ConfirmedState"), &confirmedId);
+        UA_Server_writeTwoStateVariable(server, confirmedId, UA_LOCALIZEDTEXT("en", "Unconfirmed"), false);
+        UA_NodeId_clear (&confirmedId);
+
+    }
     return UA_STATUSCODE_GOOD;
 }
 
@@ -220,7 +226,10 @@ static UA_StatusCode onActive(UA_Server *server, const UA_NodeId *id, void *ctx)
 {
     UA_Boolean *autoConfirm = (UA_Boolean *)ctx;
     *autoConfirm = false;
-    UA_Server_Condition_setAcknowledgeRequired(server, *id);
+    UA_NodeId ackedId;
+    UA_Server_getNodeIdWithBrowseName(server, id, UA_QUALIFIEDNAME(0, "AckedState"), &ackedId);
+    UA_Server_writeTwoStateVariable(server, ackedId, UA_LOCALIZEDTEXT("en", "Unacknowledged"), false);
+    UA_NodeId_clear (&ackedId);
     return UA_STATUSCODE_GOOD;
 }
 

@@ -70,12 +70,28 @@ afterInputNodeWrite (UA_Server *server,
     UA_Server_exclusiveLimitAlarmEvaluate_default(server, &conditionInstance_1, NULL, (UA_Double*) data->value.data);
 }
 
+static UA_StatusCode
+getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out)
+{
+    UA_QualifiedName inputNodeQN = UA_QUALIFIEDNAME(0, "InputNode");
+    UA_BrowsePathResult bpr =  UA_Server_browseSimplifiedBrowsePath(server, conditionId, 1, &inputNodeQN);
+    if (bpr.statusCode != UA_STATUSCODE_GOOD || bpr.targetsSize != 1) return bpr.statusCode;
+    UA_Variant sourceNodeId;
+    UA_StatusCode status = UA_Server_readValue(server, bpr.targets[0].targetId.nodeId, &sourceNodeId);
+    UA_BrowsePathResult_clear(&bpr);
+    if (status != UA_STATUSCODE_GOOD || sourceNodeId.type != &UA_TYPES[UA_TYPES_NODEID]) return status;
+    status = UA_Server_readValue(server, *(UA_NodeId*) sourceNodeId.data, out);
+    UA_Variant_clear(&sourceNodeId);
+    return status;
+}
+
+
 static void *
 sourceNodeGetInputDouble (UA_Server *server, const UA_NodeId *conditionId, void *conditionCtx)
 {
     UA_Variant val;
     UA_Variant_init (&val);
-    UA_StatusCode ret = UA_Server_Condition_getInputNodeValue(server, *conditionId, &val);
+    UA_StatusCode ret = getInputNodeValue(server, *conditionId, &val);
     if (ret != UA_STATUSCODE_GOOD || val.type != &UA_TYPES[UA_TYPES_DOUBLE])
     {
         UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
@@ -101,7 +117,11 @@ static UA_StatusCode onCondition1Active (
     void *context
 )
 {
-    return UA_Server_Condition_setAcknowledgeRequired(server, *conditionId);
+    UA_NodeId ackedId;
+    UA_Server_getNodeIdWithBrowseName(server, conditionId, UA_QUALIFIEDNAME(0, "AckedState"), &ackedId);
+    UA_Server_writeTwoStateVariable(server, ackedId, UA_LOCALIZEDTEXT("en", "Unacknowledged"), false);
+    UA_NodeId_clear (&ackedId);
+    return UA_STATUSCODE_GOOD;
 }
 
 UA_ConditionCallbacks condition1Impl = {

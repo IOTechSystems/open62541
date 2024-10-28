@@ -480,6 +480,30 @@ readObjectProperty(UA_Server *server, const UA_NodeId objectId,
                    const UA_QualifiedName propertyName,
                    UA_Variant *value);
 
+UA_StatusCode writeValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId object_id,
+    const UA_Variant value,
+    size_t path_size,
+    const UA_QualifiedName *path
+);
+
+UA_StatusCode readValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId object_id,
+    size_t path_size,
+    const UA_QualifiedName *path,
+    UA_Variant *value
+);
+
+UA_StatusCode
+writeTwoStateVariable (
+    UA_Server *server,
+    const UA_NodeId twoStateVariableId,
+    UA_LocalizedText value,
+    UA_Boolean idValue
+);
+
 UA_StatusCode
 getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
                         UA_QualifiedName browseName, UA_NodeId *outNodeId);

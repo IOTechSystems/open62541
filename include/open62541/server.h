@@ -1265,6 +1265,59 @@ UA_StatusCode UA_EXPORT UA_THREADSAFE
 UA_Server_readObjectProperty(UA_Server *server, const UA_NodeId objectId,
                              const UA_QualifiedName propertyName,
                              UA_Variant *value);
+
+/**
+ * Write a value to a node via a simplified browsepath
+ * @param server
+ * @param objectId
+ * @param value
+ * @param pathSize
+ * @param path
+ * @return
+ */
+UA_StatusCode
+UA_Server_writeValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId objectId,
+    const UA_Variant value,
+    size_t pathSize,
+    const UA_QualifiedName *path
+);
+
+/**
+ * read a value from a node via a simplified browsepath
+ * @param server
+ * @param objectId
+ * @param pathSize
+ * @param path
+ * @param value
+ * @return
+ */
+UA_StatusCode
+UA_Server_readValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId objectId,
+    size_t pathSize,
+    const UA_QualifiedName *path,
+    UA_Variant *value
+);
+
+/**
+ * write the values to a two state variable node
+ * @param server
+ * @param twoStateVariableId
+ * @param value
+ * @param idValue
+ * @return
+ */
+UA_StatusCode
+UA_Server_writeTwoStateVariable (
+    UA_Server *server,
+    const UA_NodeId twoStateVariableId,
+    UA_LocalizedText value,
+    UA_Boolean idValue
+);
+
 /*
  * Get the nodeId of a node from an origin node and a browse name
  *
@@ -1758,28 +1811,10 @@ UA_StatusCode UA_EXPORT
 UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment);
 
 /*
-    Condition direct State Maniputation
+    Condition Evaluation and Event Generation
 */
-
-/*
- * Set the condition confirmed state where a confirmation is required. The logic for setting this is Server specific, so
- * the only time a conditions ConfirmedState will be set to false is when a server implementation uses this function .
- */
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_setConfirmRequired(UA_Server *server, UA_NodeId conditionId);
-
-UA_StatusCode UA_EXPORT
-UA_Server_Condition_setAcknowledgeRequired(UA_Server *server, UA_NodeId conditionId);
-
-UA_StatusCode UA_EXPORT
-UA_Server_Condition_getInputNodeValue (UA_Server *server, UA_NodeId conditionId, UA_Variant *out);
-
-UA_StatusCode UA_EXPORT
-UA_Server_Condition_setActiveState (UA_Server *server, UA_NodeId conditionId, UA_Boolean active);
-
-/* 
-    Condition Event Generation
-*/
+UA_Server_Condition_evaluateRetainState (UA_Server *server, UA_NodeId conditionId);
 
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_notifyStateChange(UA_Server *server, UA_NodeId condition, const UA_ConditionEventInfo *info);
