@@ -1460,19 +1460,19 @@ conditionEnable (UA_Server *server, UA_Condition *condition, UA_Boolean enable, 
 }
 
 inline UA_StatusCode UA_EXPORT
-UA_Server_Condition_setUnacknowledged (UA_Server *server, UA_NodeId conditionId)
+UA_Server_Condition_setAckedState (UA_Server *server, UA_NodeId conditionId, UA_Boolean acked)
 {
     UA_LOCK (&server->serviceMutex);
-    UA_StatusCode ret = setAcked (server, conditionId, false);
+    UA_StatusCode ret = setAcked (server, conditionId, acked);
     UA_UNLOCK (&server->serviceMutex);
     return ret;
 }
 
 inline UA_StatusCode UA_EXPORT
-UA_Server_Condition_setUnconfirmed (UA_Server *server, UA_NodeId conditionId)
+UA_Server_Condition_setConfirmedState (UA_Server *server, UA_NodeId conditionId, UA_Boolean confirmed)
 {
     UA_LOCK (&server->serviceMutex);
-    UA_StatusCode ret = setConfirmed(server, conditionId, false);
+    UA_StatusCode ret = setConfirmed(server, conditionId, confirmed);
     UA_UNLOCK (&server->serviceMutex);
     return ret;
 }

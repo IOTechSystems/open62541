@@ -1826,10 +1826,10 @@ UA_Server_Condition_timedShelve (UA_Server *server, UA_NodeId conditionId, UA_Du
 */
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_setUnacknowledged (UA_Server *server, UA_NodeId conditionId);
+UA_Server_Condition_setAckedState (UA_Server *server, UA_NodeId conditionId, UA_Boolean acked);
 
 UA_StatusCode UA_EXPORT
-UA_Server_Condition_setUnconfirmed(UA_Server *server, UA_NodeId conditionId);
+UA_Server_Condition_setConfirmedState (UA_Server *server, UA_NodeId conditionId, UA_Boolean confirmed);
 
 /*
     Condition Evaluation and Event Generation
