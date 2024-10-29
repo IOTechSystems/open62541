@@ -1804,10 +1804,32 @@ UA_StatusCode UA_EXPORT
 UA_Server_Condition_unsuppress(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
+UA_Server_Condition_reset (UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
 UA_Server_Condition_removeFromService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_unshelve (UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_oneShotShelve (UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_timedShelve (UA_Server *server, UA_NodeId conditionId, UA_Duration shelvingTime, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+/*
+ * Condition State manipulation util functions
+*/
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setUnacknowledged (UA_Server *server, UA_NodeId conditionId);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setUnconfirmed(UA_Server *server, UA_NodeId conditionId);
 
 /*
     Condition Evaluation and Event Generation
