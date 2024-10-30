@@ -1611,8 +1611,6 @@ conditionBranchConfirm(UA_Server *server, UA_ConditionBranch *branch, const UA_L
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     UA_ConditionBranch_State_setConfirmedState(branch, server, true);
-    UA_ConditionBranch_evaluateRetainState(branch, server);
-
     if (comment) conditionBranch_addComment (server, branch, comment);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_MESSAGE)
