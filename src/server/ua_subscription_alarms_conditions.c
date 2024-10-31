@@ -4374,7 +4374,7 @@ UA_StatusCode UA_Server_exclusiveLimitAlarmEvaluate_default (
         limitAlarmCalculateEventInfo (server, conditionId, currentState, *input, &info);
         UA_UNLOCK(&server->serviceMutex);
         UA_Server_Condition_updateActive (server, *conditionId, &info, isActive);
-        if (isActive) UA_LocalizedText_clear(&info.message);
+        if (isActive) UA_String_clear(&info.message.text);
     }
     return retval;
 }
@@ -4504,7 +4504,7 @@ UA_Server_nonExclusiveLimitAlarmEvaluate_default (
         limitAlarmCalculateEventInfo (server, conditionId, currentState, *input, &info);
         UA_UNLOCK(&server->serviceMutex);
         UA_Server_Condition_updateActive (server, *conditionId, &info, isActive);
-        if (isActive) UA_LocalizedText_clear(&info.message);
+        if (isActive) UA_String_clear(&info.message.text);
     }
     return retval;
 }
