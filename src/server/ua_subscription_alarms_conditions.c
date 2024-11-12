@@ -1956,6 +1956,49 @@ UA_Server_Condition_timedShelve (UA_Server *server, UA_NodeId conditionId, UA_Du
     return ret;
 }
 
+static UA_BrowseResult getAlarmGroups (UA_Server *server, const UA_NodeId *alarmId);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_getGroupMemberships (UA_Server *server, UA_NodeId conditionId, size_t *groupsOutSize, UA_NodeId **groupsOut)
+{
+    UA_StatusCode status = UA_STATUSCODE_GOOD;
+    UA_LOCK (&server->serviceMutex);
+    UA_BrowseResult groupNodes;
+    UA_BrowseResult_init(&groupNodes);
+    groupNodes = getAlarmGroups(server, &conditionId);
+    if (groupNodes.statusCode != UA_STATUSCODE_GOOD)
+    {
+        status = groupNodes.statusCode;
+        goto done;
+    }
+
+    if (groupNodes.referencesSize == 0)
+    {
+        *groupsOutSize = 0;
+        *groupsOut = NULL;
+        goto done;
+    }
+
+    UA_NodeId *groups = (UA_NodeId *) UA_Array_new(groupNodes.referencesSize, &UA_TYPES[UA_TYPES_NODEID]);
+    if (!groups)
+    {
+        status = UA_STATUSCODE_BADOUTOFMEMORY;
+        goto done;
+    }
+
+    for (size_t i=0; i<groupNodes.referencesSize;i++)
+    {
+        groups[i] = groupNodes.references->nodeId.nodeId;
+        UA_NodeId_clear(&groupNodes.references->nodeId.nodeId);
+    }
+    *groupsOut = groups;
+    *groupsOutSize = groupNodes.referencesSize;
+done:
+    UA_BrowseResult_clear(&groupNodes);
+    UA_UNLOCK(&server->serviceMutex);
+    return status;
+}
+
 static UA_StatusCode removeCondition (UA_Server *server, UA_Condition *condition);
 
 static void *deleteConditionsWrapper (void *ctx, UA_Condition *condition)
@@ -3315,6 +3358,21 @@ unshelve2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
     return UA_Server_Condition_unshelve (server, *objectId, comment, NULL);
 }
 
+static UA_StatusCode
+getGroupMembershipsMethodCallback (UA_Server *server, const UA_NodeId *sessionId,
+                        void *sessionContext, const UA_NodeId *methodId,
+                        void *methodContext, const UA_NodeId *objectId,
+                        void *objectContext, size_t inputSize,
+                        const UA_Variant *input, size_t outputSize,
+                        UA_Variant *output)
+{
+
+    UA_NodeId *group = NULL;
+    size_t groupSize = 0;
+    UA_StatusCode status = UA_Server_Condition_getGroupMemberships (server, *objectId, &groupSize, &group);
+    if (status == UA_STATUSCODE_GOOD) UA_Variant_setArray(&output[0], group, groupSize, &UA_TYPES[UA_TYPES_NODEID]) ;
+    return status;
+}
 
 static UA_StatusCode
 setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *condition,
@@ -4122,24 +4180,6 @@ static UA_StatusCode isAlarmFirstInGroup (UA_Server *server, const UA_NodeId *al
     return UA_STATUSCODE_GOOD;
 }
 
-static UA_StatusCode alarmActiveHandleAlarmGroup (UA_Server *server, const UA_NodeId *alarmId, const UA_NodeId *groupId, UA_Boolean *firstInGroupOut)
-{
-    UA_BrowseResult groupNodes = getAlarmGroupNodes(server, groupId);
-    if (groupNodes.statusCode != UA_STATUSCODE_GOOD) return groupNodes.statusCode;
-
-    UA_Boolean active = false;
-    UA_StatusCode status = isGroupActiveBrowseResult(server, &groupNodes, &active);
-    if (status != UA_STATUSCODE_GOOD) goto done;
-
-    if (!active)
-    {
-    }
-    *firstInGroupOut = !active;
-done:
-    UA_BrowseResult_clear(&groupNodes);
-    return status;
-}
-
 static UA_StatusCode alarmActiveHandleAlarmGroups (UA_Server *server, const UA_NodeId *alarmId)
 {
     UA_BrowseResult groupsResult = getAlarmGroups(server, alarmId);
@@ -4257,57 +4297,43 @@ void initNs0ConditionAndAlarms (UA_Server *server)
      * references methods without copying them when creating objects. So the
      * callbacks will be attached to the methods of the conditionType. */
 
-    UA_NodeId methodId[] = {
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_DISABLE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_ENABLE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_ADDCOMMENT}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_ACKNOWLEDGE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_CONFIRM}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_RESET}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_RESET2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE2}},
-
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVE2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVE2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE2}}
+    struct UA_methodNodeCallback
+    {
+        UA_NodeId id;
+        UA_MethodCallback cb;
     };
 
-    retval |= setMethodNode_callback(server, methodId[0], disableMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[1], enableMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[2], addCommentMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[3], refreshMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[4], refresh2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[5], acknowledgeMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[6], confirmMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[7], resetMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[8], reset2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[9], suppressMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[10], suppress2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[11], unsuppressMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[12], unsuppress2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[13], placeInServiceMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[14], placeInService2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[15], removeFromServiceMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[16], removeFromService2MethodCallback);
+    struct UA_methodNodeCallback methodCallbacks[] = {
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_DISABLE}}, .cb=disableMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_ENABLE}}, .cb=enableMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_ADDCOMMENT}}, .cb=addCommentMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH}}, .cb=refreshMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH2}}, .cb=refresh2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_ACKNOWLEDGE}}, .cb=acknowledgeMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_CONFIRM}}, .cb=confirmMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_RESET}}, .cb=resetMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_RESET2}}, .cb=reset2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS}}, .cb=suppressMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS2}}, .cb=suppress2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS}}, .cb=unsuppressMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS}}, .cb=unsuppress2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE}}, .cb=placeInServiceMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE2}}, .cb=placeInService2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE}}, .cb=removeFromServiceMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE2}}, .cb=removeFromService2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVE}}, .cb=timedShelveMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVE}}, .cb=oneShotShelveMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE}}, .cb=unshelveMethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVE2}}, .cb=timedShelve2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVE2}}, .cb=oneShotShelve2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE2}}, .cb=unshelve2MethodCallback},
+        {.id={0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_GETGROUPMEMBERSHIPS}}, .cb=getGroupMembershipsMethodCallback}
+    };
 
-    retval |= setMethodNode_callback(server, methodId[17], timedShelveMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[18], oneShotShelveMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[19], unshelveMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[20], timedShelve2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[21], oneShotShelve2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[22], unshelve2MethodCallback);
+    for (size_t i=0; i< (sizeof(methodCallbacks)/sizeof(methodCallbacks[0])); i++)
+    {
+        retval |= setMethodNode_callback(server, methodCallbacks[i].id, methodCallbacks[i].cb);
+    }
 
     // Create RefreshEvents
     if(UA_NodeId_isNull(&server->refreshEvents[REFRESHEVENT_START_IDX]) &&
