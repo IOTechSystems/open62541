@@ -1821,6 +1821,9 @@ UA_Server_Condition_oneShotShelve (UA_Server *server, UA_NodeId conditionId, con
 UA_StatusCode UA_EXPORT
 UA_Server_Condition_timedShelve (UA_Server *server, UA_NodeId conditionId, UA_Duration shelvingTime, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
 
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_getGroupMemberships (UA_Server *server, UA_NodeId conditionId, size_t *groupsSize, UA_NodeId **groups);
+
 /*
  * Condition State manipulation util functions
 */

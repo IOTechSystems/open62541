@@ -366,6 +366,8 @@ evaluateWhereClause(UA_Server *server, UA_Session *session, const UA_NodeId *eve
 
 void initNs0ConditionAndAlarms (UA_Server *server);
 
+void clearAlarmsAndConditions (UA_Server *server);
+
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 

@@ -177,6 +177,7 @@ struct UA_Server {
     UA_ConditionTree conditions;
     UA_ConditionBranchTree conditionBranches;
     UA_NodeId refreshEvents[2];
+    UA_NodeId firstInGroupId;
 # endif
 #endif
 
@@ -350,10 +351,6 @@ UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
 UA_StatusCode
 UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
                            UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut);
-
-void
-UA_ConditionList_delete(UA_Server *server);
-
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 

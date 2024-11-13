@@ -277,7 +277,7 @@ UA_Server_delete(UA_Server *server) {
     UA_assert(server->subscriptionsSize == 0);
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
-    UA_ConditionList_delete(server);
+    clearAlarmsAndConditions (server);
 #endif
 
 #endif
