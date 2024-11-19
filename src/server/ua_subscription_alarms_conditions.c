@@ -1316,6 +1316,7 @@ UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
                                  const UA_ConditionEventInfo *info)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    if (info && info->noEvent) return UA_STATUSCODE_GOOD;
 
     /* Set time */
     UA_DateTime time = UA_DateTime_now();
