@@ -1688,6 +1688,7 @@ typedef struct UA_ConditionEventInfo {
     UA_Boolean hasSeverity;
     UA_StatusCode quality;
     UA_Boolean hasQuality;
+    UA_Boolean noEvent;
 } UA_ConditionEventInfo;
 
 typedef UA_StatusCode (*UA_ConditionEvaluateFn)(

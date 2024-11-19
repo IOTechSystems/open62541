@@ -643,11 +643,18 @@ setOptionalTwoStateVariable (UA_Server *server, const UA_NodeId *condition, UA_Q
 
 static UA_StatusCode
 updateShelvedStateMachineState (UA_Server *server, const UA_NodeId *shelvedStateId,
-                                UA_NodeId currentStateIdValue, const char *currentStateText)
+                                UA_NodeId currentStateIdValue, const char *currentStateText, const UA_Duration *duration)
 {
+    UA_Variant duration_val;
+    UA_Duration tmp = duration ? *duration : 0;
+    UA_Variant_setScalar(&duration_val, &tmp, &UA_TYPES[UA_TYPES_DURATION]);
+    UA_QualifiedName path [] = {UA_QUALIFIEDNAME (0, "UnshelveTime")};
+    UA_StatusCode retval = writeValueSimplifiedBrowsePath (server, *shelvedStateId, duration_val, 1, path);
+    CONDITION_ASSERT_RETURN_RETVAL (retval, "Set UnshelveTime value failed",);
+
     UA_NodeId currentStateId;
     UA_Variant value;
-    UA_StatusCode retval = getNodeIdWithBrowseName(server, shelvedStateId, UA_QUALIFIEDNAME(0, FIELD_CURRENT_STATE), &currentStateId);
+    retval = getNodeIdWithBrowseName(server, shelvedStateId, UA_QUALIFIEDNAME(0, FIELD_CURRENT_STATE), &currentStateId);
     CONDITION_ASSERT_GOTOLABEL(retval, "Get CurrentState Id failed", done);
 
     UA_LocalizedText stateText = UA_LOCALIZEDTEXT(LOCALE, (char *) (uintptr_t) currentStateText);
@@ -671,25 +678,25 @@ setShelvedStateMachineUnshelved (UA_Server *server, const UA_NodeId *shelvedStat
 {
     return updateShelvedStateMachineState(server, shelvedStateId,
         UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVED),
-        UNSHELVED_TEXT
+        UNSHELVED_TEXT, NULL
     );
 }
 
 static UA_StatusCode
-setShelvedStateMachineTimedShelved (UA_Server *server, const UA_NodeId *shelvedStateId)
+setShelvedStateMachineTimedShelved (UA_Server *server, const UA_NodeId *shelvedStateId, UA_Duration duration)
 {
     return updateShelvedStateMachineState(server, shelvedStateId,
         UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVED),
-        TIMEDSHELVED_TEXT
+        TIMEDSHELVED_TEXT, &duration
     );
 }
 
 static UA_StatusCode
-setShelvedStateMachineOneShotShelved (UA_Server *server, const UA_NodeId *shelvedStateId)
+setShelvedStateMachineOneShotShelved (UA_Server *server, const UA_NodeId *shelvedStateId, const UA_Duration *duration)
 {
     return updateShelvedStateMachineState(server, shelvedStateId,
         UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVED),
-        ONESHOTSHELVED_TEXT
+        ONESHOTSHELVED_TEXT, duration
     );
 }
 
@@ -1162,12 +1169,12 @@ UA_Condition_State_setShelvingStateUnshelved(const UA_Condition *condition, UA_S
 }
 
 static UA_StatusCode
-UA_Condition_State_setShelvingStateOneShot(const UA_Condition *condition, UA_Server *server, const UA_Duration *shelvedTime)
+UA_Condition_State_setShelvingStateOneShot (const UA_Condition *condition, UA_Server *server, const UA_Duration maxDuration)
 {
     UA_NodeId shelvingStateId;
     UA_StatusCode retval = getNodeIdWithBrowseName(server, &condition->mainBranch->id, fieldShelvingStateQN, &shelvingStateId);
     if (retval != UA_STATUSCODE_GOOD) return retval;
-    retval = setShelvedStateMachineOneShotShelved(server, &shelvingStateId);
+    retval = setShelvedStateMachineOneShotShelved(server, &shelvingStateId, &maxDuration);
     UA_NodeId_clear (&shelvingStateId);
     return retval;
 }
@@ -1178,7 +1185,7 @@ UA_Condition_State_setShelvingStateTimed(UA_Condition *condition, UA_Server *ser
     UA_NodeId shelvingStateId;
     UA_StatusCode retval = getNodeIdWithBrowseName(server, &condition->mainBranch->id, fieldShelvingStateQN, &shelvingStateId);
     if (retval != UA_STATUSCODE_GOOD) return retval;
-    retval = setShelvedStateMachineTimedShelved(server, &shelvingStateId);
+    retval = setShelvedStateMachineTimedShelved(server, &shelvingStateId, shelvedTime);
     UA_NodeId_clear (&shelvingStateId);
     return retval;
 }
@@ -1316,6 +1323,7 @@ UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
                                  const UA_ConditionEventInfo *info)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    if (info && info->noEvent) return UA_STATUSCODE_GOOD;
 
     /* Set time */
     UA_DateTime time = UA_DateTime_now();
@@ -1859,39 +1867,23 @@ static UA_StatusCode
 condition_oneShotShelveStart (UA_Server *server, UA_Condition *condition)
 {
     UA_Condition_removeUnshelveCallback(condition, server);
-    UA_Duration maxTimeShelved;
-    UA_StatusCode getMaxTimeStatus = UA_Condition_State_getMaxTimeShelved(condition, server, &maxTimeShelved);
+    UA_Duration maxTimeShelved = UA_DOUBLE_MAX;
+    UA_Condition_State_getMaxTimeShelved(condition, server, &maxTimeShelved);
     UA_StatusCode status = UA_Condition_State_setShelvingStateOneShot(
         condition,
         server,
-        getMaxTimeStatus == UA_STATUSCODE_GOOD ? &maxTimeShelved : NULL
+        maxTimeShelved
     );
     if (status != UA_STATUSCODE_GOOD) return status;
-    if (getMaxTimeStatus == UA_STATUSCODE_GOOD)
-    {
-        status = createUnshelveTimedCallback(server, condition, maxTimeShelved);
-        if (status != UA_STATUSCODE_GOOD) return status;
-    }
+    status = createUnshelveTimedCallback(server, condition, maxTimeShelved);
     return UA_STATUSCODE_GOOD;
-}
-
-static UA_StatusCode
-condition_oneShotStateInactive (UA_Server *server, UA_Condition *condition)
-{
-    UA_Condition_removeUnshelveCallback(condition, server);
-    return UA_Condition_State_setShelvingStateOneShot(
-        condition,
-        server,
-        NULL
-    );
 }
 
 static UA_StatusCode
 condition_oneShotShelve (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
 {
     if (UA_Condition_State_isOneShotShelved(condition, server)) return UA_STATUSCODE_BADCONDITIONALREADYSHELVED;
-    UA_StatusCode status = UA_Condition_State_Active(condition, server) ?
-        condition_oneShotShelveStart(server, condition) : condition_oneShotStateInactive(server, condition);
+    UA_StatusCode status = condition_oneShotShelveStart(server, condition);
     if (status != UA_STATUSCODE_GOOD) return status;
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, ONESHOTSHELVE_MESSAGE)
@@ -2604,12 +2596,6 @@ static void alarmActivate (UA_Server *server, UA_Condition *condition, const UA_
 {
     alarmTryBranch(server, condition);
     (void) UA_Condition_UserCallback_onActive(server, condition, &condition->mainBranch->id);
-    /* 5.8.17 In OneShotShelving, a user requests that an Alarm be Shelved for
-     * its current Active state or if not Active its next Active state*/
-    if (UA_Condition_State_isOneShotShelved(condition, server))
-    {
-        condition_oneShotShelveStart(server, condition);
-    }
     UA_Condition_State_setActiveState(condition, server, true);
     UA_Condition_State_setLatchedState(condition, server, true);
     UA_ConditionBranch_evaluateRetainState(condition->mainBranch, server);
