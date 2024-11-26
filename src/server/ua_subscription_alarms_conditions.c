@@ -1300,11 +1300,9 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
     if (enabled)
     {
         UA_Boolean eventRetain = UA_ConditionBranch_State_Retain (branch,server);
-        UA_Boolean lastEventRetain = branch->lastEventRetainValue;
-        branch->lastEventRetainValue = eventRetain;
         /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
         * of the Retain field from True to False. */
-        if (lastEventRetain == false && eventRetain == false) triggerEvent = false;
+        if (branch->lastEventRetainValue == false && eventRetain == false) triggerEvent = false;
     }
     else
     {
@@ -1317,6 +1315,8 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
     return UA_STATUSCODE_GOOD;
 }
 
+static UA_Boolean
+UA_ConditionBranch_evaluateRetainState(UA_ConditionBranch *branch, UA_Server *server);
 
 static UA_StatusCode
 UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
@@ -1343,30 +1343,28 @@ UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
         if (info->hasSeverity) UA_ConditionBranch_State_updateSeverity (branch, server, info->severity);
     }
 
-    UA_ByteString_clear(&branch->eventId);
+    UA_Boolean retainValue = UA_ConditionBranch_evaluateRetainState (branch, server);
     //Condition Nodes should not be deleted after triggering the event
+    UA_ByteString_clear(&branch->eventId);
     retval = triggerEvent(server, branch->id, branch->condition->sourceId, &branch->eventId, false);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Triggering condition event failed",);
+    branch->lastEventRetainValue = retainValue;
+
     return retval;
 }
-
-static void
-UA_ConditionBranch_evaluateRetainState(UA_ConditionBranch *branch, UA_Server *server);
 
 static UA_StatusCode removeConditionBranch (UA_Server *server, UA_ConditionBranch *branch);
 
 static UA_StatusCode
 UA_ConditionBranch_notifyNewBranchState (UA_ConditionBranch *branch, UA_Server *server, const UA_ConditionEventInfo *info) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_ConditionBranch_evaluateRetainState(branch, server);
     UA_StatusCode status = UA_ConditionBranch_triggerEvent (branch, server, info);
     if (status != UA_STATUSCODE_GOOD) return status;
     if (!branch->isMainBranch && !UA_ConditionBranch_State_Retain(branch, server))
     {
         UA_Condition *condition = branch->condition;
         status = removeConditionBranch(server, branch);
-        UA_ConditionBranch_evaluateRetainState(condition->mainBranch, server);
-        if (!UA_ConditionBranch_State_Retain(condition->mainBranch, server))
+        if (!UA_ConditionBranch_evaluateRetainState(condition->mainBranch, server))
         {
             status = UA_ConditionBranch_triggerEvent (condition->mainBranch, server, info);
         }
@@ -1530,7 +1528,7 @@ conditionBranch_addCommentAndEvent (UA_Server *server, UA_ConditionBranch *branc
     return UA_ConditionBranch_triggerEvent (branch, server, &info);
 }
 
-static void
+static UA_Boolean
 UA_ConditionBranch_evaluateRetainState(UA_ConditionBranch *branch, UA_Server *server)
 {
     UA_Boolean retain = false;
@@ -1558,6 +1556,7 @@ UA_ConditionBranch_evaluateRetainState(UA_ConditionBranch *branch, UA_Server *se
         (UA_ConditionBranch_State_isConfirmable(branch,server) && !UA_ConditionBranch_State_Confirmed(branch,server));
 done:
     UA_ConditionBranch_State_setRetain(branch, server, retain);
+    return retain;
 }
 
 UA_StatusCode
@@ -2598,7 +2597,6 @@ static void alarmActivate (UA_Server *server, UA_Condition *condition, const UA_
     (void) UA_Condition_UserCallback_onActive(server, condition, &condition->mainBranch->id);
     UA_Condition_State_setActiveState(condition, server, true);
     UA_Condition_State_setLatchedState(condition, server, true);
-    UA_ConditionBranch_evaluateRetainState(condition->mainBranch, server);
     UA_ConditionBranch_triggerEvent(condition->mainBranch, server, info);
     UA_Condition_createReAlarmCallback(condition, server);
 }
@@ -2719,7 +2717,6 @@ static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
         Condition_State_setReAlarmRepeatCount (server, &condition->mainBranch->id, condition->reAlarmCount);
     }
     UA_Condition_State_setActiveState (condition, server, false);
-    UA_ConditionBranch_evaluateRetainState(condition->mainBranch, server);
     UA_ConditionBranch_triggerEvent(condition->mainBranch, server, info);
 }
 
