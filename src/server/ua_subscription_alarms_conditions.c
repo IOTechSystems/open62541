@@ -4321,19 +4321,19 @@ limitAlarmCalculateEventInfo (UA_Server *server, const UA_NodeId *conditionId,
         stateText = "High";
         readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityHigh"), &severity);
     }
-    else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_LOWSTATEBIT))
-    {
-        stateText = "Low";
-        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityLow"), &severity);
-    }
     else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_LOWLOWSTATEBIT))
     {
         stateText = "LowLow";
         readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityLowLow"), &severity);
     }
+    else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_LOWSTATEBIT))
+    {
+        stateText = "Low";
+        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityLow"), &severity);
+    }
 
     info->message.locale = UA_STRING(LOCALE);
-    info->message.text = UA_String_fromFormat ("Alarm state is %s. Value %.2lf", stateText, value);
+    info->message.text = UA_String_fromFormat ("Alarm state is active. Value %.2lf", stateText, value);
     info->hasSeverity = true;
     info->severity = severity;
 }
@@ -4365,6 +4365,7 @@ UA_StatusCode UA_Server_exclusiveLimitAlarmEvaluate_default (
 static UA_StatusCode
 nonExclusiveLimitAlarmGetState (UA_Server *server, const UA_NodeId *conditionId, UA_LimitState *stateOut)
 {
+    /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.8.20 A value cannot exceed both a HighState value and a LowState value simultaneously. */
     UA_LimitState state = 0;
     UA_Boolean inLowState = isTwoStateVariableInTrueState(server, conditionId, &fieldLowStateQN);
     if (inLowState)
@@ -4374,7 +4375,6 @@ nonExclusiveLimitAlarmGetState (UA_Server *server, const UA_NodeId *conditionId,
         {
             UA_LIMITSTATE_SET(state, UA_LIMITSTATE_LOWLOWSTATEBIT);
         }
-
         goto done;
     }
 
