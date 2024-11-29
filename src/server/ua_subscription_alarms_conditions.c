@@ -4102,6 +4102,19 @@ static UA_StatusCode calculateNewLimitState (
             if (exclusive) goto done;
         }
     }
+     
+    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWDEADBAND), &lowLowDeadband);
+    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWLIMIT), &lowLowLimit);
+    if (retval == UA_STATUSCODE_GOOD)
+    {
+        UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWLOWSTATEBIT) ?
+                          (lowLowLimit + lowLowDeadband) :  lowLowLimit;
+        if (inputValue <= limit)
+        {
+            UA_LIMITSTATE_SET(state, UA_LIMITSTATE_LOWLOWSTATEBIT);
+            if (exclusive) goto done;
+        }
+    }
 
     readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWDEADBAND), &lowDeadband);
     retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLIMIT), &lowLimit);
@@ -4116,18 +4129,6 @@ static UA_StatusCode calculateNewLimitState (
         }
     }
 
-    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWDEADBAND), &lowLowDeadband);
-    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWLIMIT), &lowLowLimit);
-    if (retval == UA_STATUSCODE_GOOD)
-    {
-        UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWLOWSTATEBIT) ?
-                          (lowLowLimit + lowLowDeadband) :  lowLowLimit;
-        if (inputValue <= limit)
-        {
-            UA_LIMITSTATE_SET(state, UA_LIMITSTATE_LOWLOWSTATEBIT);
-            if (exclusive) goto done;
-        }
-    }
     retval = UA_STATUSCODE_GOOD;
 done:
     *stateOut = state;
