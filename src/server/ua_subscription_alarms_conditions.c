@@ -462,6 +462,11 @@ inline UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_No
     return getConditionBranch(server, conditionBranchId);
 }
 
+UA_Boolean isCondition (UA_Server *server, const UA_NodeId *id)
+{
+    return getCondition(server, id) ? true : false;
+}
+
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId)
@@ -1863,26 +1868,25 @@ condition_timedShelve (UA_Server *server, UA_Condition *condition,
 }
 
 static UA_StatusCode
-condition_oneShotShelveStart (UA_Server *server, UA_Condition *condition)
+condition_oneShotShelve (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
 {
-    UA_Condition_removeUnshelveCallback(condition, server);
+    if (UA_Condition_State_isOneShotShelved(condition, server)) return UA_STATUSCODE_BADCONDITIONALREADYSHELVED;
     UA_Duration maxTimeShelved = UA_DOUBLE_MAX;
-    UA_Condition_State_getMaxTimeShelved(condition, server, &maxTimeShelved);
-    UA_StatusCode status = UA_Condition_State_setShelvingStateOneShot(
+    UA_Boolean timedUnshelve = false;
+    if (UA_Condition_State_getMaxTimeShelved(condition, server, &maxTimeShelved) == UA_STATUSCODE_GOOD)
+    {
+       timedUnshelve = true;
+    }
+    UA_StatusCode status = UA_Condition_State_setShelvingStateOneShot (
         condition,
         server,
         maxTimeShelved
     );
-    if (status != UA_STATUSCODE_GOOD) return status;
-    status = createUnshelveTimedCallback(server, condition, maxTimeShelved);
-    return UA_STATUSCODE_GOOD;
-}
 
-static UA_StatusCode
-condition_oneShotShelve (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
-{
-    if (UA_Condition_State_isOneShotShelved(condition, server)) return UA_STATUSCODE_BADCONDITIONALREADYSHELVED;
-    UA_StatusCode status = condition_oneShotShelveStart(server, condition);
+    if (status != UA_STATUSCODE_GOOD) return status;
+    UA_Condition_removeUnshelveCallback(condition, server);
+    if (timedUnshelve) status = createUnshelveTimedCallback(server, condition, maxTimeShelved);
+
     if (status != UA_STATUSCODE_GOOD) return status;
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, ONESHOTSHELVE_MESSAGE)
@@ -3246,6 +3250,7 @@ oneShotShelveMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                           const UA_Variant *input, size_t outputSize,
                           UA_Variant *output)
 {
+//    assert (false);
     return UA_Server_Condition_oneShotShelve (server, *objectId, NULL, NULL);
 }
 
@@ -3941,57 +3946,45 @@ void initNs0ConditionAndAlarms (UA_Server *server)
      * references methods without copying them when creating objects. So the
      * callbacks will be attached to the methods of the conditionType. */
 
-    UA_NodeId methodId[] = {
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_DISABLE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_ENABLE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_ADDCOMMENT}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_ACKNOWLEDGE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_CONFIRM}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_RESET}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_RESET2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE2}},
-
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVE2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVE2}},
-        {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE2}}
+    struct _UA_Set_MethodNode_MethodCallback_data {
+       UA_NodeId id;
+       UA_MethodCallback cb;
     };
 
-    retval |= setMethodNode_callback(server, methodId[0], disableMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[1], enableMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[2], addCommentMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[3], refreshMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[4], refresh2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[5], acknowledgeMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[6], confirmMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[7], resetMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[8], reset2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[9], suppressMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[10], suppress2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[11], unsuppressMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[12], unsuppress2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[13], placeInServiceMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[14], placeInService2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[15], removeFromServiceMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[16], removeFromService2MethodCallback);
+    struct _UA_Set_MethodNode_MethodCallback_data condition_methods[] = {
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH), .cb = refreshMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE_CONDITIONREFRESH2), .cb = refresh2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE_DISABLE), .cb = disableMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE_ENABLE), .cb = enableMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE_ADDCOMMENT), .cb = addCommentMethodCallback},
 
-    retval |= setMethodNode_callback(server, methodId[17], timedShelveMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[18], oneShotShelveMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[19], unshelveMethodCallback);
-    retval |= setMethodNode_callback(server, methodId[20], timedShelve2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[21], oneShotShelve2MethodCallback);
-    retval |= setMethodNode_callback(server, methodId[22], unshelve2MethodCallback);
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_ACKNOWLEDGE), .cb = acknowledgeMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_CONFIRM), .cb = confirmMethodCallback},
+
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_RESET), .cb = resetMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_RESET2), .cb = reset2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS), .cb = suppressMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SUPPRESS2), .cb = suppress2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS), .cb = unsuppressMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_UNSUPPRESS2), .cb = unsuppress2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE), .cb = placeInServiceMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE2), .cb = placeInService2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE), .cb = removeFromServiceMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE2), .cb = removeFromService2MethodCallback},
+
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_UNSHELVE), .cb = unshelveMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_UNSHELVE2), .cb = unshelve2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_TIMEDSHELVE), .cb = timedShelveMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_TIMEDSHELVE2), .cb = timedShelve2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_ONESHOTSHELVE), .cb = oneShotShelveMethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_ONESHOTSHELVE2), .cb = oneShotShelve2MethodCallback},
+    };
+
+    for (size_t i=0; i< sizeof(condition_methods)/sizeof(condition_methods[0]); i++)
+    {
+        retval |= setMethodNode_callback(server, condition_methods[i].id, condition_methods[i].cb);
+    }
+
 
     // Create RefreshEvents
     if(UA_NodeId_isNull(&server->refreshEvents[REFRESHEVENT_START_IDX]) &&
@@ -4102,7 +4095,7 @@ static UA_StatusCode calculateNewLimitState (
             if (exclusive) goto done;
         }
     }
-     
+
     readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWDEADBAND), &lowLowDeadband);
     retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWLIMIT), &lowLowLimit);
     if (retval == UA_STATUSCODE_GOOD)
