@@ -341,6 +341,8 @@ getAllInterfaceChildNodeIds(UA_Server *server, const UA_NodeId *objectNode, cons
 struct UA_ConditionBranch;
 typedef struct UA_ConditionBranch UA_ConditionBranch;
 
+UA_Boolean isCondition (UA_Server *server, const UA_NodeId *id);
+
 UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId);
 
 UA_StatusCode

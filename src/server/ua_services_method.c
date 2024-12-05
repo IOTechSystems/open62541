@@ -141,6 +141,122 @@ iterateFunctionGroupSearch(void *context, UA_ReferenceTarget *t) {
     return NULL;
 }
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+
+struct methodIsAlarmIterData
+{
+    UA_Server *server;
+    const UA_NodeId *alarmId;
+};
+
+static void * methodIsAlarmMethodIterateObjectNodes
+(void *context, UA_ReferenceTarget *t)
+{
+    UA_Server *server = ((struct methodIsAlarmIterData*) context)->server;
+    const UA_NodeId *alarmId = ((struct methodIsAlarmIterData*) context)->alarmId;
+    if(!UA_NodePointer_isLocal(t->targetId)) return NULL;
+
+    UA_NodeId tmpId = UA_NodePointer_toNodeId(t->targetId);
+    if (UA_NodeId_equal(&tmpId, alarmId)) return (void *) 0x01;
+
+    const UA_Node *objectNode = UA_NODESTORE_GETFROMREF(server, t->targetId);
+    if (!objectNode) return NULL;
+    if (objectNode->head.nodeClass != UA_NODECLASS_OBJECT) goto done;
+
+    const UA_Node *objectNodeType = getNodeType (server, &objectNode->head);
+    if (!objectNodeType) goto done;
+
+    //is type a subtype of alarms
+    UA_NodeId alarmType = UA_NODEID_NUMERIC (0 , UA_NS0ID_ALARMCONDITIONTYPE);
+    UA_Boolean isSubtype = isNodeInTree_singleRef(server, &objectNodeType->head.nodeId, &alarmType,
+                                  UA_REFERENCETYPEINDEX_HASSUBTYPE);
+    UA_NODESTORE_RELEASE(server, objectNodeType);
+    if (isSubtype) goto done;
+
+
+    UA_ReferenceTypeSet hasComponentRefs;
+    UA_StatusCode res = referenceTypeIndices(server, &hasComponentNodeId,
+                               &hasComponentRefs, true);
+    if (res != UA_STATUSCODE_GOOD) return NULL;
+
+    for (size_t i = 0; i < objectNode->head.referencesSize; ++i) {
+        UA_NodeReferenceKind *rk = &objectNode->head.references[i];
+        if(!rk->isInverse)
+            continue;
+
+        /* Are these ComponentOf references */
+        if(!UA_ReferenceTypeSet_contains(&hasComponentRefs, rk->referenceTypeIndex))
+            continue;
+
+        if (UA_NodeReferenceKind_iterate (rk, methodIsAlarmMethodIterateObjectNodes, context)) return (void *) 0x01;
+    }
+done:
+    UA_NODESTORE_RELEASE(server, objectNode);
+    return NULL;
+}
+
+static void *
+methodIsAlarmMethodIterateMethodComponentOfReferences (void *context, UA_ReferenceTarget *t)
+{
+
+    UA_Server *server = ((struct methodIsAlarmIterData*) context)->server;
+    if(!UA_NodePointer_isLocal(t->targetId)) return NULL;
+
+    const UA_Node *parentNode = UA_NODESTORE_GETFROMREF(server, t->targetId);
+    if (!parentNode) return NULL;
+
+    const UA_Node *parentType = getNodeType(server, &parentNode->head);
+    UA_NODESTORE_RELEASE(server, parentNode);
+    if (!parentType) return NULL;
+
+    UA_ReferenceTypeSet hasTypeDefinitionRefs;
+    UA_StatusCode res = referenceTypeIndices(server, &hasTypeDefinitionNodeId,
+                                             &hasTypeDefinitionRefs, true);
+    if (res != UA_STATUSCODE_GOOD) return NULL;
+
+    for (size_t i = 0; i < parentType->head.referencesSize; ++i) {
+        UA_NodeReferenceKind *rk = &parentType->head.references[i];
+        if(!rk->isInverse)
+            continue;
+
+        /* Are these TypeDefinitionOf  references */
+        if(!UA_ReferenceTypeSet_contains(&hasTypeDefinitionRefs, rk->referenceTypeIndex))
+            continue;
+
+        if (UA_NodeReferenceKind_iterate (rk, methodIsAlarmMethodIterateObjectNodes, context)) return (void *) 0x01;
+    }
+    return NULL;
+}
+
+static UA_Boolean checkMethodIsAlarmMethod (
+    UA_Server *server,
+    const UA_NodeId *alarmId,
+    const UA_MethodNode *method,
+    UA_ReferenceTypeSet *hasComponentRefs
+)
+{
+    if (!isCondition (server, alarmId)) return false;
+
+    struct methodIsAlarmIterData data = {.server = server, .alarmId = alarmId};
+
+    UA_Boolean methodIsAlarmMethod = false;
+
+    for (size_t i = 0; i < method->head.referencesSize; ++i) {
+        UA_NodeReferenceKind *rk = &method->head.references[i];
+        if(!rk->isInverse)
+            continue;
+
+        /* Are these Component of references */
+        if(!UA_ReferenceTypeSet_contains(hasComponentRefs, rk->referenceTypeIndex))
+            continue;
+
+        methodIsAlarmMethod = UA_NodeReferenceKind_iterate (rk, methodIsAlarmMethodIterateMethodComponentOfReferences, &data);
+        if (methodIsAlarmMethod) break;
+    }
+    return methodIsAlarmMethod;
+}
+#endif
+
 static UA_StatusCode
 checkFunctionalGroupMethodReference(UA_Server *server, const UA_NodeHead *h,
                                     const UA_ExpandedNodeId *methodId,
@@ -244,6 +360,22 @@ callWithMethodAndObject(UA_Server *server, UA_Session *session,
             UA_NODESTORE_RELEASE(server, objectType);
         }
     }
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+    if (!found) {
+        /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.8.17
+         * Servers shall allow Clients to call the ShelvedStateMachine Methods
+         * of its Shelving child by specifying ConditionId as the ObjectId
+         * where the ConditionId is the Condition that has Shelving child.
+         *
+         * We can extend this behaviour to check if the objectId is a condition
+         * and that the methodId is a component of an object that the condition
+         *
+         *
+         * */
+        found = checkMethodIsAlarmMethod (server, &object->head.nodeId, method, &hasComponentRefs);
+    }
+#endif
 
     if(!found) {
         /* The following ParentObject evaluation is a workaround only to fulfill
