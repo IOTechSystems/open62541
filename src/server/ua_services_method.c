@@ -225,6 +225,7 @@ methodIsAlarmMethodIterateMethodComponentOfReferences (void *context, UA_Referen
 
         if (UA_NodeReferenceKind_iterate (rk, methodIsAlarmMethodIterateObjectNodes, context)) return (void *) 0x01;
     }
+    UA_NODESTORE_RELEASE(server, parentType);
     return NULL;
 }
 
