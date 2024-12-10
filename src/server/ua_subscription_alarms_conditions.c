@@ -217,7 +217,8 @@ ZIP_FUNCTIONS(UA_ConditionBranchTree, UA_ConditionBranch, zipEntry, UA_Condition
 #define SHELVEDSTATE_METHOD_ONESHOTSHELVE2 SHELVEDSTATE_METHOD_ONESHOTSHELVE"2"
 #define SHELVEDSTATE_METHOD_UNSHELVE2 SHELVEDSTATE_METHOD_UNSHELVE"2"
 
-#define FIELD_STATEVARIABLE_ID                    "Id"
+#define FIELD_ID                                  "Id"
+#define FIELD_STATEVARIABLE_ID                    FIELD_ID
 
 #define FIELD_CURRENT_STATE "CurrentState"
 
@@ -520,10 +521,6 @@ getConditionFieldPropertyNodeId(UA_Server *server, const UA_NodeId *originCondit
                                 const UA_QualifiedName* variablePropertyName,
                                 UA_NodeId *outFieldPropertyNodeId);
 
-static UA_StatusCode
-getNodeIdValueOfNodeField(UA_Server *server, const UA_NodeId *nodeId,
-                          UA_QualifiedName fieldName, UA_NodeId *outNodeId);
-
 static UA_NodeId getTypeDefinitionId(UA_Server *server, const UA_NodeId *targetId)
 {
     UA_BrowseDescription bd;
@@ -708,13 +705,24 @@ setShelvedStateMachineOneShotShelved (UA_Server *server, const UA_NodeId *shelve
 static UA_StatusCode
 getShelvedStateMachineStateId (UA_Server *server, const UA_NodeId *shelvedStateId, UA_NodeId *shelvedId)
 {
-    UA_NodeId currentStateId;
-    UA_StatusCode status = getNodeIdWithBrowseName (server, shelvedStateId, UA_QUALIFIEDNAME(0, FIELD_CURRENT_STATE), &currentStateId);
-    if (status != UA_STATUSCODE_GOOD) goto done;
-    status = getNodeIdValueOfNodeField(server, shelvedStateId, stateVariableIdQN, shelvedId);
-    if (status != UA_STATUSCODE_GOOD) goto done;
+    UA_QualifiedName path[] = {
+        UA_QUALIFIEDNAME(0, FIELD_CURRENT_STATE),
+        UA_QUALIFIEDNAME(0, FIELD_ID)
+    };
+    UA_Variant val;
+    UA_Variant_init(&val);
+    UA_StatusCode status = readValueSimplifiedBrowsePath (server, *shelvedStateId, 2, path, &val);
+    if (status != UA_STATUSCODE_GOOD) return status;
+    if (!UA_Variant_hasScalarType(&val, &UA_TYPES[UA_TYPES_NODEID]))
+    {
+        status = UA_STATUSCODE_BADTYPEMISMATCH;
+        goto done;
+    }
+
+    *shelvedId = *(UA_NodeId *) val.data;
+    val.data = NULL;
 done:
-    UA_NodeId_clear (&currentStateId);
+    UA_Variant_clear(&val);
     return status;
 }
 
@@ -768,24 +776,6 @@ getValueOfConditionField (UA_Server *server, const UA_NodeId *condition,
     retval = readWithReadValue(server, &fieldId, UA_ATTRIBUTEID_VALUE, outValue);
     UA_NodeId_clear(&fieldId);
     return retval;
-}
-
-static UA_StatusCode
-getNodeIdValueOfNodeField(UA_Server *server, const UA_NodeId *condition,
-                          UA_QualifiedName fieldName, UA_NodeId *outNodeId) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_Variant value;
-    UA_StatusCode retval = getValueOfConditionField (server, condition, fieldName, &value);
-    if(retval != UA_STATUSCODE_GOOD) return retval;
-    if (!UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_NODEID]))
-    {
-        UA_Variant_clear(&value);
-        return UA_STATUSCODE_BADTYPEMISMATCH;
-    }
-    *outNodeId = *(UA_NodeId*)value.data;
-    UA_NodeId_init((UA_NodeId*)value.data);
-    UA_Variant_clear(&value);
-    return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
