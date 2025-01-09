@@ -788,13 +788,138 @@ readObjectProperty(UA_Server *server, const UA_NodeId objectId,
     return retval;
 }
 
-
 UA_StatusCode
 UA_Server_readObjectProperty(UA_Server *server, const UA_NodeId objectId,
                              const UA_QualifiedName propertyName,
                              UA_Variant *value) {
     UA_LOCK(&server->serviceMutex);
     UA_StatusCode retval = readObjectProperty(server, objectId, propertyName, value);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
+}
+
+UA_StatusCode writeValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId object_id,
+    const UA_Variant value,
+    size_t path_size,
+    const UA_QualifiedName *path
+)
+{
+    UA_StatusCode retval;
+    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath (server, object_id, path_size, path);
+    if(bpr.statusCode != UA_STATUSCODE_GOOD || bpr.targetsSize < 1) {
+        retval = bpr.statusCode;
+        UA_BrowsePathResult_clear(&bpr);
+        return retval;
+    }
+    UA_StatusCode ret = writeValueAttribute(server, bpr.targets[0].targetId.nodeId, &value);
+    UA_BrowsePathResult_clear (&bpr);
+    return ret;
+}
+
+UA_StatusCode readValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId object_id,
+    size_t path_size,
+    const UA_QualifiedName *path,
+    UA_Variant *value
+)
+{
+    UA_StatusCode retval;
+    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath (server, object_id, path_size, path);
+    if(bpr.statusCode != UA_STATUSCODE_GOOD || bpr.targetsSize < 1) {
+        retval = bpr.statusCode;
+        UA_BrowsePathResult_clear(&bpr);
+        return retval;
+    }
+    UA_StatusCode ret = readWithReadValue(server, &bpr.targets[0].targetId.nodeId, UA_ATTRIBUTEID_VALUE, value);
+    UA_BrowsePathResult_clear (&bpr);
+    return ret;
+}
+
+inline UA_StatusCode
+UA_Server_writeValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId objectId,
+    const UA_Variant value,
+    size_t pathSize,
+    const UA_QualifiedName *path
+)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = writeValueSimplifiedBrowsePath (server, objectId, value, pathSize, path);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
+}
+
+inline UA_StatusCode
+UA_Server_readValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId objectId,
+    size_t pathSize,
+    const UA_QualifiedName *path,
+    UA_Variant *value
+)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = readValueSimplifiedBrowsePath (server, objectId, pathSize, path, value);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
+}
+
+inline UA_StatusCode
+writeTwoStateVariable (
+    UA_Server *server,
+    const UA_NodeId twoStateVariableId,
+    UA_LocalizedText value,
+    UA_Boolean idValue
+)
+{
+    UA_Variant val;
+    UA_Variant_setScalar(&val, &value, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
+    UA_StatusCode ret = writeValueAttribute (server, twoStateVariableId, &val);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    UA_Variant_setScalar(&val, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    UA_QualifiedName idPath = UA_QUALIFIEDNAME(0, "Id");
+    return writeValueSimplifiedBrowsePath (server, twoStateVariableId, val, 1, &idPath);
+}
+
+inline UA_StatusCode
+UA_Server_writeTwoStateVariable (
+    UA_Server *server,
+    const UA_NodeId twoStateVariableId,
+    UA_LocalizedText value,
+    UA_Boolean idValue
+)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = writeTwoStateVariable (server, twoStateVariableId, value, idValue);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
+}
+
+UA_StatusCode
+getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
+                   UA_QualifiedName browseName, UA_NodeId *outNodeId)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_BrowsePathResult bpr =
+        browseSimplifiedBrowsePath(server, *origin, 1, &browseName);
+    if(bpr.statusCode != UA_STATUSCODE_GOOD)
+        return bpr.statusCode;
+    *outNodeId = bpr.targets[0].targetId.nodeId;
+    bpr.targets[0].targetId.nodeId = UA_NODEID_NULL;
+    UA_BrowsePathResult_clear(&bpr);
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_Server_getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
+                   UA_QualifiedName childBrowseName, UA_NodeId *outNodeId)
+{
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = getNodeIdWithBrowseName(server, origin, childBrowseName, outNodeId);
     UA_UNLOCK(&server->serviceMutex);
     return retval;
 }
