@@ -8,7 +8,6 @@
 
 #include <open62541/util.h>
 #include <open62541/plugin/pki_default.h>
-#include <open62541/plugin/log_stdout.h>
 
 #include "securitypolicy_openssl_common.h"
 
@@ -463,6 +462,7 @@ static X509 *
 openSSLFindNextIssuer(CertContext *ctx, STACK_OF(X509) *stack, X509 *x509, X509 *prev) {
     /* First check issuers from the stack - provided in the same bytestring as
      * the certificate. This can also return x509 itself. */
+    X509_NAME *in = X509_get_issuer_name(x509);
     do {
         int size = sk_X509_num(stack);
         for(int i = 0; i < size; i++) {
@@ -475,11 +475,17 @@ openSSLFindNextIssuer(CertContext *ctx, STACK_OF(X509) *stack, X509 *x509, X509 
             /* This checks subject/issuer name and the key usage of the issuer.
              * It does not verify the validity period and if the issuer key was
              * used for the signature. We check that afterwards. */
-            if(X509_check_issued(candidate, x509) == 0)
+            if(X509_NAME_cmp(in, X509_get_subject_name(candidate)) == 0)
                 return candidate;
         }
-        /* Switch to search in the ctx->skIssue list */
-        stack = (stack != ctx->skIssue) ? ctx->skIssue : NULL;
+        /* Switch from the stack that came with the cert to the issuer list and
+         * then to the trust list. */
+        if(stack == ctx->skTrusted)
+            stack = NULL;
+        else if(stack == ctx->skIssue)
+            stack = ctx->skTrusted;
+        else
+            stack = ctx->skIssue;
     } while(stack);
     return NULL;
 }
@@ -504,11 +510,21 @@ openSSLCheckCA(X509 *cert) {
     return true;
 }
 
-static UA_Boolean
+static UA_StatusCode
 openSSLCheckRevoked(CertContext *ctx, X509 *cert) {
     const ASN1_INTEGER *sn = X509_get0_serialNumber(cert);
     const X509_NAME *in = X509_get_issuer_name(cert);
     int size = sk_X509_CRL_num(ctx->skCrls);
+
+    if(size == 0) {
+        UA_LOG_WARNING(ctx->cv->logging, UA_LOGCATEGORY_SECURITYPOLICY,
+                       "Zero revocation lists have been loaded. "
+                       "This seems intentional - omitting the check.");
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* Loop over the crl and match the Issuer Name */
+    UA_StatusCode res = UA_STATUSCODE_BADCERTIFICATEREVOCATIONUNKNOWN;
     for(int i = 0; i < size; i++) {
         /* The crl contains a list of serial numbers from the same issuer */
         X509_CRL *crl = sk_X509_CRL_value(ctx->skCrls, i);
@@ -519,10 +535,11 @@ openSSLCheckRevoked(CertContext *ctx, X509 *cert) {
         for(int j = 0; j < rsize; j++) {
             X509_REVOKED *r = sk_X509_REVOKED_value(rs, j);
             if(ASN1_INTEGER_cmp(sn, X509_REVOKED_get0_serialNumber(r)) == 0)
-                return true;
+                return UA_STATUSCODE_BADCERTIFICATEREVOKED;
         }
+        res = UA_STATUSCODE_GOOD; /* There was at least one crl that did not revoke (so far) */
     }
-    return false;
+    return res;
 }
 
 #define UA_OPENSSL_MAX_CHAIN_LENGTH 10
@@ -540,11 +557,6 @@ openSSL_verifyChain(CertContext *ctx, STACK_OF(X509) *stack, X509 **old_issuers,
     if(X509_cmp_current_time(notBefore) != -1 || X509_cmp_current_time(notAfter) != 1)
         return (depth == 0) ? UA_STATUSCODE_BADCERTIFICATETIMEINVALID :
             UA_STATUSCODE_BADCERTIFICATEISSUERTIMEINVALID;
-
-    /* Verification Step: Revocation Check */
-    if(openSSLCheckRevoked(ctx, cert))
-        return (depth == 0) ? UA_STATUSCODE_BADCERTIFICATEREVOKED :
-            UA_STATUSCODE_BADCERTIFICATEISSUERREVOKED;
 
     /* Return the most specific error code. BADCERTIFICATECHAININCOMPLETE is
      * returned only if all possible chains are incomplete. */
@@ -577,11 +589,25 @@ openSSL_verifyChain(CertContext *ctx, STACK_OF(X509) *stack, X509 **old_issuers,
          * chain. We check whether the certificate is trusted below. This is the
          * only place where we return UA_STATUSCODE_BADCERTIFICATEUNTRUSTED.
          * This signals that the chain is complete (but can be still
-         * untrusted). */
+         * untrusted).
+         *
+         * Break here as we have reached the end of the chain. Omit the
+         * Revocation Check for self-signed certificates. */
         if(cert == issuer || X509_cmp(cert, issuer) == 0) {
             ret = UA_STATUSCODE_BADCERTIFICATEUNTRUSTED;
-            continue;
+            break;
         }
+
+        /* Verification Step: Revocation Check */
+        ret = openSSLCheckRevoked(ctx, cert);
+        if(depth > 0) {
+            if(ret == UA_STATUSCODE_BADCERTIFICATEREVOKED)
+                ret = UA_STATUSCODE_BADCERTIFICATEISSUERREVOKED;
+            if(ret == UA_STATUSCODE_BADCERTIFICATEREVOCATIONUNKNOWN)
+                ret = UA_STATUSCODE_BADCERTIFICATEISSUERREVOCATIONUNKNOWN;
+        }
+        if(ret != UA_STATUSCODE_GOOD)
+            continue;
 
         /* Detect (endless) loops of issuers. The last one can be skipped by the
          * check for self-signed just before. */
@@ -617,6 +643,7 @@ UA_CertificateVerification_Verify(const UA_CertificateVerification *cv,
 
     UA_StatusCode ret = UA_STATUSCODE_GOOD;
     CertContext *ctx = (CertContext *)cv->context;
+    X509 *old_issuers[UA_OPENSSL_MAX_CHAIN_LENGTH];
 
 #ifdef __linux__ 
     ret = UA_ReloadCertFromFolder(ctx);
@@ -627,9 +654,8 @@ UA_CertificateVerification_Verify(const UA_CertificateVerification *cv,
     /* Verification Step: Certificate Structure */
     STACK_OF(X509) *stack = openSSLLoadCertificateStack(*certificate);
     if(!stack || sk_X509_num(stack) < 1) {
-        if(stack)
-            sk_X509_pop_free(stack, X509_free);
-        return UA_STATUSCODE_BADCERTIFICATEINVALID;
+        ret = UA_STATUSCODE_BADCERTIFICATEINVALID;
+        goto errout;
     }
 
     /* Verification Step: Certificate Usage
@@ -638,8 +664,8 @@ UA_CertificateVerification_Verify(const UA_CertificateVerification *cv,
      * for more details. */
     X509 *leaf = sk_X509_value(stack, 0);
     if(openSSLCheckCA(leaf)) {
-        sk_X509_pop_free(stack, X509_free);
-        return UA_STATUSCODE_BADCERTIFICATEUSENOTALLOWED;
+        ret = UA_STATUSCODE_BADCERTIFICATEUSENOTALLOWED;
+        goto errout;
     }
 
     /* These steps are performed outside of this method.
@@ -650,9 +676,46 @@ UA_CertificateVerification_Verify(const UA_CertificateVerification *cv,
 
     /* Verification Step: Build Certificate Chain
      * We perform the checks for each certificate inside. */
-    X509 *old_issuers[UA_OPENSSL_MAX_CHAIN_LENGTH];
     ret = openSSL_verifyChain(ctx, stack, old_issuers, leaf, 0);
-    sk_X509_pop_free(stack, X509_free);
+
+ errout:
+    if(stack)
+        sk_X509_pop_free(stack, X509_free);
+
+#ifdef UA_ENABLE_CERT_REJECTED_DIR
+    if(ret != UA_STATUSCODE_GOOD &&
+       ctx->rejectedListFolder.length > 0) {
+            char rejectedFileName[256] = {0};
+            UA_ByteString thumbprint;
+            UA_ByteString_allocBuffer(&thumbprint, UA_SHA1_LENGTH);
+            if(UA_Openssl_X509_GetCertificateThumbprint(certificate, &thumbprint, true) == UA_STATUSCODE_GOOD) {
+                static const char hex2char[] = "0123456789ABCDEF";
+                for(size_t pos = 0, namePos = 0; pos < thumbprint.length; pos++) {
+                    rejectedFileName[namePos++] = hex2char[(thumbprint.data[pos] & 0xf0) >> 4];
+                    rejectedFileName[namePos++] = hex2char[thumbprint.data[pos] & 0x0f];
+                }
+                strcat(rejectedFileName, ".der");
+            } else {
+                UA_UInt64 dt = (UA_UInt64) UA_DateTime_now();
+                sprintf(rejectedFileName, "cert_%" PRIu64 ".der", dt);
+            }
+            UA_ByteString_clear(&thumbprint);
+            char *rejectedFullFileName = (char *)
+                calloc(ctx->rejectedListFolder.length + 1 /* '/' */ + strlen(rejectedFileName) + 1, sizeof(char));
+            if(!rejectedFullFileName)
+                return ret;
+            memcpy(rejectedFullFileName, ctx->rejectedListFolder.data, ctx->rejectedListFolder.length);
+            rejectedFullFileName[ctx->rejectedListFolder.length] = '/';
+            memcpy(&rejectedFullFileName[ctx->rejectedListFolder.length + 1], rejectedFileName, strlen(rejectedFileName));
+            FILE * fp_rejectedFile = fopen(rejectedFullFileName, "wb");
+            if(fp_rejectedFile) {
+                fwrite(certificate->data, sizeof(certificate->data[0]), certificate->length, fp_rejectedFile);
+                fclose(fp_rejectedFile);
+            }
+            free(rejectedFullFileName);
+    }
+#endif
+
     return ret;
 }
 
@@ -850,10 +913,14 @@ errout:
 
 #ifdef __linux__ /* Linux only so far */
 UA_StatusCode
-UA_CertificateVerification_CertFolders(UA_CertificateVerification * cv,
-                                       const char *                 trustListFolder,
-                                       const char *                 issuerListFolder,
-                                       const char *                 revocationListFolder) {
+UA_CertificateVerification_CertFolders(UA_CertificateVerification *cv,
+                                       const char *trustListFolder,
+                                       const char *issuerListFolder,
+                                       const char *revocationListFolder
+#ifdef UA_ENABLE_CERT_REJECTED_DIR
+                                       , const char *rejectedListFolder
+#endif
+                                       ) {
     UA_StatusCode ret;
     if (cv == NULL) {
         return UA_STATUSCODE_BADINTERNALERROR;
@@ -886,6 +953,9 @@ UA_CertificateVerification_CertFolders(UA_CertificateVerification * cv,
     context->trustListFolder = UA_STRING_ALLOC(trustListFolder);
     context->issuerListFolder = UA_STRING_ALLOC(issuerListFolder);
     context->revocationListFolder = UA_STRING_ALLOC(revocationListFolder);
+#ifdef UA_ENABLE_CERT_REJECTED_DIR
+    context->rejectedListFolder = UA_STRING_ALLOC(rejectedListFolder);
+#endif
 
     return UA_STATUSCODE_GOOD;
 }
