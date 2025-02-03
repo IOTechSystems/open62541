@@ -4025,6 +4025,11 @@ UA_Server_Condition_iterBranches (UA_Server *server, UA_NodeId conditionId,
 {
     UA_LOCK(&server->serviceMutex);
     UA_ConditionBranch *branch = getConditionBranch(server, &conditionId);
+    if (!branch) 
+    {
+        UA_UNLOCK(&server->serviceMutex);
+        return
+    }
     UA_Condition *cond = branch->condition;
     UA_ConditionBranch *tmp = NULL;
     LIST_FOREACH_SAFE(branch, &cond->branches, listEntry, tmp)
