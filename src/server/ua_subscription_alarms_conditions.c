@@ -4028,7 +4028,7 @@ UA_Server_Condition_iterBranches (UA_Server *server, UA_NodeId conditionId,
     if (!branch) 
     {
         UA_UNLOCK(&server->serviceMutex);
-        return
+        return;
     }
     UA_Condition *cond = branch->condition;
     UA_ConditionBranch *tmp = NULL;
