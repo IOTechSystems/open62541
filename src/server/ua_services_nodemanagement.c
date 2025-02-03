@@ -84,6 +84,30 @@ UA_Server_setNodeContext(UA_Server *server, UA_NodeId nodeId,
 }
 
 static UA_StatusCode
+editNodeContextFreeCb(UA_Server *server, UA_Session* session,
+                UA_NodeHead *head, UA_NodeContextFreeCallback *callback) {
+    head->contextFreeCb = *callback;
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+setNodeContextFreeCb(UA_Server *server, UA_NodeId nodeId,
+              UA_NodeContextFreeCallback callback) {
+    return UA_Server_editNode(server, &server->adminSession, &nodeId,
+                              (UA_EditNodeCallback)editNodeContextFreeCb, &callback);
+}
+
+
+UA_StatusCode
+UA_Server_setNodeContextFreeCb(UA_Server *server, UA_NodeId nodeId,
+                         UA_NodeContextFreeCallback callback) {
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode retval = setNodeContextFreeCb(server, nodeId, callback);
+    UA_UNLOCK(&server->serviceMutex);
+    return retval;
+}
+
+static UA_StatusCode
 checkSetIsDynamicVariable(UA_Server *server, UA_Session *session,
                           const UA_NodeId *nodeId);
 
@@ -535,10 +559,6 @@ isMandatoryChild(UA_Server *server, UA_Session *session,
     return found;
 }
 
-static UA_StatusCode
-copyAllChildren(UA_Server *server, UA_Session *session,
-                const UA_NodeId *source, const UA_NodeId *destination);
-
 static void
 Operation_addReference(UA_Server *server, UA_Session *session, void *context,
                        const UA_AddReferencesItem *item, UA_StatusCode *retval);
@@ -580,7 +600,7 @@ addInterfaceChildren(UA_Server *server, UA_Session *session,
 
     /* Copy members of the type and supertypes (and instantiate them) */
     for(size_t i = 0; i < hierarchySize; ++i) {
-        retval = copyAllChildren(server, session, &hierarchy[i], nodeId);
+        retval = copyAllChildren(server, session, &hierarchy[i], nodeId, false);
         if(retval != UA_STATUSCODE_GOOD) {
             UA_Array_delete(hierarchy, hierarchySize, &UA_TYPES[UA_TYPES_NODEID]);
             return retval;
@@ -606,7 +626,8 @@ addInterfaceChildren(UA_Server *server, UA_Session *session,
 static UA_StatusCode
 copyChild(UA_Server *server, UA_Session *session,
           const UA_NodeId *destinationNodeId,
-          const UA_ReferenceDescription *rd) {
+          const UA_ReferenceDescription *rd,
+          UA_Boolean copyOptional) {
     UA_assert(session);
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
@@ -621,21 +642,19 @@ copyChild(UA_Server *server, UA_Session *session,
     if(!UA_NodeId_isNull(&existingChild)) {
         if(rd->nodeClass == UA_NODECLASS_VARIABLE ||
            rd->nodeClass == UA_NODECLASS_OBJECT)
-            retval = copyAllChildren(server, session, &rd->nodeId.nodeId, &existingChild);
+            retval = copyAllChildren(server, session, &rd->nodeId.nodeId, &existingChild, false);
         UA_NodeId_clear(&existingChild);
         return retval;
     }
 
     /* Is the child mandatory? If not, ask callback whether child should be instantiated.
      * If not, skip. */
-    if(!isMandatoryChild(server, session, &rd->nodeId.nodeId)) {
+    if(!copyOptional && !isMandatoryChild(server, session, &rd->nodeId.nodeId)) {
         if(!server->config.nodeLifecycle.createOptionalChild)
             return UA_STATUSCODE_GOOD;
-        UA_UNLOCK(&server->serviceMutex);
         UA_Boolean createChild = server->config.nodeLifecycle.
             createOptionalChild(server, &session->sessionId, session->sessionHandle,
                                 &rd->nodeId.nodeId, destinationNodeId, &rd->referenceTypeId);
-        UA_LOCK(&server->serviceMutex);
         if(!createChild)
             return UA_STATUSCODE_GOOD;
     }
@@ -684,12 +703,10 @@ copyChild(UA_Server *server, UA_Session *session,
         node->head.nodeId.namespaceIndex = destinationNodeId->namespaceIndex;
 
         if(server->config.nodeLifecycle.generateChildNodeId) {
-            UA_UNLOCK(&server->serviceMutex);
             retval = server->config.nodeLifecycle.
                 generateChildNodeId(server, &session->sessionId, session->sessionHandle,
                                     &rd->nodeId.nodeId, destinationNodeId,
                                     &rd->referenceTypeId, &node->head.nodeId);
-            UA_LOCK(&server->serviceMutex);
             if(retval != UA_STATUSCODE_GOOD) {
                 UA_NODESTORE_DELETE(server, node);
                 return retval;
@@ -745,7 +762,7 @@ copyChild(UA_Server *server, UA_Session *session,
         /* For the new child, recursively copy the members of the original. No
          * typechecking is performed here. Assuming that the original is
          * consistent. */
-        retval = copyAllChildren(server, session, &rd->nodeId.nodeId, &newNodeId);
+        retval = copyAllChildren(server, session, &rd->nodeId.nodeId, &newNodeId, copyOptional);
         if(retval != UA_STATUSCODE_GOOD) {
             deleteNode(server, newNodeId, true);
             return retval;
@@ -768,9 +785,9 @@ copyChild(UA_Server *server, UA_Session *session,
 }
 
 /* Copy any children of Node sourceNodeId to another node destinationNodeId. */
-static UA_StatusCode
+UA_StatusCode
 copyAllChildren(UA_Server *server, UA_Session *session,
-                const UA_NodeId *source, const UA_NodeId *destination) {
+                const UA_NodeId *source, const UA_NodeId *destination, UA_Boolean copyOptional) {
     /* Browse to get all children of the source */
     UA_BrowseDescription bd;
     UA_BrowseDescription_init(&bd);
@@ -792,7 +809,7 @@ copyAllChildren(UA_Server *server, UA_Session *session,
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     for(size_t i = 0; i < br.referencesSize; ++i) {
         UA_ReferenceDescription *rd = &br.references[i];
-        retval = copyChild(server, session, destination, rd);
+        retval = copyChild(server, session, destination, rd, copyOptional);
         if(retval != UA_STATUSCODE_GOOD)
             break;
     }
@@ -815,7 +832,7 @@ addTypeChildren(UA_Server *server, UA_Session *session,
 
     /* Copy members of the type and supertypes (and instantiate them) */
     for(size_t i = 0; i < hierarchySize; ++i) {
-        retval = copyAllChildren(server, session, &hierarchy[i], nodeId);
+        retval = copyAllChildren(server, session, &hierarchy[i], nodeId, false);
         if(retval != UA_STATUSCODE_GOOD)
             break;
     }
@@ -1036,14 +1053,11 @@ addNode_raw(UA_Server *server, UA_Session *session, void *nodeContext,
     /* Do not check access for server */
     if(session != &server->adminSession && server->config.accessControl.allowAddNode) {
         UA_LOCK_ASSERT(&server->serviceMutex, 1);
-        UA_UNLOCK(&server->serviceMutex);
         if(!server->config.accessControl.
            allowAddNode(server, &server->config.accessControl,
                         &session->sessionId, session->sessionHandle, item)) {
-            UA_LOCK(&server->serviceMutex);
             return UA_STATUSCODE_BADUSERACCESSDENIED;
         }
-        UA_LOCK(&server->serviceMutex);
     }
 
     /* Check the namespaceindex */
@@ -1289,11 +1303,9 @@ recursiveCallConstructors(UA_Server *server, UA_Session *session,
 
     /* Call the global constructor */
     if(server->config.nodeLifecycle.constructor) {
-        UA_UNLOCK(&server->serviceMutex);
         retval = server->config.nodeLifecycle.
             constructor(server, &session->sessionId,
                         session->sessionHandle, nodeId, &context);
-        UA_LOCK(&server->serviceMutex);
         if(retval != UA_STATUSCODE_GOOD)
             return retval;
     }
@@ -1305,11 +1317,9 @@ recursiveCallConstructors(UA_Server *server, UA_Session *session,
     else if(type && node->head.nodeClass == UA_NODECLASS_VARIABLE)
         lifecycle = &type->variableTypeNode.lifecycle;
     if(lifecycle && lifecycle->constructor) {
-        UA_UNLOCK(&server->serviceMutex);
         retval = lifecycle->constructor(server, &session->sessionId,
                                         session->sessionHandle, &type->head.nodeId,
                                         type->head.context, nodeId, &context);
-        UA_LOCK(&server->serviceMutex);
         if(retval != UA_STATUSCODE_GOOD)
             goto global_destructor;
     }
@@ -1326,19 +1336,15 @@ recursiveCallConstructors(UA_Server *server, UA_Session *session,
     /* Fail. Call the destructors. */
   local_destructor:
     if(lifecycle && lifecycle->destructor) {
-        UA_UNLOCK(&server->serviceMutex);
         lifecycle->destructor(server, &session->sessionId, session->sessionHandle,
                               &type->head.nodeId, type->head.context, nodeId, &context);
-        UA_LOCK(&server->serviceMutex);
     }
 
   global_destructor:
     if(server->config.nodeLifecycle.destructor) {
-        UA_UNLOCK(&server->serviceMutex);
         server->config.nodeLifecycle.destructor(server, &session->sessionId,
                                                 session->sessionHandle,
                                                 nodeId, context);
-        UA_LOCK(&server->serviceMutex);
     }
     return retval;
 }
@@ -1830,12 +1836,10 @@ deconstructNodeSet(UA_Server *server, UA_Session *session,
 
                /* Call the destructor */
                if(lifecycle->destructor) {
-                  UA_UNLOCK(&server->serviceMutex);
                   lifecycle->destructor(server,
                                         &session->sessionId, session->sessionHandle,
                                         &type->head.nodeId, type->head.context,
                                         &member->head.nodeId, &context);
-                  UA_LOCK(&server->serviceMutex);
                }
 
                /* Release the type node */
@@ -1845,11 +1849,9 @@ deconstructNodeSet(UA_Server *server, UA_Session *session,
 
         /* Call the global destructor */
         if(server->config.nodeLifecycle.destructor) {
-            UA_UNLOCK(&server->serviceMutex);
             server->config.nodeLifecycle.destructor(server, &session->sessionId,
                                                     session->sessionHandle,
                                                     &member->head.nodeId, context);
-            UA_LOCK(&server->serviceMutex);
         }
 
         /* Release the node. Don't access the node context from here on. */
@@ -1965,15 +1967,12 @@ deleteNodeOperation(UA_Server *server, UA_Session *session, void *context,
 
     /* Do not check access for server */
     if(session != &server->adminSession && server->config.accessControl.allowDeleteNode) {
-        UA_UNLOCK(&server->serviceMutex);
         if(!server->config.accessControl.
            allowDeleteNode(server, &server->config.accessControl,
                            &session->sessionId, session->sessionHandle, item)) {
-            UA_LOCK(&server->serviceMutex);
             *result = UA_STATUSCODE_BADUSERACCESSDENIED;
             return;
         }
-        UA_LOCK(&server->serviceMutex);
     }
 
     const UA_Node *node = UA_NODESTORE_GET(server, &item->nodeId);
@@ -2119,15 +2118,12 @@ Operation_addReference(UA_Server *server, UA_Session *session, void *context,
 
     /* Check access rights */
     if(session != &server->adminSession && server->config.accessControl.allowAddReference) {
-        UA_UNLOCK(&server->serviceMutex);
         if (!server->config.accessControl.
                 allowAddReference(server, &server->config.accessControl,
                                   &session->sessionId, session->sessionHandle, item)) {
-            UA_LOCK(&server->serviceMutex);
             *retval = UA_STATUSCODE_BADUSERACCESSDENIED;
             return;
         }
-        UA_LOCK(&server->serviceMutex);
     }
 
     /* TODO: Currently no expandednodeids are allowed */
@@ -2290,15 +2286,12 @@ Operation_deleteReference(UA_Server *server, UA_Session *session, void *context,
     if(session != &server->adminSession &&
        server->config.accessControl.allowDeleteReference) {
         UA_LOCK_ASSERT(&server->serviceMutex, 1);
-        UA_UNLOCK(&server->serviceMutex);
         if (!server->config.accessControl.
                 allowDeleteReference(server, &server->config.accessControl,
                                      &session->sessionId, session->sessionHandle, item)){
-            UA_LOCK(&server->serviceMutex);
             *retval = UA_STATUSCODE_BADUSERACCESSDENIED;
             return;
         }
-        UA_LOCK(&server->serviceMutex);
     }
 
     // TODO: Check consistency constraints, remove the references.

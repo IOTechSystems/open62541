@@ -172,6 +172,7 @@ UA_Timer_changeRepeatedCallback(UA_Timer *t, UA_UInt64 callbackId,
 
 void
 UA_Timer_removeCallback(UA_Timer *t, UA_UInt64 callbackId) {
+
     UA_LOCK(&t->timerMutex);
     UA_TimerEntry *te = ZIP_FIND(UA_TimerIdTree, &t->idTree, &callbackId);
     if(UA_LIKELY(te != NULL)) {
@@ -204,9 +205,7 @@ processEntryCallback(void *context, UA_TimerEntry *te) {
      * Instead, whenever t->processTree != NULL, the entries are only marked for
      * deletion by setting elm->callback to NULL. */
     if(te->callback) {
-        UA_UNLOCK(&t->timerMutex);
         te->callback(te->application, te->data);
-        UA_LOCK(&t->timerMutex);
     }
 
     /* Remove and free the entry if marked for deletion or a one-time timed

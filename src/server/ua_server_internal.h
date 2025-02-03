@@ -42,17 +42,25 @@ typedef struct UA_DiscoveryManager UA_DiscoveryManager;
 #ifdef UA_ENABLE_SUBSCRIPTIONS
 #include "ua_subscription.h"
 
+typedef union
+{
+    UA_Server_DataChangeNotificationCallback dataChangeCallback;
+    UA_Server_EventNotificationCallback eventCallback;
+} UA_Server_MonitoredItemNotificationCallback;
+
 typedef struct {
     UA_MonitoredItem monitoredItem;
     void *context;
-    union {
-        UA_Server_DataChangeNotificationCallback dataChangeCallback;
-        /* UA_Server_EventNotificationCallback eventCallback; */
-    } callback;
+    UA_Server_MonitoredItemNotificationCallback callback;
 } UA_LocalMonitoredItem;
 
 #endif /* !UA_ENABLE_SUBSCRIPTIONS */
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+/* Forward Declarations */
+typedef ZIP_HEAD(UA_ConditionTree, UA_Condition) UA_ConditionTree;
+typedef ZIP_HEAD(UA_ConditionBranchTree, UA_ConditionBranch) UA_ConditionBranchTree;
+#endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 /********************/
 /* Server Component */
 /********************/
@@ -166,7 +174,8 @@ struct UA_Server {
     UA_UInt32 lastLocalMonitoredItemId;
 
 # ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
-    LIST_HEAD(, UA_ConditionSource) conditionSources;
+    UA_ConditionTree conditions;
+    UA_ConditionBranchTree conditionBranches;
     UA_NodeId refreshEvents[2];
 # endif
 #endif
@@ -328,18 +337,25 @@ getAllInterfaceChildNodeIds(UA_Server *server, const UA_NodeId *objectNode, cons
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
+/*Forward Declaration */
+struct UA_ConditionBranch;
+typedef struct UA_ConditionBranch UA_ConditionBranch;
+
+UA_Boolean isCondition (UA_Server *server, const UA_NodeId *id);
+
+UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId);
+
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId);
 
+UA_StatusCode
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut);
+
 void
 UA_ConditionList_delete(UA_Server *server);
 
-UA_Boolean
-isConditionOrBranch(UA_Server *server,
-                    const UA_NodeId *condition,
-                    const UA_NodeId *conditionSource,
-                    UA_Boolean *isCallerAC);
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
@@ -380,6 +396,10 @@ UA_StatusCode
 addRef(UA_Server *server, const UA_NodeId sourceId,
        const UA_NodeId referenceTypeId, const UA_NodeId targetId,
        UA_Boolean forward);
+
+UA_StatusCode
+copyAllChildren(UA_Server *server, UA_Session *session,
+                const UA_NodeId *source, const UA_NodeId *destination, UA_Boolean copyOptional);
 
 UA_StatusCode
 deleteReference(UA_Server *server, const UA_NodeId sourceNodeId,
@@ -462,6 +482,34 @@ readObjectProperty(UA_Server *server, const UA_NodeId objectId,
                    const UA_QualifiedName propertyName,
                    UA_Variant *value);
 
+UA_StatusCode writeValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId object_id,
+    const UA_Variant value,
+    size_t path_size,
+    const UA_QualifiedName *path
+);
+
+UA_StatusCode readValueSimplifiedBrowsePath (
+    UA_Server *server,
+    const UA_NodeId object_id,
+    size_t path_size,
+    const UA_QualifiedName *path,
+    UA_Variant *value
+);
+
+UA_StatusCode
+writeTwoStateVariable (
+    UA_Server *server,
+    const UA_NodeId twoStateVariableId,
+    UA_LocalizedText value,
+    UA_Boolean idValue
+);
+
+UA_StatusCode
+getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
+                        UA_QualifiedName browseName, UA_NodeId *outNodeId);
+
 UA_BrowsePathResult
 translateBrowsePathToNodeIds(UA_Server *server, const UA_BrowsePath *browsePath);
 
@@ -486,9 +534,10 @@ triggerEvent(UA_Server *server, const UA_NodeId eventNodeId,
 /* Filters the given event with the given filter and writes the results into a
  * notification */
 UA_StatusCode
-filterEvent(UA_Server *server, UA_Session *session,
+filterEvent(UA_Server *server, UA_Boolean historicalEvent, UA_Session *session, UA_UInt32 monId,
             const UA_NodeId *eventNode, UA_EventFilter *filter,
-            UA_EventFieldList *efl, UA_EventFilterResult *result);
+            UA_EventFieldList *efl, UA_EventFilterResult *result,
+            UA_Boolean *triggerEvent);
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_EVENTS */
 
