@@ -1561,11 +1561,11 @@ UA_Server_Condition_evaluateRetainState (UA_Server *server, UA_NodeId conditionI
     UA_ConditionBranch *branch = getConditionBranch(server, &conditionId);
     if (!branch)
     {
-        UA_LOCK (&server->serviceMutex);
+        UA_UNLOCK (&server->serviceMutex);
         return UA_STATUSCODE_BADNODEIDUNKNOWN;
     }
     UA_ConditionBranch_evaluateRetainState(branch, server);
-    UA_LOCK (&server->serviceMutex);
+    UA_UNLOCK (&server->serviceMutex);
     return UA_STATUSCODE_GOOD;
 }
 
