@@ -2600,6 +2600,7 @@ static void reAlarmCallback (UA_Server *server, void *data)
     UA_LOCK(&server->serviceMutex);
     UA_Condition *condition = (UA_Condition*) data;
     condition->reAlarmCount++;
+    condition->reAlarmCallbackId = 0;
     Condition_State_setReAlarmRepeatCount (server, &condition->mainBranch->id, condition->reAlarmCount);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, REALARM_MESSAGE)
@@ -2703,7 +2704,11 @@ static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
         condition_clearShelve (server, condition);
     }
 
-    removeCallback(server, condition->reAlarmCallbackId);
+    if (condition->reAlarmCallbackId)
+    {
+        removeCallback(server, condition->reAlarmCallbackId);
+        condition->reAlarmCallbackId = 0;
+    }
 
     if (condition->reAlarmCount != 0)
     {
@@ -2783,7 +2788,6 @@ alarmEnteringInactive (UA_Server *server, UA_Condition *condition, const UA_Cond
         }
         return UA_STATUSCODE_GOOD;
     }
-
     alarmSetInactive (server, condition, info);
     return UA_STATUSCODE_GOOD;
 }
