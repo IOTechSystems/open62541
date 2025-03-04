@@ -97,6 +97,36 @@ UA_UInt16 UA_Server_addNamespace(UA_Server *server, const char* name) {
     return retVal;
 }
 
+static UA_StatusCode renameNamespace(UA_Server *server, const UA_String currentNamespaceName, const UA_String newNamespaceName)
+{
+  /* ensure that the uri for ns1 is set up from the app description */
+  setupNs1Uri(server);
+
+  /* Dont allow overwrite of ns0 or ns1 so start search from ns 2 */
+  UA_UInt16 i = 2;
+  bool found = false;
+  for(; i < server->namespacesSize; ++i) {
+    if(UA_String_equal(&currentNamespaceName, &server->namespaces[i]))
+    {
+      found = true;
+      break;
+    }
+  }
+  if (!found) return UA_STATUSCODE_BADNOTFOUND;
+
+  UA_String_clear(&server->namespaces[i]);
+  return UA_String_copy (&newNamespaceName, &server->namespaces[i]);
+}
+
+UA_StatusCode
+UA_Server_renameNamespace (UA_Server *server, const UA_String currentNamespaceUri,
+                            const UA_String newNamespaceName) {
+  UA_LOCK(&server->serviceMutex);
+  UA_StatusCode res = renameNamespace (server, currentNamespaceUri, newNamespaceName);
+  UA_UNLOCK(&server->serviceMutex);
+  return res;
+}
+
 UA_ServerConfig*
 UA_Server_getConfig(UA_Server *server) {
     UA_CHECK_MEM(server, return NULL);

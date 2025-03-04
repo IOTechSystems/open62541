@@ -1674,6 +1674,11 @@ UA_StatusCode UA_EXPORT UA_THREADSAFE
 UA_Server_getNamespaceByIndex(UA_Server *server, const size_t namespaceIndex,
                               UA_String *foundUri);
 
+/* Rename a namespace by id */
+UA_StatusCode
+UA_Server_renameNamespace (UA_Server *server, const UA_String currentNamespaceUri,
+                           const UA_String newNamespaceName);
+
 /**
 * .. _async-operations:
 *

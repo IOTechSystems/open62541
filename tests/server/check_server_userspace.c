@@ -29,6 +29,34 @@ START_TEST(Server_addNamespace_ShallWork) {
 }
 END_TEST
 
+START_TEST(Server_renameNamespace_ShallWork) {
+  UA_Server *server = UA_Server_new();
+  UA_ServerConfig_setDefault(UA_Server_getConfig(server));
+
+  UA_StatusCode status = UA_Server_renameNamespace (server, UA_STRING("http://opcfoundation.org/UA/"), UA_STRING ("http://update"));
+  ck_assert_uint_ne (status, UA_STATUSCODE_GOOD);
+
+  status = UA_Server_renameNamespace (server, UA_STRING("urn:open62541.server.application"), UA_STRING ("http://update"));
+  ck_assert_uint_ne (status, UA_STATUSCODE_GOOD);
+
+  UA_String original = UA_STRING("http://nameOfNamespace");
+  UA_String updated = UA_STRING("http://nameOfUpdatedNamespace");
+
+  UA_UInt16 a = UA_Server_addNamespace(server, "http://nameOfNamespace");
+  ck_assert_uint_gt(a, 1);
+  status = UA_Server_renameNamespace (server, original, updated);
+  ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+  size_t index = 0;
+  status = UA_Server_getNamespaceByName (server, updated, &index);
+  ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+  ck_assert_uint_eq(a, (uint16_t) index);
+
+  UA_Server_delete(server);
+}
+END_TEST
+
+
 START_TEST(Server_addNamespace_writeService) {
     UA_Server *server = UA_Server_new();
     UA_ServerConfig_setDefault(UA_Server_getConfig(server));
@@ -182,6 +210,7 @@ static Suite* testSuite_ServerUserspace(void) {
     Suite *s = suite_create("ServerUserspace");
     TCase *tc_core = tcase_create("Core");
     tcase_add_test(tc_core, Server_addNamespace_ShallWork);
+    tcase_add_test(tc_core, Server_renameNamespace_ShallWork);
     tcase_add_test(tc_core, Server_addNamespace_writeService);
     tcase_add_test(tc_core, Server_forEachChildNodeCall);
     tcase_add_test(tc_core, Server_set_customHostname);
