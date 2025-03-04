@@ -39,6 +39,9 @@ START_TEST(Server_renameNamespace_ShallWork) {
   status = UA_Server_renameNamespace (server, UA_STRING("urn:open62541.server.application"), UA_STRING ("http://update"));
   ck_assert_uint_ne (status, UA_STATUSCODE_GOOD);
 
+  status = UA_Server_renameNamespace (server, UA_STRING("unknown_namespace"), UA_STRING ("http://update"));
+  ck_assert_uint_ne (status, UA_STATUSCODE_GOOD);
+
   UA_String original = UA_STRING("http://nameOfNamespace");
   UA_String updated = UA_STRING("http://nameOfUpdatedNamespace");
 
