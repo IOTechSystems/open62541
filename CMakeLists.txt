@@ -40,7 +40,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # overwritten with more detailed information if git is available.
 set(OPEN62541_VER_MAJOR 1)
 set(OPEN62541_VER_MINOR 4)
-set(OPEN62541_VER_PATCH 8)
+set(OPEN62541_VER_PATCH 10)
 set(OPEN62541_VER_LABEL "-undefined") # like "-rc1" or "-g4538abcd" or "-g4538abcd-dirty"
 set(OPEN62541_VER_COMMIT "unknown-commit")
 
@@ -1280,6 +1280,7 @@ if(UA_ENABLE_NODESET_INJECTOR)
                       ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.h)
     set(UA_NODESETINJECTOR_GENERATORS "")
     set(UA_NODESETINJECTOR_SOURCE_FILES "")
+    set(UA_NODESETINJECTOR_HEADER_FILES "")
     set(UA_NODESETINJECTOR_EXAMPLE_NAMES "")
     set(UA_NODESETINJECTOR_TEST_NAMES "")
 endif()

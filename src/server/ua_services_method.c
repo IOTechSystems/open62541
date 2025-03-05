@@ -479,12 +479,22 @@ callWithMethodAndObject(UA_Server *server, UA_Session *session,
     /* Release the output arguments node */
     UA_NODESTORE_RELEASE(server, (const UA_Node*)outputArguments);
 
-    /* Call the method */
+    /* Call the method. If this is an async method, unlock the server lock for
+     * the duration of the (long-running) call. */
+#if UA_MULTITHREADING >= 100
+    if(method->async)
+        unlockServer(server);
+#endif
     result->statusCode = method->method(server, &session->sessionId, session->sessionHandle,
                                         &method->head.nodeId, method->head.context,
                                         &object->head.nodeId, object->head.context,
                                         request->inputArgumentsSize, mutableInputArgs,
                                         result->outputArgumentsSize, result->outputArguments);
+#if UA_MULTITHREADING >= 100
+    if(method->async)
+        lockServer(server);
+#endif
+
     /* TODO: Verify Output matches the argument definition */
 }
 
@@ -652,9 +662,9 @@ UA_CallMethodResult
 UA_Server_call(UA_Server *server, const UA_CallMethodRequest *request) {
     UA_CallMethodResult result;
     UA_CallMethodResult_init(&result);
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     Operation_CallMethod(server, &server->adminSession, NULL, request, &result);
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return result;
 }
 
