@@ -68,7 +68,7 @@ UA_PubSubKeyStorage_delete(UA_Server *server, UA_PubSubKeyStorage *keyStorage) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     /* Remove callback */
-    if(!keyStorage->callBackId) {
+    if(!keyStorage->callBackId != 0) {
         removeCallback(server, keyStorage->callBackId);
         keyStorage->callBackId = 0;
     }
@@ -210,9 +210,12 @@ UA_PubSubKeyStorage_addKeyRolloverCallback(UA_Server *server,
 
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
+    UA_EventLoop *el = server->config.eventLoop;
+    if(*callbackID != 0)
+        el->removeCyclicCallback(el, *callbackID);
+
     UA_DateTime dateTimeToNextKey = UA_DateTime_nowMonotonic() +
         (UA_DateTime)(UA_DATETIME_MSEC * timeToNextMs);
-    UA_EventLoop *el = server->config.eventLoop;
     return el->addTimedCallback(el, (UA_Callback)callback, server, keyStorage,
                                 dateTimeToNextKey, callbackID);
 }
@@ -371,7 +374,7 @@ nextGetSecuritykeysCallback(UA_Server *server, UA_PubSubKeyStorage *keyStorage) 
 void
 UA_PubSubKeyStorage_keyRolloverCallback(UA_Server *server, UA_PubSubKeyStorage *keyStorage) {
     /* Callbacks from the EventLoop are initially unlocked */
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_StatusCode retval =
         UA_PubSubKeyStorage_addKeyRolloverCallback(server, keyStorage,
                                      (UA_ServerCallback)UA_PubSubKeyStorage_keyRolloverCallback,
@@ -404,7 +407,7 @@ UA_PubSubKeyStorage_keyRolloverCallback(UA_Server *server, UA_PubSubKeyStorage *
             server->config.eventLoop, (UA_Callback)nextGetSecuritykeysCallback, server,
             keyStorage, dateTimeToNextGetSecurityKeys, NULL);
     }
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
 }
 
 UA_StatusCode
@@ -525,7 +528,7 @@ storeFetchedKeys(UA_Client *client, void *userdata, UA_UInt32 requestId,
     UA_Server *server = ctx->server;
     UA_StatusCode retval = response->responseHeader.serviceResult;
 
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     /* check if the call to getSecurityKeys was a success */
     if(response->resultsSize != 0)
         retval = response->results->statusCode;
@@ -590,12 +593,13 @@ cleanup:
                      UA_StatusCode_name(retval));
     }
     /* call user callback to notify about the status */
-    UA_UNLOCK(&server->serviceMutex);
     if(ks->sksConfig.userNotifyCallback)
         ks->sksConfig.userNotifyCallback(server, retval, ks->sksConfig.context);
     ks->sksConfig.reqId = 0;
     UA_Client_disconnectAsync(client);
     addDelayedSksClientCleanupCb(client, ctx);
+
+    unlockServer(server);
 }
 
 static UA_StatusCode
@@ -724,10 +728,10 @@ UA_Server_setSksClient(UA_Server *server, UA_String securityGroupId,
         return UA_STATUSCODE_BADINVALIDARGUMENT;
 
     UA_StatusCode retval = UA_STATUSCODE_BADNOTFOUND;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_PubSubKeyStorage *ks = UA_PubSubKeyStorage_findKeyStorage(server, securityGroupId);
     if(!ks) {
-        UA_UNLOCK(&server->serviceMutex);
+        unlockServer(server);
         return retval;
     }
 
@@ -747,7 +751,7 @@ UA_Server_setSksClient(UA_Server *server, UA_String securityGroupId,
     if(ks->keyListSize == 0) {
         retval = getSecurityKeysAndStoreFetchedKeys(server, ks);
     }
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return retval;
 }
 

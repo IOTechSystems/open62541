@@ -1112,6 +1112,12 @@ UA_StatusCode UA_EXPORT UA_THREADSAFE
 UA_Server_setNodeContext(UA_Server *server, UA_NodeId nodeId,
                          void *nodeContext);
 
+typedef void (*UA_NodeContextFreeCallback)(void *);
+
+UA_StatusCode UA_EXPORT UA_THREADSAFE
+UA_Server_setNodeContextFreeCb(UA_Server *server, UA_NodeId nodeId,
+                               UA_NodeContextFreeCallback callback);
+
 /**
  * .. _datasource:
  *
@@ -1688,6 +1694,7 @@ typedef struct UA_ConditionEventInfo {
     UA_Boolean hasSeverity;
     UA_StatusCode quality;
     UA_Boolean hasQuality;
+    UA_Boolean noEvent;
 } UA_ConditionEventInfo;
 
 typedef UA_StatusCode (*UA_ConditionEvaluateFn)(

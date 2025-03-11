@@ -25,7 +25,7 @@
 #include "../deps/mp_printf.h"
 
 #include <stdio.h>
-#ifdef _WIN32
+#ifdef UA_ARCHITECTURE_WIN32
 # include <winsock2.h>
 #else
 # include <unistd.h>
@@ -315,7 +315,7 @@ setDefaultConfig(UA_ServerConfig *conf, UA_UInt16 portNumber) {
             conf->eventLoop->registerEventSource(conf->eventLoop, (UA_EventSource *)udpCM);
 
         /* Add the Ethernet connection manager */
-#ifdef __linux__
+#if defined(UA_ARCHITECTURE_POSIX) && (defined(__linux__))
         UA_ConnectionManager *ethCM =
             UA_ConnectionManager_new_POSIX_Ethernet(UA_STRING("eth connection manager"));
         if(ethCM)

@@ -244,14 +244,14 @@ UA_Client_delete(UA_Client* client) {
 void
 UA_Client_getState(UA_Client *client, UA_SecureChannelState *channelState,
                    UA_SessionState *sessionState, UA_StatusCode *connectStatus) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     if(channelState)
         *channelState = client->channel.state;
     if(sessionState)
         *sessionState = client->sessionState;
     if(connectStatus)
         *connectStatus = client->connectStatus;
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
 }
 
 UA_ClientConfig *
@@ -307,11 +307,9 @@ notifyClientState(UA_Client *client) {
     client->oldChannelState = client->channel.state;
     client->oldSessionState = client->sessionState;
 
-    UA_UNLOCK(&client->clientMutex);
     if(client->config.stateCallback)
         client->config.stateCallback(client, client->channel.state,
                                      client->sessionState, client->connectStatus);
-    UA_LOCK(&client->clientMutex);
 }
 
 /****************/
@@ -489,10 +487,8 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
 
     /* Call the async callback. This is the only thread with access to ac. So we
      * can just unlock for the callback into userland. */
-    UA_UNLOCK(&client->clientMutex);
     if(ac->callback)
         ac->callback(client, ac->userdata, requestId, response);
-    UA_LOCK(&client->clientMutex);
 
     /* Clean up */
     UA_NodeId_clear(&responseTypeId);
@@ -500,17 +496,19 @@ processMSGResponse(UA_Client *client, UA_UInt32 requestId,
         UA_clear(response, ac->responseType);
         UA_free(ac);
     } else {
+        /* Return a special status code after processing a synchronous message.
+         * This makes the client return control immediately. */
         ac->syncResponse = NULL; /* Indicate that response was received */
+        if(retval == UA_STATUSCODE_GOOD)
+            retval = UA_STATUSCODE_GOODCOMPLETESASYNCHRONOUSLY;
     }
     return retval;
 }
 
 UA_StatusCode
-processServiceResponse(void *application, UA_SecureChannel *channel,
+processServiceResponse(UA_Client *client, UA_SecureChannel *channel,
                        UA_MessageType messageType, UA_UInt32 requestId,
                        UA_ByteString *message) {
-    UA_Client *client = (UA_Client*)application;
-
     if(!UA_SecureChannel_isConnected(channel)) {
         if(messageType == UA_MESSAGETYPE_MSG) {
             UA_LOG_DEBUG_CHANNEL(client->config.logging, channel, "Discard MSG message "
@@ -625,9 +623,7 @@ __Client_Service(UA_Client *client, const void *request,
     while(true) {
         /* Unlock before dropping into the EventLoop. The client lock is
          * re-taken in the network callback if an event occurs. */
-        UA_UNLOCK(&client->clientMutex);
         retval = el->run(el, timeout_remaining);
-        UA_LOCK(&client->clientMutex);
 
         /* Was the response received? In that case we can directly return. The
          * ac was already removed from the internal linked list. */
@@ -672,9 +668,9 @@ void
 __UA_Client_Service(UA_Client *client, const void *request,
                     const UA_DataType *requestType, void *response,
                     const UA_DataType *responseType) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     __Client_Service(client, request, requestType, response, responseType);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
 }
 
 /***********************************/
@@ -696,9 +692,7 @@ __Client_AsyncService_cancel(UA_Client *client, AsyncServiceCall *ac,
         UA_Response response;
         UA_init(&response, ac->responseType);
         response.responseHeader.serviceResult = statusCode;
-        UA_UNLOCK(&client->clientMutex);
         ac->callback(client, ac->userdata, ac->requestId, &response);
-        UA_LOCK(&client->clientMutex);
 
         /* Clean up the response. The user callback might move data into it. For
          * whatever reasons. */
@@ -729,7 +723,7 @@ __Client_AsyncService_removeAll(UA_Client *client, UA_StatusCode statusCode) {
 UA_StatusCode
 UA_Client_modifyAsyncCallback(UA_Client *client, UA_UInt32 requestId,
                               void *userdata, UA_ClientAsyncServiceCallback callback) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     AsyncServiceCall *ac;
     UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
     LIST_FOREACH(ac, &client->asyncServiceCalls, pointers) {
@@ -740,7 +734,7 @@ UA_Client_modifyAsyncCallback(UA_Client *client, UA_UInt32 requestId,
             break;
         }
     }
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
@@ -806,11 +800,11 @@ __UA_Client_AsyncService(UA_Client *client, const void *request,
                          UA_ClientAsyncServiceCallback callback,
                          const UA_DataType *responseType,
                          void *userdata, UA_UInt32 *requestId) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res =
         __Client_AsyncService(client, request, requestType, callback, responseType,
                               userdata, requestId);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
@@ -833,16 +827,16 @@ cancelByRequestHandle(UA_Client *client, UA_UInt32 requestHandle, UA_UInt32 *can
 UA_StatusCode
 UA_Client_cancelByRequestHandle(UA_Client *client, UA_UInt32 requestHandle,
                                 UA_UInt32 *cancelCount) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res = cancelByRequestHandle(client, requestHandle, cancelCount);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
 UA_StatusCode
 UA_Client_cancelByRequestId(UA_Client *client, UA_UInt32 requestId,
                             UA_UInt32 *cancelCount) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
     AsyncServiceCall *ac;
     LIST_FOREACH(ac, &client->asyncServiceCalls, pointers) {
@@ -851,7 +845,7 @@ UA_Client_cancelByRequestId(UA_Client *client, UA_UInt32 requestId,
         res = cancelByRequestHandle(client, ac->requestHandle, cancelCount);
         break;
     }
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
@@ -864,11 +858,11 @@ UA_Client_addTimedCallback(UA_Client *client, UA_ClientCallback callback,
                            void *data, UA_DateTime date, UA_UInt64 *callbackId) {
     if(!client->config.eventLoop)
         return UA_STATUSCODE_BADINTERNALERROR;
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res = client->config.eventLoop->
         addTimedCallback(client->config.eventLoop, (UA_Callback)callback,
                          client, data, date, callbackId);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
@@ -877,12 +871,12 @@ UA_Client_addRepeatedCallback(UA_Client *client, UA_ClientCallback callback,
                               void *data, UA_Double interval_ms, UA_UInt64 *callbackId) {
     if(!client->config.eventLoop)
         return UA_STATUSCODE_BADINTERNALERROR;
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res = client->config.eventLoop->
         addCyclicCallback(client->config.eventLoop, (UA_Callback)callback,
                           client, data, interval_ms, NULL,
                           UA_TIMER_HANDLE_CYCLEMISS_WITH_CURRENTTIME, callbackId);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
@@ -891,11 +885,11 @@ UA_Client_changeRepeatedCallbackInterval(UA_Client *client, UA_UInt64 callbackId
                                          UA_Double interval_ms) {
     if(!client->config.eventLoop)
         return UA_STATUSCODE_BADINTERNALERROR;
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res = client->config.eventLoop->
         modifyCyclicCallback(client->config.eventLoop, callbackId, interval_ms,
                              NULL, UA_TIMER_HANDLE_CYCLEMISS_WITH_CURRENTTIME);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
@@ -903,10 +897,10 @@ void
 UA_Client_removeCallback(UA_Client *client, UA_UInt64 callbackId) {
     if(!client->config.eventLoop)
         return;
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     client->config.eventLoop->
         removeCyclicCallback(client->config.eventLoop, callbackId);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
 }
 
 /**********************/
@@ -941,17 +935,14 @@ asyncServiceTimeoutCheck(UA_Client *client) {
 static void
 backgroundConnectivityCallback(UA_Client *client, void *userdata,
                                UA_UInt32 requestId, const UA_ReadResponse *response) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     if(response->responseHeader.serviceResult == UA_STATUSCODE_BADTIMEOUT) {
-        if(client->config.inactivityCallback) {
-            UA_UNLOCK(&client->clientMutex);
+        if(client->config.inactivityCallback)
             client->config.inactivityCallback(client);
-            UA_LOCK(&client->clientMutex);
-        }
     }
     client->pendingConnectivityCheck = false;
     client->lastConnectivityCheck = UA_DateTime_nowMonotonic();
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
 }
 
 static void
@@ -988,7 +979,7 @@ __Client_backgroundConnectivity(UA_Client *client) {
 /* Regular housekeeping activities in the client -- called via a cyclic callback */
 static void
 clientHouseKeeping(UA_Client *client, void *_) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
 
     UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_CLIENT,
                  "Internally check the the client state and "
@@ -1014,7 +1005,7 @@ clientHouseKeeping(UA_Client *client, void *_) {
     /* Log and notify user if the client state has changed */
     notifyClientState(client);
 
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
 }
 
 UA_StatusCode
@@ -1051,9 +1042,9 @@ __UA_Client_startup(UA_Client *client) {
 UA_StatusCode
 UA_Client_run_iterate(UA_Client *client, UA_UInt32 timeout) {
     /* Make sure the EventLoop has been started */
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode rv = __UA_Client_startup(client);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     UA_CHECK_STATUS(rv, return rv);
 
     /* All timers and network events are triggered in the EventLoop. Release the
@@ -1119,18 +1110,18 @@ getConnectionttribute(UA_Client *client, const UA_QualifiedName key,
 UA_StatusCode
 UA_Client_getConnectionAttribute(UA_Client *client, const UA_QualifiedName key,
                                  UA_Variant *outValue) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res = getConnectionttribute(client, key, outValue, false);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
 UA_StatusCode
 UA_Client_getConnectionAttributeCopy(UA_Client *client, const UA_QualifiedName key,
                                      UA_Variant *outValue) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
     UA_StatusCode res = getConnectionttribute(client, key, outValue, true);
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return res;
 }
 
@@ -1139,22 +1130,34 @@ UA_Client_getConnectionAttribute_scalar(UA_Client *client,
                                         const UA_QualifiedName key,
                                         const UA_DataType *type,
                                         void *outValue) {
-    UA_LOCK(&client->clientMutex);
+    lockClient(client);
 
     UA_Variant attr;
     UA_StatusCode res = getConnectionttribute(client, key, &attr, false);
     if(res != UA_STATUSCODE_GOOD) {
-        UA_UNLOCK(&client->clientMutex);
+        unlockClient(client);
         return res;
     }
 
     if(!UA_Variant_hasScalarType(&attr, type)) {
-        UA_UNLOCK(&client->clientMutex);
+        unlockClient(client);
         return UA_STATUSCODE_BADNOTFOUND;
     }
 
     memcpy(outValue, attr.data, type->memSize);
 
-    UA_UNLOCK(&client->clientMutex);
+    unlockClient(client);
     return UA_STATUSCODE_GOOD;
+}
+
+void lockClient(UA_Client *client) {
+    if(UA_LIKELY(client->config.eventLoop && client->config.eventLoop->lock))
+        client->config.eventLoop->lock(client->config.eventLoop);
+    UA_LOCK(&client->clientMutex);
+}
+
+void unlockClient(UA_Client *client) {
+    if(UA_LIKELY(client->config.eventLoop && client->config.eventLoop->unlock))
+        client->config.eventLoop->unlock(client->config.eventLoop);
+    UA_UNLOCK(&client->clientMutex);
 }

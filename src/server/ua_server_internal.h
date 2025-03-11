@@ -342,6 +342,8 @@ getAllInterfaceChildNodeIds(UA_Server *server, const UA_NodeId *objectNode, cons
 struct UA_ConditionBranch;
 typedef struct UA_ConditionBranch UA_ConditionBranch;
 
+UA_Boolean isCondition (UA_Server *server, const UA_NodeId *id);
+
 UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId);
 
 UA_StatusCode
@@ -379,6 +381,16 @@ UA_Server_processServiceOperations(UA_Server *server, UA_Session *session,
                                    size_t *responseOperations,
                                    const UA_DataType *responseOperationsType)
     UA_FUNC_ATTR_WARN_UNUSED_RESULT;
+
+/*********************/
+/* Locking/Unlocking */
+/*********************/
+
+/* In order to prevent deadlocks between the EventLoop mutex and the
+ * server-mutex, we always take the EventLoop mutex first. */
+
+void lockServer(UA_Server *server);
+void unlockServer(UA_Server *server);
 
 /******************************************/
 /* Internal function calls, without locks */
@@ -582,6 +594,9 @@ addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
 UA_ServerComponent *
 UA_DiscoveryManager_new(UA_Server *server);
 #endif
+
+UA_String
+securityPolicyUriPostfix(const UA_String uri);
 
 UA_ServerComponent *
 UA_BinaryProtocolManager_new(UA_Server *server);

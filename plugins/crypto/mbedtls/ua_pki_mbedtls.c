@@ -8,7 +8,6 @@
 
 #include <open62541/util.h>
 #include <open62541/plugin/pki_default.h>
-#include <open62541/plugin/log_stdout.h>
 
 #ifdef UA_ENABLE_ENCRYPTION_MBEDTLS
 
@@ -21,6 +20,9 @@
 #include <mbedtls/error.h>
 #include <mbedtls/version.h>
 #include <string.h>
+
+#define UA_MBEDTLS_MAX_CHAIN_LENGTH 10
+#define UA_MBEDTLS_MAX_DN_LENGTH 256
 
 /* Find binary substring. Taken and adjusted from
  * http://tungchingkai.blogspot.com/2011/07/binary-strstr.html */
@@ -83,6 +85,8 @@ static UA_ByteString copyDataFormatAware(const UA_ByteString *data)
 }
 
 typedef struct {
+    UA_CertificateVerification *cv;
+
     /* If the folders are defined, we use them to reload the certificates during
      * runtime */
     UA_String trustListFolder;
@@ -229,16 +233,10 @@ reloadCertificates(const UA_CertificateVerification *cv, CertInfo *ci) {
         }
     }
 
-    if(internalErrorFlag) {
-        retval = UA_STATUSCODE_BADINTERNALERROR;
-    }
-    return retval;
+    return (internalErrorFlag) ? UA_STATUSCODE_BADINTERNALERROR : retval;
 }
 
 #endif
-
-#define UA_MBEDTLS_MAX_CHAIN_LENGTH 10
-#define UA_MBEDTLS_MAX_DN_LENGTH 256
 
 /* We need to access some private fields below */
 #ifndef MBEDTLS_PRIVATE
@@ -272,6 +270,13 @@ mbedtlsSameName(UA_String name, const mbedtls_x509_name *name2) {
     return UA_String_equal(&name, &nameString);
 }
 
+static UA_Boolean
+mbedtlsSameBuf(mbedtls_x509_buf *a, mbedtls_x509_buf *b) {
+    if(a->len != b->len)
+        return false;
+    return (memcmp(a->p, b->p, a->len) == 0);
+}
+
 /* Return the first matching issuer candidate AFTER prev.
  * This can return the cert itself if self-signed. */
 static mbedtls_x509_crt *
@@ -295,27 +300,47 @@ mbedtlsFindNextIssuer(CertInfo *ci, mbedtls_x509_crt *stack,
                mbedtls_pk_can_do(&i->pk, cert->MBEDTLS_PRIVATE(sig_pk)))
                 return i;
         }
-        /* Switch from the stack that came with the cert to the ctx->skIssue list */
-        stack = (stack != &ci->certificateIssuerList) ? &ci->certificateIssuerList : NULL;
+
+        /* Switch from the stack that came with the cert to the issuer list and
+         * then to the trust list. */
+        if(stack == &ci->certificateTrustList)
+            stack = NULL;
+        else if(stack == &ci->certificateIssuerList)
+            stack = &ci->certificateTrustList;
+        else
+            stack = &ci->certificateIssuerList;
     } while(stack);
     return NULL;
 }
 
-static UA_Boolean
+static UA_StatusCode
 mbedtlsCheckRevoked(CertInfo *ci, mbedtls_x509_crt *cert) {
+    /* Parse the Issuer Name */
     char inbuf[UA_MBEDTLS_MAX_DN_LENGTH];
     int nameLen = mbedtls_x509_dn_gets(inbuf, UA_MBEDTLS_MAX_DN_LENGTH, &cert->issuer);
     if(nameLen < 0)
-        return true;
+        return UA_STATUSCODE_BADINTERNALERROR;
     UA_String issuerName = {(size_t)nameLen, (UA_Byte*)inbuf};
+
+    if(ci->certificateRevocationList.raw.len == 0) {
+        UA_LOG_WARNING(ci->cv->logging, UA_LOGCATEGORY_SECURITYPOLICY,
+                       "Zero revocation lists have been loaded. "
+                       "This seems intentional - omitting the check.");
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* Loop over the crl and match the Issuer Name */
+    UA_StatusCode res = UA_STATUSCODE_BADCERTIFICATEREVOCATIONUNKNOWN;
     for(mbedtls_x509_crl *crl = &ci->certificateRevocationList; crl; crl = crl->next) {
         /* Is the CRL for certificates from the cert issuer?
          * Is the serial number of the certificate contained in the CRL? */
-        if(mbedtlsSameName(issuerName, &crl->issuer) &&
-           mbedtls_x509_crt_is_revoked(cert, crl) != 0)
-            return true;
+        if(mbedtlsSameName(issuerName, &crl->issuer)) {
+            if(mbedtls_x509_crt_is_revoked(cert, crl) != 0)
+                return UA_STATUSCODE_BADCERTIFICATEREVOKED;
+            res = UA_STATUSCODE_GOOD; /* There was at least one crl that did not revoke (so far) */
+        }
     }
-    return false;
+    return res;
 }
 
 /* Verify that the public key of the issuer was used to sign the certificate */
@@ -354,11 +379,6 @@ mbedtlsVerifyChain(CertInfo *ci, mbedtls_x509_crt *stack, mbedtls_x509_crt **old
         return (depth == 0) ? UA_STATUSCODE_BADCERTIFICATETIMEINVALID :
             UA_STATUSCODE_BADCERTIFICATEISSUERTIMEINVALID;
 
-    /* Verification Step: Revocation Check */
-    if(mbedtlsCheckRevoked(ci, cert))
-        return (depth == 0) ? UA_STATUSCODE_BADCERTIFICATEREVOKED :
-            UA_STATUSCODE_BADCERTIFICATEISSUERREVOKED;
-
     /* Return the most specific error code. BADCERTIFICATECHAININCOMPLETE is
      * returned only if all possible chains are incomplete. */
     mbedtls_x509_crt *issuer = NULL;
@@ -388,16 +408,28 @@ mbedtlsVerifyChain(CertInfo *ci, mbedtls_x509_crt *stack, mbedtls_x509_crt **old
          * chain. We check whether the certificate is trusted below. This is the
          * only place where we return UA_STATUSCODE_BADCERTIFICATEUNTRUSTED.
          * This signals that the chain is complete (but can be still
-         * untrusted). */
-        if(issuer == cert || (cert->tbs.len == issuer->tbs.len &&
-                              memcmp(cert->tbs.p, issuer->tbs.p, cert->tbs.len) == 0)) {
+         * untrusted).
+         *
+         * Break here as we have reached the end of the chain. Omit the
+         * Revocation Check for self-signed certificates. */
+        if(issuer == cert || mbedtlsSameBuf(&cert->tbs, &issuer->tbs)) {
             ret = UA_STATUSCODE_BADCERTIFICATEUNTRUSTED;
-            continue;
+            break;
         }
 
-        /* Detect (endless) loops of issuers. The last one can be skipped by the
-         * check for self-signed just before. */
-        for(int i = 0; i < depth - 1; i++) {
+        /* Verification Step: Revocation Check */
+        ret = mbedtlsCheckRevoked(ci, cert);
+        if(depth > 0) {
+            if(ret == UA_STATUSCODE_BADCERTIFICATEREVOKED)
+                ret = UA_STATUSCODE_BADCERTIFICATEISSUERREVOKED;
+            if(ret == UA_STATUSCODE_BADCERTIFICATEREVOCATIONUNKNOWN)
+                ret = UA_STATUSCODE_BADCERTIFICATEISSUERREVOCATIONUNKNOWN;
+        }
+        if(ret != UA_STATUSCODE_GOOD)
+            continue;
+
+        /* Detect (endless) loops of issuers */
+        for(int i = 0; i < depth; i++) {
             if(old_issuers[i] == issuer)
                 return UA_STATUSCODE_BADCERTIFICATECHAININCOMPLETE;
         }
@@ -412,8 +444,7 @@ mbedtlsVerifyChain(CertInfo *ci, mbedtls_x509_crt *stack, mbedtls_x509_crt **old
      * certificate "on the way down". Can we trust this certificate? */
     if(ret == UA_STATUSCODE_BADCERTIFICATEUNTRUSTED) {
         for(mbedtls_x509_crt *t = &ci->certificateTrustList; t; t = t->next) {
-            if(cert->tbs.len == t->tbs.len &&
-               memcmp(cert->tbs.p, t->tbs.p, cert->tbs.len) == 0)
+            if(mbedtlsSameBuf(&cert->tbs, &t->tbs))
                 return UA_STATUSCODE_GOOD;
         }
     }
@@ -429,8 +460,9 @@ certificateVerification_verify(const UA_CertificateVerification *cv,
     if(!cv || !certificate)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    UA_StatusCode ret = UA_STATUSCODE_GOOD;
     CertInfo *ci = (CertInfo*)cv->context;
+    UA_StatusCode ret = UA_STATUSCODE_GOOD;
+    mbedtls_x509_crt *old_issuers[UA_MBEDTLS_MAX_CHAIN_LENGTH];
 
 #ifdef __linux__ /* Reload certificates if folder paths are specified */
     ret = reloadCertificates(cv, ci);
@@ -444,16 +476,18 @@ certificateVerification_verify(const UA_CertificateVerification *cv,
     mbedtls_x509_crt_init(&cert);
     int mbedErr = mbedtls_x509_crt_parse(&cert, certificate->data,
                                          certificate->length);
-    if(mbedErr)
-        return UA_STATUSCODE_BADCERTIFICATEINVALID;
+    if(mbedErr) {
+        ret = UA_STATUSCODE_BADCERTIFICATEINVALID;
+        goto errout;
+    }
 
     /* Verification Step: Certificate Usage
      * Check whether the certificate is a User certificate or a CA certificate.
      * Refer the test case CTT/Security/Security Certificate Validation/029.js
      * for more details. */
     if(mbedtlsCheckCA(&cert)) {
-        mbedtls_x509_crt_free(&cert);
-        return UA_STATUSCODE_BADCERTIFICATEUSENOTALLOWED;
+        ret = UA_STATUSCODE_BADCERTIFICATEUSENOTALLOWED;
+        goto errout;
     }
 
     /* These steps are performed outside of this method.
@@ -464,9 +498,45 @@ certificateVerification_verify(const UA_CertificateVerification *cv,
 
     /* Verification Step: Build Certificate Chain
      * We perform the checks for each certificate inside. */
-    mbedtls_x509_crt *old_issuers[UA_MBEDTLS_MAX_CHAIN_LENGTH];
     ret = mbedtlsVerifyChain(ci, &cert, old_issuers, &cert, 0);
+
+ errout:
     mbedtls_x509_crt_free(&cert);
+
+#ifdef UA_ENABLE_CERT_REJECTED_DIR
+    if(ret != UA_STATUSCODE_GOOD &&
+       ci->rejectedListFolder.length > 0) {
+            char rejectedFileName[256] = {0};
+            UA_ByteString thumbprint;
+            UA_ByteString_allocBuffer(&thumbprint, UA_SHA1_LENGTH);
+            if(mbedtls_thumbprint_sha1(certificate, &thumbprint) == UA_STATUSCODE_GOOD) {
+                static const char hex2char[] = "0123456789ABCDEF";
+                for(size_t pos = 0, namePos = 0; pos < thumbprint.length; pos++) {
+                    rejectedFileName[namePos++] = hex2char[(thumbprint.data[pos] & 0xf0) >> 4];
+                    rejectedFileName[namePos++] = hex2char[thumbprint.data[pos] & 0x0f];
+                }
+                strcat(rejectedFileName, ".der");
+            } else {
+                UA_UInt64 dt = (UA_UInt64) UA_DateTime_now();
+                sprintf(rejectedFileName, "cert_%" PRIu64 ".der", dt);
+            }
+            UA_ByteString_clear(&thumbprint);
+            char *rejectedFullFileName = (char *)
+                calloc(ci->rejectedListFolder.length + 1 /* '/' */ + strlen(rejectedFileName) + 1, sizeof(char));
+            if(!rejectedFullFileName)
+                return ret;
+            memcpy(rejectedFullFileName, ci->rejectedListFolder.data, ci->rejectedListFolder.length);
+            rejectedFullFileName[ci->rejectedListFolder.length] = '/';
+            memcpy(&rejectedFullFileName[ci->rejectedListFolder.length + 1], rejectedFileName, strlen(rejectedFileName));
+            FILE * fp_rejectedFile = fopen(rejectedFullFileName, "wb");
+            if(fp_rejectedFile) {
+                fwrite(certificate->data, sizeof(certificate->data[0]), certificate->length, fp_rejectedFile);
+                fclose(fp_rejectedFile);
+            }
+            free(rejectedFullFileName);
+    }
+#endif
+
     return ret;
 }
 
@@ -514,9 +584,7 @@ certificateVerification_clear(UA_CertificateVerification *cv) {
     UA_String_clear(&ci->trustListFolder);
     UA_String_clear(&ci->issuerListFolder);
     UA_String_clear(&ci->revocationListFolder);
-#ifdef UA_ENABLE_CERT_REJECTED_DIR
     UA_String_clear(&ci->rejectedListFolder);
-#endif
     UA_free(ci);
     cv->context = NULL;
 }
@@ -582,6 +650,7 @@ UA_CertificateVerification_Trustlist(UA_CertificateVerification *cv,
     if(!ci)
         return UA_STATUSCODE_BADOUTOFMEMORY;
     memset(ci, 0, sizeof(CertInfo));
+    ci->cv = cv;
     mbedtls_x509_crt_init(&ci->certificateTrustList);
     mbedtls_x509_crl_init(&ci->certificateRevocationList);
     mbedtls_x509_crt_init(&ci->certificateIssuerList);
@@ -663,6 +732,7 @@ UA_CertificateVerification_CertFolders(UA_CertificateVerification *cv,
     if(!ci)
         return UA_STATUSCODE_BADOUTOFMEMORY;
     memset(ci, 0, sizeof(CertInfo));
+    ci->cv = cv;
     mbedtls_x509_crt_init(&ci->certificateTrustList);
     mbedtls_x509_crl_init(&ci->certificateRevocationList);
     mbedtls_x509_crt_init(&ci->certificateIssuerList);

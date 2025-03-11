@@ -42,12 +42,12 @@ UA_Server_getDataSetWriterConfig(UA_Server *server, const UA_NodeId dsw,
                                  UA_DataSetWriterConfig *config) {
     if(!config)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_DataSetWriter *currentDataSetWriter = UA_DataSetWriter_findDSWbyId(server, dsw);
     UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
     if(currentDataSetWriter)
         res = UA_DataSetWriterConfig_copy(&currentDataSetWriter->config, config);
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
@@ -56,7 +56,7 @@ UA_Server_DataSetWriter_getState(UA_Server *server, UA_NodeId dataSetWriterIdent
                                UA_PubSubState *state) {
     if((server == NULL) || (state == NULL))
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_DataSetWriter *currentDataSetWriter =
         UA_DataSetWriter_findDSWbyId(server, dataSetWriterIdentifier);
     UA_StatusCode res = UA_STATUSCODE_GOOD;
@@ -65,7 +65,7 @@ UA_Server_DataSetWriter_getState(UA_Server *server, UA_NodeId dataSetWriterIdent
     } else {
         res = UA_STATUSCODE_BADNOTFOUND;
     }
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
@@ -294,8 +294,16 @@ UA_DataSetWriter_create(UA_Server *server,
 
     newDataSetWriter->linkedWriterGroup = wg->identifier;
 
-    /* Add the new writer to the group */
-    LIST_INSERT_HEAD(&wg->writers, newDataSetWriter, listEntry);
+    /* Add the new writer to the group. Add to the end of the linked list to
+     * ensure the order in the generated NetworkMessage is as expected. */
+    UA_DataSetWriter *after = LIST_FIRST(&wg->writers);
+    if(!after) {
+        LIST_INSERT_HEAD(&wg->writers, newDataSetWriter, listEntry);
+    } else {
+        while(LIST_NEXT(after, listEntry))
+            after = LIST_NEXT(after, listEntry);
+        LIST_INSERT_AFTER(after, newDataSetWriter, listEntry);
+    }
     wg->writersCount++;
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
@@ -314,12 +322,12 @@ UA_Server_addDataSetWriter(UA_Server *server,
                            const UA_NodeId writerGroup, const UA_NodeId dataSet,
                            const UA_DataSetWriterConfig *dataSetWriterConfig,
                            UA_NodeId *writerIdentifier) {
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     /* Delete the reserved IDs if the related session no longer exists. */
     UA_PubSubManager_freeIds(server);
     UA_StatusCode res = UA_DataSetWriter_create(server, writerGroup, dataSet,
                                                 dataSetWriterConfig, writerIdentifier);
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
@@ -500,14 +508,14 @@ UA_DataSetWriter_remove(UA_Server *server, UA_DataSetWriter *dataSetWriter) {
 
 UA_StatusCode
 UA_Server_removeDataSetWriter(UA_Server *server, const UA_NodeId dsw) {
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_DataSetWriter *dataSetWriter = UA_DataSetWriter_findDSWbyId(server, dsw);
     if(!dataSetWriter) {
-        UA_UNLOCK(&server->serviceMutex);
+        unlockServer(server);
         return UA_STATUSCODE_BADNOTFOUND;
     }
     UA_StatusCode res = UA_DataSetWriter_remove(server, dataSetWriter);
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
