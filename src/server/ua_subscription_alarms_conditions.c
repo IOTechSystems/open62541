@@ -720,7 +720,7 @@ getShelvedStateMachineStateId (UA_Server *server, const UA_NodeId *shelvedStateI
     }
 
     *shelvedId = *(UA_NodeId *) val.data;
-    val.data = NULL;
+    *(UA_NodeId *) val.data = UA_NODEID_NULL;
 done:
     UA_Variant_clear(&val);
     return status;
