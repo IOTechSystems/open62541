@@ -177,7 +177,6 @@ struct UA_Server {
     UA_ConditionTree conditions;
     UA_ConditionBranchTree conditionBranches;
     UA_NodeId refreshEvents[2];
-    UA_NodeId firstInGroupId;
 # endif
 #endif
 

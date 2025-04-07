@@ -377,8 +377,6 @@ static const UA_QualifiedName fieldSuppressedOrShelvedQN = STATIC_QN(CONDITION_F
 static const UA_QualifiedName fieldOutOfServiceStateQN = STATIC_QN(CONDITION_FIELD_OUTOFSERVICESTATE);
 static const UA_QualifiedName fieldShelvingStateQN = STATIC_QN(CONDITION_FIELD_SHELVINGSTATE);
 static const UA_QualifiedName fieldMaxTimeShelvedQN = STATIC_QN(CONDITION_FIELD_MAXTIMESHELVED);
-static const UA_QualifiedName fieldFirstInGroupQN = STATIC_QN(CONDITION_FIELD_FIRSTINGROUP);
-static const UA_QualifiedName fieldFirstInGroupFlagQN = STATIC_QN(CONDITION_FIELD_FIRSTINGROUPFLAG);
 static const UA_QualifiedName fieldOnDelayQN = STATIC_QN(CONDITION_FIELD_ONDELAY);
 static const UA_QualifiedName fieldOffDelayQN = STATIC_QN(CONDITION_FIELD_OFFDELAY);
 static const UA_QualifiedName fieldReAlarmTimeQN = STATIC_QN(CONDITION_FIELD_REALARMTIME);
@@ -3991,67 +3989,6 @@ UA_Server_setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condi
     return retval;
 }
 
-static UA_StatusCode server_addAlarmToFirstInGroup (UA_Server *server, const UA_NodeId *alarmId)
-{
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_StatusCode status = UA_STATUSCODE_GOOD;
-    if (UA_NodeId_isNull(&server->firstInGroupId))
-    {
-        UA_ObjectAttributes attr = UA_ObjectAttributes_default;
-        attr.displayName = UA_LOCALIZEDTEXT(LOCALE, CONDITION_FIELD_FIRSTINGROUP);
-        status = UA_Server_addObjectNode (
-            server,
-            UA_NODEID_NULL,
-            UA_NODEID_NULL,
-            UA_NODEID_NULL,
-            fieldFirstInGroupQN,
-            UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMGROUPTYPE),
-            attr,
-            NULL,
-            &server->firstInGroupId
-                                         );
-        if (status != UA_STATUSCODE_GOOD) return status;
-    }
-
-    status = addRef (server, server->firstInGroupId, UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMGROUPMEMBER), *alarmId, true);
-    if (status != UA_STATUSCODE_GOOD) return status;
-    return addRef (server, *alarmId, UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT), server->firstInGroupId, true);
-}
-
-static UA_StatusCode server_removeAlarmFromFirstInGroup (UA_Server *server, const UA_NodeId *alarmId)
-{
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    if (UA_NodeId_isNull(&server->firstInGroupId)) return UA_STATUSCODE_GOOD;
-
-    UA_StatusCode status = deleteReference(server, *alarmId, UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT), true,
-                                           UA_EXPANDEDNODEID_NODEID(server->firstInGroupId), true);
-    if (status != UA_STATUSCODE_GOOD) return status;
-    status = deleteReference(server, server->firstInGroupId, UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMGROUPMEMBER), true,
-                             UA_EXPANDEDNODEID_NODEID(*alarmId), true);
-    if (status != UA_STATUSCODE_GOOD) return status;
-
-    /* If the group has no alarms left then delete the group */
-    UA_BrowseDescription bd = {
-        .nodeId = server->firstInGroupId,
-        .nodeClassMask = UA_NODECLASS_OBJECT,
-        .includeSubtypes = true,
-        .referenceTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMGROUPMEMBER),
-        .resultMask = UA_BROWSERESULTMASK_NONE
-    };
-    UA_UInt32 maxRef = 1;
-    UA_BrowseResult browseResult;
-    UA_BrowseResult_init(&browseResult);
-    Operation_Browse(server, &server->adminSession, &maxRef, &bd, &browseResult);
-    if (browseResult.statusCode != UA_STATUSCODE_GOOD) return browseResult.statusCode;
-    if (browseResult.referencesSize == 0)
-    {
-        status = deleteNode (server, server->firstInGroupId, true);
-        UA_NodeId_clear(&server->firstInGroupId);
-    }
-    UA_BrowseResult_clear(&browseResult);
-    return status;
-}
-
 static UA_BrowseResult getAlarmGroupNodes (UA_Server *server, const UA_NodeId *groupId)
 {
     UA_BrowseDescription bd = {
@@ -4112,7 +4049,6 @@ static UA_StatusCode isGroupActive (UA_Server *server, const UA_NodeId*groupId, 
     return status;
 }
 
-
 static inline UA_BrowseResult getAlarmGroups (UA_Server *server, const UA_NodeId *alarmId)
 {
     UA_BrowseDescription browseDescription = {
@@ -4147,48 +4083,10 @@ static inline UA_BrowseResult getAlarmSuppressionGroups (UA_Server *server, cons
     return browseResult;
 }
 
-static UA_StatusCode isAlarmFirstInGroup (UA_Server *server, const UA_NodeId *alarmId, UA_Boolean *isFirst)
-{
-    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, *alarmId, 1, &fieldFirstInGroupQN);
-    if (bpr.statusCode == UA_STATUSCODE_BADNOMATCH)
-    {
-        *isFirst = false;
-        return UA_STATUSCODE_GOOD;
-    }
-    if (bpr.statusCode != UA_STATUSCODE_GOOD) return bpr.statusCode;
-    UA_BrowsePathResult_clear(&bpr);
-    *isFirst = true;
-    return UA_STATUSCODE_GOOD;
-}
-
 static UA_StatusCode alarmActiveHandleAlarmGroups (UA_Server *server, const UA_NodeId *alarmId)
 {
-    UA_BrowseResult groupsResult = getAlarmGroups(server, alarmId);
-    if (groupsResult.statusCode != UA_STATUSCODE_GOOD) return groupsResult.statusCode;
     UA_StatusCode status = UA_STATUSCODE_GOOD;
-    for (size_t i=0; i<groupsResult.referencesSize;i++)
-    {
-        bool active = false;
-        status = isGroupActive(server, &groupsResult.references[i].nodeId.nodeId, &active);
-        if (status != UA_STATUSCODE_GOOD) goto done;
-        if (active) continue;
-
-        //add FirstInGroup and FirstInGroupFlag nodes
-        status = server_addAlarmToFirstInGroup(server, alarmId);
-        if (status != UA_STATUSCODE_GOOD) goto done;
-
-        UA_NodeId alarmTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE);
-        status = addOptionalField (server, *alarmId, alarmTypeId, fieldFirstInGroupFlagQN, NULL);
-        if (status != UA_STATUSCODE_GOOD) goto done;
-        UA_Variant value;
-        UA_Boolean trueValue = true;
-        UA_Variant_setScalar(&value, (void *)(uintptr_t) &trueValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-        status = setConditionField(server, *alarmId, &value, fieldFirstInGroupFlagQN);
-        if (status != UA_STATUSCODE_GOOD) goto done;
-        break;
-    }
-
-    groupsResult = getAlarmSuppressionGroups (server, alarmId);
+    UA_BrowseResult groupsResult = getAlarmSuppressionGroups (server, alarmId);
     if (groupsResult.statusCode != UA_STATUSCODE_GOOD) return groupsResult.statusCode;
     UA_Boolean suppress = false;
     for (size_t i=0; i<groupsResult.referencesSize;i++)
@@ -4208,21 +4106,8 @@ done:
 
 static UA_StatusCode alarmDeactiveHandleAlarmGroups (UA_Server *server, const UA_NodeId *alarmId)
 {
-    UA_Boolean isFirst = false;
-    UA_StatusCode status = isAlarmFirstInGroup(server, alarmId, &isFirst);
-    if (status != UA_STATUSCODE_GOOD) return status;
-
-    if (isFirst)
-    {
-        server_removeAlarmFromFirstInGroup(server, alarmId);
-        UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, *alarmId, 1, &fieldFirstInGroupFlagQN);
-        if (bpr.statusCode != UA_STATUSCODE_GOOD) return status;
-        status = deleteNode(server, bpr.targets[0].targetId.nodeId, true);
-        UA_BrowsePathResult_clear (&bpr);
-        if (status != UA_STATUSCODE_GOOD) return status;
-    }
-
     UA_BrowseResult groupsResult = getAlarmSuppressionGroups (server, alarmId);
+    UA_StatusCode status = UA_STATUSCODE_GOOD;
     if (groupsResult.statusCode != UA_STATUSCODE_GOOD) return groupsResult.statusCode;
     for (size_t i=0; i<groupsResult.referencesSize;i++)
     {
@@ -4257,7 +4142,6 @@ static UA_StatusCode alarmDeactiveHandleAlarmGroups (UA_Server *server, const UA
 done:
     UA_BrowseResult_clear(&groupsResult);
     return status;
-
 }
 
 void initNs0ConditionAndAlarms (UA_Server *server)
@@ -4361,18 +4245,12 @@ void initNs0ConditionAndAlarms (UA_Server *server)
         writeIsAbstractAttribute(server, refreshStartEventTypeNodeId, false);
         writeIsAbstractAttribute(server, refreshEndEventTypeNodeId, false);
     }
-
-    UA_NodeId_init (&server->firstInGroupId);
 }
 
 void clearAlarmsAndConditions (UA_Server *server)
 {
-
-    /* Free memory allocated for RefreshEvents NodeIds */
     UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_START_IDX]);
     UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_END_IDX]);
-    UA_NodeId_clear(&server->firstInGroupId);
-
     UA_ConditionList_delete(server);
 }
 
