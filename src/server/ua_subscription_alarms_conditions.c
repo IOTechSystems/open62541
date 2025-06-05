@@ -2183,11 +2183,6 @@ static UA_StatusCode
 addCondition_begin(UA_Server *server, const UA_NodeId conditionId,
                    const UA_NodeId conditionType,
                    const UA_CreateConditionProperties *properties, UA_NodeId *outNodeId) {
-    if(!outNodeId) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "outNodeId cannot be NULL!");
-        return UA_STATUSCODE_BADINVALIDARGUMENT;
-    }
 
     /* Make sure the conditionType is a Subtype of ConditionType */
     UA_NodeId conditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
@@ -2239,11 +2234,6 @@ __UA_Server_createCondition(UA_Server *server,
                             UA_ConditionTypeSetupFn setupFn,
                             const void *setupData,
                             UA_NodeId *outNodeId) {
-    if(!outNodeId) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_USERLAND,
-                     "outNodeId cannot be NULL!");
-        return UA_STATUSCODE_BADINVALIDARGUMENT;
-    }
 
     lockServer(server);
     UA_StatusCode retval = addCondition_begin(server, conditionId, conditionType,
