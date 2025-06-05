@@ -2236,16 +2236,19 @@ __UA_Server_createCondition(UA_Server *server,
                             UA_NodeId *outNodeId) {
 
     lockServer(server);
+    UA_NodeId tmpOutId;
+    UA_NodeId_init (&tmpOutId);
     UA_StatusCode retval = addCondition_begin(server, conditionId, conditionType,
-                                              conditionProperties, outNodeId);
+                                              conditionProperties, &tmpOutId);
     if(retval != UA_STATUSCODE_GOOD)
     {
         unlockServer(server);
         return retval;
     }
 
-    retval = addCondition_finish (server, outNodeId, &conditionType, conditionProperties, setupFn, setupData);
+    retval = addCondition_finish (server, &tmpOutId, &conditionType, conditionProperties, setupFn, setupData);
     unlockServer(server);
+    outNodeId ? *outNodeId = tmpOutId : UA_NodeId_clear (&tmpOutId);
     return retval;
 }
 
