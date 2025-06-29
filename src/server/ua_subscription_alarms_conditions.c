@@ -232,6 +232,8 @@ ZIP_FUNCTIONS(UA_ConditionBranchTree, UA_ConditionBranch, zipEntry, UA_Condition
 #define CONDITION_FIELD_SEVERITY                               "Severity"
 #define CONDITION_FIELD_SUPPORTSFILTEREDRETAIN                 "SupportsFilteredRetain"
 #define CONDITION_FIELD_CONDITIONNAME                          "ConditionName"
+#define CONDITION_FIELD_FIRSTINGROUP                           "FirstInGroup"
+#define CONDITION_FIELD_FIRSTINGROUPFLAG                       "FirstInGroupFlag"
 #define CONDITION_FIELD_BRANCHID                               "BranchId"
 #define CONDITION_FIELD_RETAIN                                 "Retain"
 #define CONDITION_FIELD_ENABLEDSTATE                           "EnabledState"
@@ -1135,12 +1137,18 @@ UA_Condition_State_setLatchedState (UA_Condition *condition, UA_Server *server, 
 }
 
 static inline UA_StatusCode
-UA_Condition_State_setSuppressedState (UA_Condition *condition, UA_Server *server, UA_Boolean suppressed)
+setSuppressedState (UA_Server *server, const UA_NodeId *conditionId, UA_Boolean suppressed)
 {
     return setOptionalTwoStateVariable (
-        server, &condition->mainBranch->id, fieldSuppressedStateQN, suppressed,
+        server, conditionId, fieldSuppressedStateQN, suppressed,
         UA_LOCALIZEDTEXT (LOCALE, suppressed ? SUPPRESSED_TEXT : NOT_SUPPRESSED_TEXT)
     );
+}
+
+static inline UA_StatusCode
+UA_Condition_State_setSuppressedState (UA_Condition *condition, UA_Server *server, UA_Boolean suppressed)
+{
+    return setSuppressedState(server, &condition->mainBranch->id, suppressed);
 }
 
 static inline UA_StatusCode
@@ -1931,6 +1939,49 @@ UA_Server_Condition_timedShelve (UA_Server *server, UA_NodeId conditionId, UA_Du
     return ret;
 }
 
+static UA_BrowseResult getAlarmGroups (UA_Server *server, const UA_NodeId *alarmId);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_getGroupMemberships (UA_Server *server, UA_NodeId conditionId, size_t *groupsOutSize, UA_NodeId **groupsOut)
+{
+    UA_StatusCode status = UA_STATUSCODE_GOOD;
+    UA_LOCK (&server->serviceMutex);
+    UA_BrowseResult groupNodes;
+    UA_BrowseResult_init(&groupNodes);
+    groupNodes = getAlarmGroups(server, &conditionId);
+    if (groupNodes.statusCode != UA_STATUSCODE_GOOD)
+    {
+        status = groupNodes.statusCode;
+        goto done;
+    }
+
+    if (groupNodes.referencesSize == 0)
+    {
+        *groupsOutSize = 0;
+        *groupsOut = NULL;
+        goto done;
+    }
+
+    UA_NodeId *groups = (UA_NodeId *) UA_Array_new(groupNodes.referencesSize, &UA_TYPES[UA_TYPES_NODEID]);
+    if (!groups)
+    {
+        status = UA_STATUSCODE_BADOUTOFMEMORY;
+        goto done;
+    }
+
+    for (size_t i=0; i<groupNodes.referencesSize;i++)
+    {
+        groups[i] = groupNodes.references->nodeId.nodeId;
+        UA_NodeId_clear(&groupNodes.references->nodeId.nodeId);
+    }
+    *groupsOut = groups;
+    *groupsOutSize = groupNodes.referencesSize;
+done:
+    UA_BrowseResult_clear(&groupNodes);
+    UA_UNLOCK(&server->serviceMutex);
+    return status;
+}
+
 static UA_StatusCode removeCondition (UA_Server *server, UA_Condition *condition);
 
 static void *deleteConditionsWrapper (void *ctx, UA_Condition *condition)
@@ -1940,14 +1991,10 @@ static void *deleteConditionsWrapper (void *ctx, UA_Condition *condition)
     return NULL;
 }
 
-void
+static void
 UA_ConditionList_delete(UA_Server *server) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
     ZIP_ITER (UA_ConditionTree, &server->conditions, deleteConditionsWrapper, server);
-    /* Free memory allocated for RefreshEvents NodeIds */
-    UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_START_IDX]);
-    UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_END_IDX]);
 }
 
 static inline UA_Condition *getCondition (UA_Server *server, const UA_NodeId *conditionId)
@@ -2578,12 +2625,15 @@ static void alarmTryBranch (UA_Server *server, UA_Condition *condition)
     }
 }
 
+static UA_StatusCode alarmActiveHandleAlarmGroups (UA_Server *server, const UA_NodeId *alarmId);
+
 static void alarmActivate (UA_Server *server, UA_Condition *condition, const UA_ConditionEventInfo *info)
 {
     alarmTryBranch(server, condition);
     (void) UA_Condition_UserCallback_onActive(server, condition, &condition->mainBranch->id);
     UA_Condition_State_setActiveState(condition, server, true);
     UA_Condition_State_setLatchedState(condition, server, true);
+    alarmActiveHandleAlarmGroups(server, &condition->mainBranch->id);
     UA_ConditionBranch_triggerEvent(condition->mainBranch, server, info);
     UA_Condition_createReAlarmCallback(condition, server);
 }
@@ -2685,11 +2735,12 @@ alarmEnteringActive (UA_Server *server, UA_Condition *condition, const UA_Condit
     return UA_STATUSCODE_GOOD;
 }
 
+static UA_StatusCode alarmDeactiveHandleAlarmGroups (UA_Server *server, const UA_NodeId *alarmId);
+
 static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
                             const UA_ConditionEventInfo *info)
 {
     alarmTryBranch(server, condition);
-    (void) UA_Condition_UserCallback_onInactive(server, condition, &condition->mainBranch->id);
 
     /* 5.8.17 The OneShotShelving will automatically clear when an Alarm returns to an inactive state. */
     if (UA_Condition_State_isOneShotShelved(condition, server))
@@ -2709,6 +2760,7 @@ static void alarmSetInactive(UA_Server *server, UA_Condition *condition,
         Condition_State_setReAlarmRepeatCount (server, &condition->mainBranch->id, condition->reAlarmCount);
     }
     UA_Condition_State_setActiveState (condition, server, false);
+    alarmDeactiveHandleAlarmGroups(server, &condition->mainBranch->id);
     UA_ConditionBranch_triggerEvent(condition->mainBranch, server, info);
 }
 
@@ -3278,6 +3330,21 @@ unshelve2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
     return UA_Server_Condition_unshelve (server, *objectId, comment, NULL);
 }
 
+static UA_StatusCode
+getGroupMembershipsMethodCallback (UA_Server *server, const UA_NodeId *sessionId,
+                        void *sessionContext, const UA_NodeId *methodId,
+                        void *methodContext, const UA_NodeId *objectId,
+                        void *objectContext, size_t inputSize,
+                        const UA_Variant *input, size_t outputSize,
+                        UA_Variant *output)
+{
+
+    UA_NodeId *group = NULL;
+    size_t groupSize = 0;
+    UA_StatusCode status = UA_Server_Condition_getGroupMemberships (server, *objectId, &groupSize, &group);
+    if (status == UA_STATUSCODE_GOOD) UA_Variant_setArray(&output[0], group, groupSize, &UA_TYPES[UA_TYPES_NODEID]) ;
+    return status;
+}
 
 static UA_StatusCode
 setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *condition,
@@ -3915,6 +3982,161 @@ UA_Server_setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condi
     return retval;
 }
 
+static UA_BrowseResult getAlarmGroupNodes (UA_Server *server, const UA_NodeId *groupId)
+{
+    UA_BrowseDescription bd = {
+        .nodeId = *groupId,
+        .nodeClassMask = UA_NODECLASS_OBJECT | UA_NODECLASS_VARIABLE,
+        .includeSubtypes = true,
+        .referenceTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMGROUPMEMBER),
+        .resultMask = UA_BROWSERESULTMASK_TARGETINFO | UA_BROWSERESULTMASK_NODECLASS
+    };
+    UA_UInt32 maxRef = 0;
+    UA_BrowseResult browseResult;
+    UA_BrowseResult_init(&browseResult);
+    Operation_Browse(server, &server->adminSession, &maxRef, &bd, &browseResult);
+    return browseResult;
+}
+
+static UA_StatusCode isGroupActiveBrowseResult (UA_Server *server, const UA_BrowseResult *browseResult, UA_Boolean *activeOut)
+{
+    UA_Boolean active = false;
+    UA_StatusCode status = UA_STATUSCODE_GOOD;
+    for (size_t i=0; i<browseResult->referencesSize; i++)
+    {
+        const UA_ReferenceDescription *rd = &browseResult->references[i];
+        if (rd->nodeClass == UA_NODECLASS_VARIABLE)
+        {
+            UA_Variant value;
+            status = readWithReadValue(server, &rd->nodeId.nodeId, UA_ATTRIBUTEID_VALUE, &value);
+            if (status != UA_STATUSCODE_GOOD) break;
+            if (value.type != &UA_TYPES[UA_TYPES_BOOLEAN])
+            {
+                status = UA_STATUSCODE_BADINTERNALERROR;
+                break;
+            }
+            active = *(UA_Boolean *) value.data;
+            if (active) break;
+        }
+        else if (rd->nodeClass == UA_NODECLASS_OBJECT)
+        {
+            active = isTwoStateVariableInTrueState(server, &rd->nodeId.nodeId, &fieldActiveStateQN);
+            if (active) break;
+        }
+        else
+        {
+            status = UA_STATUSCODE_BADINTERNALERROR;
+            break;
+        }
+    }
+    if (status == UA_STATUSCODE_GOOD) *activeOut = active;
+    return status;
+}
+
+static UA_StatusCode isGroupActive (UA_Server *server, const UA_NodeId*groupId, UA_Boolean *activeOut)
+{
+    UA_BrowseResult groupNodes = getAlarmGroupNodes(server, groupId);
+    if (groupNodes.statusCode != UA_STATUSCODE_GOOD) return groupNodes.statusCode;
+    UA_StatusCode status = isGroupActiveBrowseResult(server, &groupNodes, activeOut);
+    UA_BrowseResult_clear(&groupNodes);
+    return status;
+}
+
+static inline UA_BrowseResult getAlarmGroups (UA_Server *server, const UA_NodeId *alarmId)
+{
+    UA_BrowseDescription browseDescription = {
+        .nodeId = *alarmId,
+        .resultMask = UA_BROWSERESULTMASK_TARGETINFO,
+        .referenceTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMGROUPMEMBER),
+        .browseDirection = UA_BROWSEDIRECTION_INVERSE,
+        .includeSubtypes = true,
+        .nodeClassMask = UA_NODECLASS_OBJECT
+    };
+    UA_UInt32 maxRef = 0;
+    UA_BrowseResult browseResult;
+    UA_BrowseResult_init(&browseResult);
+    Operation_Browse(server, &server->adminSession, &maxRef, &browseDescription, &browseResult);
+    return browseResult;
+}
+
+static inline UA_BrowseResult getAlarmSuppressionGroups (UA_Server *server, const UA_NodeId *alarmId)
+{
+    UA_BrowseDescription browseDescription = {
+        .nodeId = *alarmId,
+        .resultMask = UA_BROWSERESULTMASK_TARGETINFO,
+        .referenceTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMSUPPRESSIONGROUPMEMBER),
+        .browseDirection = UA_BROWSEDIRECTION_INVERSE,
+        .includeSubtypes = true,
+        .nodeClassMask = UA_NODECLASS_OBJECT
+    };
+    UA_UInt32 maxRef = 0;
+    UA_BrowseResult browseResult;
+    UA_BrowseResult_init(&browseResult);
+    Operation_Browse(server, &server->adminSession, &maxRef, &browseDescription, &browseResult);
+    return browseResult;
+}
+
+static UA_StatusCode alarmActiveHandleAlarmGroups (UA_Server *server, const UA_NodeId *alarmId)
+{
+    UA_StatusCode status = UA_STATUSCODE_GOOD;
+    UA_BrowseResult groupsResult = getAlarmSuppressionGroups (server, alarmId);
+    if (groupsResult.statusCode != UA_STATUSCODE_GOOD) return groupsResult.statusCode;
+    UA_Boolean suppress = false;
+    for (size_t i=0; i<groupsResult.referencesSize;i++)
+    {
+        bool active = false;
+        status = isGroupActive(server, &groupsResult.references[i].nodeId.nodeId, &active);
+        if (status != UA_STATUSCODE_GOOD) goto done;
+        if (!active) continue;
+        suppress = true;
+        break;
+    }
+    if (suppress) setSuppressedState (server, alarmId, true);
+done:
+    UA_BrowseResult_clear(&groupsResult);
+    return status;
+}
+
+static UA_StatusCode alarmDeactiveHandleAlarmGroups (UA_Server *server, const UA_NodeId *alarmId)
+{
+    UA_BrowseResult groupsResult = getAlarmSuppressionGroups (server, alarmId);
+    UA_StatusCode status = UA_STATUSCODE_GOOD;
+    if (groupsResult.statusCode != UA_STATUSCODE_GOOD) return groupsResult.statusCode;
+    for (size_t i=0; i<groupsResult.referencesSize;i++)
+    {
+        UA_BrowseResult groupNodes = getAlarmGroupNodes(server, &groupsResult.references[i].nodeId.nodeId);
+        if (groupNodes.statusCode != UA_STATUSCODE_GOOD) return groupNodes.statusCode;
+        UA_Boolean active = false;
+        status = isGroupActiveBrowseResult(server, &groupNodes, &active);
+        if (status != UA_STATUSCODE_GOOD) goto done;
+
+        /* Unsuppress all nodes */
+        for (size_t j=0; j< groupNodes.referencesSize;j++)
+        {
+            if (UA_NodeId_equal(&groupNodes.references[j].nodeId.nodeId, alarmId))
+            {
+                setSuppressedState (server, alarmId, true);
+                continue;
+            }
+            UA_Condition *cond = getCondition(server, alarmId);
+            if (!cond)
+            {
+                status = UA_STATUSCODE_BADNODEIDUNKNOWN;
+                goto done;
+            }
+            UA_ConditionEventInfo info = {
+                .message = UA_LOCALIZEDTEXT(LOCALE, "Suppression Alarm group inactive")
+            };
+            status = condition_unshelve(server, cond, NULL, &info);
+            if (status != UA_STATUSCODE_GOOD) goto done;
+        }
+    }
+
+done:
+    UA_BrowseResult_clear(&groupsResult);
+    return status;
+}
+
 void initNs0ConditionAndAlarms (UA_Server *server)
 {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
@@ -3965,6 +4187,8 @@ void initNs0ConditionAndAlarms (UA_Server *server)
         {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_TIMEDSHELVE2), .cb = timedShelve2MethodCallback},
         {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_ONESHOTSHELVE), .cb = oneShotShelveMethodCallback},
         {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_ONESHOTSHELVE2), .cb = oneShotShelve2MethodCallback},
+
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_GETGROUPMEMBERSHIPS), .cb = getGroupMembershipsMethodCallback}
     };
 
     for (size_t i=0; i< sizeof(condition_methods)/sizeof(condition_methods[0]); i++)
@@ -4014,6 +4238,13 @@ void initNs0ConditionAndAlarms (UA_Server *server)
         writeIsAbstractAttribute(server, refreshStartEventTypeNodeId, false);
         writeIsAbstractAttribute(server, refreshEndEventTypeNodeId, false);
     }
+}
+
+void clearAlarmsAndConditions (UA_Server *server)
+{
+    UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_START_IDX]);
+    UA_NodeId_clear(&server->refreshEvents[REFRESHEVENT_END_IDX]);
+    UA_ConditionList_delete(server);
 }
 
 void
@@ -4477,5 +4708,6 @@ UA_Server_nonExclusiveLimitAlarmEvaluate_default (
     }
     return retval;
 }
+
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */

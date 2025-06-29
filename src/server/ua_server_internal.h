@@ -353,10 +353,6 @@ UA_StatusCode
 UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
                            UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut);
 
-void
-UA_ConditionList_delete(UA_Server *server);
-
-
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 /* Returns the type node from the node on the stack top. The type node is pushed
