@@ -37,7 +37,7 @@ if sys.version_info[0] >= 3:
 
     string_types = str
 else:
-    string_types = basestring 
+    string_types = basestring
 
 def getNextElementNode(xmlvalue):
     if xmlvalue is None:
@@ -350,7 +350,7 @@ class Value(object):
                 else:
                     logger.error(str(parent.id) + ": Could not parse <SwitchFiled> for Union.")
                     return self
-                
+
 
             childValue = ebodypart.firstChild
             if not childValue.nodeType == ebodypart.ELEMENT_NODE:
@@ -634,16 +634,26 @@ class LocalizedText(Value):
         #          <Locale>xx_XX</Locale>
         #          <Text>TextText</Text>
         #        <LocalizedText> or </AliasName>
+        # OR <LocalizedText Locale="en">Text</LocalizedText>
+
         if not isinstance(xmlvalue, dom.Element):
             self.text = xmlvalue
             return
         self.checkXML(xmlvalue)
-        tmp = xmlvalue.getElementsByTagName("Locale")
-        if len(tmp) > 0 and tmp[0].firstChild != None:
-            self.locale = tmp[0].firstChild.data.strip(' \t\n\r')
-        tmp = xmlvalue.getElementsByTagName("Text")
-        if len(tmp) > 0 and tmp[0].firstChild != None:
-            self.text = tmp[0].firstChild.data.strip(' \t\n\r')
+        tmp = xmlvalue.getAttribute("Locale")
+        if tmp != "":
+            self.locale = tmp
+        else:
+            tmp = xmlvalue.getElementsByTagName("Locale")
+            if len(tmp) > 0 and tmp[0].firstChild != None:
+                self.locale = tmp[0].firstChild.data.strip(' \t\n\r')
+        tmp = xmlvalue.firstChild
+        if tmp and tmp.nodeType == dom.Element.TEXT_NODE:
+            self.text = tmp.data.strip(' \t\n\r')
+        else:
+            tmp = xmlvalue.getElementsByTagName("Text")
+            if len(tmp) > 0 and tmp[0].firstChild != None:
+                self.text = tmp[0].firstChild.data.strip(' \t\n\r')
 
     def __str__(self):
         if self.locale is None and self.text is None:
@@ -685,7 +695,7 @@ class NodeId(Value):
                     self.ns = namespaceMapping[self.ns]
             elif p[:2] == "i=":
                 self.i = int(p[2:])
-            elif p[:2] == "o=":
+            elif p[:2] == "b=":
                 self.b = p[2:]
             elif p[:2] == "g=":
                 tmp = []

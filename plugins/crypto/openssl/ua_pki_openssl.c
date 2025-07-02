@@ -324,6 +324,10 @@ UA_ReloadCertFromFolder (CertContext * ctx) {
             }
             UA_ByteString_clear (&strCert);
         }
+        for (i = 0; i < numCertificates; i++) {
+            free(dirlist[i]);
+        }
+        free(dirlist);
     }
 
     if (ctx->issuerListFolder.length > 0) {
@@ -359,6 +363,10 @@ UA_ReloadCertFromFolder (CertContext * ctx) {
             }
             UA_ByteString_clear (&strCert);
         }
+        for (i = 0; i < numCertificates; i++) {
+            free(dirlist[i]);
+        }
+        free(dirlist);
     }
 
     if (ctx->revocationListFolder.length > 0) {
@@ -394,6 +402,10 @@ UA_ReloadCertFromFolder (CertContext * ctx) {
             }
             UA_ByteString_clear (&strCert);
         }
+        for (i = 0; i < numCertificates; i++) {
+            free(dirlist[i]);
+        }
+        free(dirlist);
     }
 
     ret = UA_STATUSCODE_GOOD;
@@ -808,8 +820,8 @@ UA_GetCertificate_ExpirationDate(UA_DateTime *expiryDateTime,
     ASN1_TIME_to_tm(not_after, &dtTime);
     X509_free(x509);
 
-    struct mytm dateTime;
-    memset(&dateTime, 0, sizeof(struct mytm));
+    struct musl_tm dateTime;
+    memset(&dateTime, 0, sizeof(struct musl_tm));
     dateTime.tm_year = dtTime.tm_year;
     dateTime.tm_mon = dtTime.tm_mon;
     dateTime.tm_mday = dtTime.tm_mday;
@@ -817,7 +829,7 @@ UA_GetCertificate_ExpirationDate(UA_DateTime *expiryDateTime,
     dateTime.tm_min = dtTime.tm_min;
     dateTime.tm_sec = dtTime.tm_sec;
 
-    long long sec_epoch = __tm_to_secs(&dateTime);
+    long long sec_epoch = musl_tm_to_secs(&dateTime);
     *expiryDateTime = UA_DATETIME_UNIX_EPOCH;
     *expiryDateTime += sec_epoch * UA_DATETIME_SEC;
     return UA_STATUSCODE_GOOD;
