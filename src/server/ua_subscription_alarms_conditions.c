@@ -2248,7 +2248,8 @@ __UA_Server_createCondition(UA_Server *server,
 
     retval = addCondition_finish (server, &tmpOutId, &conditionType, conditionProperties, setupFn, setupData);
     unlockServer(server);
-    outNodeId ? *outNodeId = tmpOutId : UA_NodeId_clear (&tmpOutId);
+    if (outNodeId) *outNodeId = tmpOutId;
+    else UA_NodeId_clear (&tmpOutId);
     return retval;
 }
 
@@ -3452,7 +3453,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
             retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                       fieldMaxTimeShelvedQN, NULL);
             CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding MaxTimeShelved optional Field failed",);
-            UA_Variant_setScalar(&value, (void *) (uintptr_t) properties->maxTimeShelved, &UA_TYPES[UA_TYPES_DURATION]);
+            UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->maxTimeShelved, &UA_TYPES[UA_TYPES_DURATION]);
             retval = setConditionField (server, *condition, &value, fieldMaxTimeShelvedQN);
             CONDITION_ASSERT_RETURN_RETVAL(retval, "Set MaxTimeShelved Field failed",);
         }
