@@ -16,8 +16,133 @@ static void stopHandler(int sign) {
     running = false;
 }
 
-/* In this example, we integrate the server into an external "mainloop". This
-   can be for example the event-loop used in GUI toolkits, such as Qt or GTK. */
+char * allocate_format_string (const char* format, ...)
+{
+    char *str = NULL;
+    va_list args;
+    va_list args_copy;
+
+    va_start (args, format);
+    va_copy (args_copy, args);
+    size_t size = vsnprintf (NULL, 0, format, args);
+    va_end (args);
+
+    str = calloc (1u, size+1);
+    vsnprintf (str, size+1, format, args_copy);
+    va_end (args_copy);
+    return str;
+}
+
+static UA_StatusCode
+readValueCb(UA_Server *server,
+                const UA_NodeId *sessionId, void *sessionContext,
+                const UA_NodeId *nodeId, void *nodeContext,
+                UA_Boolean sourceTimeStamp, const UA_NumericRange *range,
+                UA_DataValue *dataValue) {
+    uint64_t *val = nodeContext;
+    (*val)++;
+    UA_Variant_setScalarCopy(&dataValue->value, val,
+                             &UA_TYPES[UA_TYPES_UINT64]);
+    dataValue->hasValue = true;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode setup_nodes(UA_Server *server)
+{
+    uint32_t NODE_COUNT = 100;
+    uint32_t DEV_COUNT = 100;
+    uint32_t METRIC_COUNT = 10;
+
+    UA_NodeId container_id = UA_NODEID_STRING(1, "Container");
+    UA_ObjectAttributes objectAttr = UA_ObjectAttributes_default;
+    UA_StatusCode retval = UA_Server_addObjectNode (
+       server,                    // Server instance
+       container_id,
+       UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),              // Parent NodeId
+       UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),           // Reference type
+       UA_QUALIFIEDNAME(1, "Container"), // Browse name
+       UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE), // Type definition
+       objectAttr,                // Object attributes
+       NULL,                      // Node context (optional)
+       NULL                       // Output NodeId (optional)
+    );
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    for (uint32_t i = 0; i<NODE_COUNT; i++)
+    {
+        char *node_name = allocate_format_string("node-%u", i);
+        UA_NodeId node_node_id = UA_NODEID_STRING(1, node_name);
+        UA_StatusCode retval = UA_Server_addObjectNode (
+           server,                    // Server instance
+           node_node_id,
+           container_id,
+           UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),           // Reference type
+           UA_QUALIFIEDNAME(1, node_name), // Browse name
+           UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE), // Type definition
+           objectAttr,                // Object attributes
+           NULL,                      // Node context (optional)
+           NULL                       // Output NodeId (optional)
+        );
+        if (retval != UA_STATUSCODE_GOOD) return retval;
+
+        for (uint32_t j = 0; j<DEV_COUNT; j++)
+        {
+            char *dev_name= allocate_format_string("node-%u-device-%u", i, j);
+            UA_NodeId dev_node_id = UA_NODEID_STRING(1, dev_name);
+            retval = UA_Server_addObjectNode (
+               server,                    // Server instance
+               dev_node_id,
+               node_node_id,
+               UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),           // Reference type
+               UA_QUALIFIEDNAME(1, dev_name), // Browse name
+               UA_NODEID_NUMERIC(0, UA_NS0ID_BASEOBJECTTYPE), // Type definition
+               objectAttr,                // Object attributes
+               NULL,                      // Node context (optional)
+               NULL                       // Output NodeId (optional)
+            );
+            if (retval != UA_STATUSCODE_GOOD) return retval;
+
+            for (uint32_t k = 0; k<METRIC_COUNT; k++) {
+                char *metric_name = allocate_format_string("node-%u-device-%u-metric-%u", i, j, k);
+                UA_NodeId metric_node_id = UA_NODEID_STRING(1, metric_name);
+
+                uint64_t *value = malloc(sizeof(*value));
+                *value = 0;
+
+                UA_VariableAttributes varAttr = UA_VariableAttributes_default;
+                UA_Variant_setScalarCopy (&varAttr.value, value, &UA_TYPES[UA_TYPES_UINT64]);
+                varAttr.accessLevel = UA_ACCESSLEVELMASK_READ;
+                retval = UA_Server_addVariableNode (
+                    server,
+                    metric_node_id,
+                    dev_node_id,              // Parent is our custom object
+                    UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                    UA_QUALIFIEDNAME(1, metric_name),
+                    UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                    varAttr,
+                    value,
+                    NULL
+                );
+                if (retval != UA_STATUSCODE_GOOD) return retval;
+
+                UA_DataSource source;
+                source.read = readValueCb;
+                retval = UA_Server_setVariableNode_dataSource (
+                    server,
+                    metric_node_id,
+                    source
+                );
+                if (retval != UA_STATUSCODE_GOOD) return retval;
+                free (metric_name);
+            }
+            free (dev_name);
+        }
+        free (node_name);
+    }
+
+
+    return UA_STATUSCODE_GOOD;
+}
 
 int main(int argc, char** argv) {
     signal(SIGINT, stopHandler);
@@ -26,31 +151,29 @@ int main(int argc, char** argv) {
     UA_Server *server = UA_Server_new();
     UA_ServerConfig_setDefault(UA_Server_getConfig(server));
 
-    /* Should the server networklayer block (with a timeout) until a message
-       arrives or should it return immediately? */
-    UA_Boolean waitInternal = false;
+
+    if (setup_nodes(server) != UA_STATUSCODE_GOOD) return EXIT_FAILURE;
+
+
 
     UA_StatusCode retval = UA_Server_run_startup(server);
     if(retval != UA_STATUSCODE_GOOD)
         goto cleanup;
-
+    uint64_t count = 0;
+    UA_DateTime total = 0;
     while(running) {
-        /* timeout is the maximum possible delay (in millisec) until the next
-           _iterate call. Otherwise, the server might miss an internal timeout
-           or cannot react to messages with the promised responsiveness. */
-        /* If multicast discovery server is enabled, the timeout does not not consider new input data (requests) on the mDNS socket.
-         * It will be handled on the next call, which may be too late for requesting clients.
-         * if needed, the select with timeout on the multicast socket server->mdnsSocket (see example in mdnsd library)
-         */
-        UA_UInt16 timeout = UA_Server_run_iterate(server, waitInternal);
+        UA_DateTime start = UA_DateTime_nowMonotonic();
+        UA_Server_run_iterate (server, true);
+        total += UA_DateTime_nowMonotonic() - start;
+        count++;
 
-        /* Now we can use the max timeout to do something else. In this case, we
-           just sleep. (select is used as a platform-independent sleep
-           function.) */
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = timeout * 1000;
-        select(0, NULL, NULL, NULL, &tv);
+        if (count == 10) {
+            fprintf (stderr, "Server average iter time = %lu samples=%lu \n", total/count, count);
+            count = 0;
+            total = 0;
+        }
+
+
     }
     retval = UA_Server_run_shutdown(server);
 
