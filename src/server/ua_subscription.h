@@ -116,7 +116,7 @@ typedef enum {
 
 struct UA_MonitoredItem {
     UA_TimerEntry delayedFreePointers;
-    LIST_ENTRY(UA_MonitoredItem) listEntry; /* Linked list in the Subscription */
+    ZIP_ENTRY(UA_MonitoredItem) zipEntry; /* Linked list in the Subscription */
     UA_Subscription *subscription; /* If NULL, then this is a Local MonitoredItem */
     UA_UInt32 monitoredItemId;
 
@@ -250,6 +250,23 @@ typedef enum {
     UA_SUBSCRIPTIONSTATE_KEEPALIVE
 } UA_SubscriptionState;
 
+static enum ZIP_CMP
+cmpMonitoredItemId(const void *aa, const void *bb) {
+    const UA_UInt32 *a = (const UA_UInt32 *)aa;
+    const UA_UInt32 *b = (const UA_UInt32 *)bb;
+    if(*a == *b)
+        return ZIP_CMP_EQ;
+    return (*a < *b) ? ZIP_CMP_LESS : ZIP_CMP_MORE;
+}
+
+typedef ZIP_HEAD(UA_MonitoredItemTree, UA_MonitoredItem) UA_MonitoredItemTree;
+
+ZIP_FUNCTIONS (UA_MonitoredItemTree, UA_MonitoredItem, zipEntry, UA_UInt32, monitoredItemId, cmpMonitoredItemId)
+
+void UA_MonitoredItemTree_deleteMonitoredItems (UA_Server *server, UA_MonitoredItemTree *tree);
+
+UA_MonitoredItem* UA_MonitoredItemTree_getMonitoredItem (UA_MonitoredItemTree *tree, UA_UInt32 monitoredItemId);
+
 /* Subscriptions are managed in a server-wide linked list. If they are attached
  * to a Session, then they are additionaly in the per-Session linked-list. A
  * subscription is always generated for a Session. But the CloseSession Service
@@ -286,7 +303,8 @@ struct UA_Subscription {
 
     /* MonitoredItems */
     UA_UInt32 lastMonitoredItemId; /* increase the identifiers */
-    LIST_HEAD(, UA_MonitoredItem) monitoredItems;
+    //LIST_HEAD(, UA_MonitoredItem) monitoredItems;
+    UA_MonitoredItemTree monitoredItems;
     UA_UInt32 monitoredItemsSize;
 
     /* MonitoredItems that are sampled in every publish callback (with the
@@ -337,6 +355,15 @@ Subscription_registerPublishCallback(UA_Server *server,
 void
 Subscription_unregisterPublishCallback(UA_Server *server,
                                        UA_Subscription *sub);
+
+UA_UInt32 Subscription_monitoredItemsCount(UA_Subscription *sub);
+
+UA_StatusCode Subscription_createHandleArrays(
+    UA_Subscription *sub,
+    UA_UInt32 **clientHandlesOut,
+    UA_UInt32 **serverHandlesOut,
+    UA_UInt32 *handlesCount
+);
 
 UA_MonitoredItem *
 UA_Subscription_getMonitoredItem(UA_Subscription *sub,

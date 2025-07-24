@@ -194,11 +194,12 @@ void UA_Server_delete(UA_Server *server) {
     UA_Array_delete(server->namespaces, server->namespacesSize, &UA_TYPES[UA_TYPES_STRING]);
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS
-    UA_MonitoredItem *mon, *mon_tmp;
-    LIST_FOREACH_SAFE(mon, &server->localMonitoredItems, listEntry, mon_tmp) {
-        LIST_REMOVE(mon, listEntry);
-        UA_MonitoredItem_delete(server, mon);
-    }
+    // UA_MonitoredItem *mon, *mon_tmp;
+    // LIST_FOREACH_SAFE(mon, &server->localMonitoredItems, listEntry, mon_tmp) {
+    //     LIST_REMOVE(mon, listEntry);
+    //     UA_MonitoredItem_delete(server, mon);
+    // }
+    UA_MonitoredItemTree_deleteMonitoredItems (server, &server->localMonitoredItems);
 
     /* Remove subscriptions without a session */
     UA_Subscription *sub, *sub_tmp;
@@ -410,6 +411,16 @@ UA_StatusCode
 addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
                               void *data, UA_Double interval_ms,
                               UA_UInt64 *callbackId) {
+    //double norm = (double) UA_UInt32_random() / (double) UA_UINT32_MAX;
+    // UA_DateTime interval_date_time = ((UA_DateTime) interval_ms) * UA_DATETIME_MSEC;
+    // UA_DateTime interval_date_time_extra_max = (interval_date_time / 100) * 75;
+    // UA_DateTime delay = (UA_DateTime) UA_UInt32_random() % interval_date_time_extra_max;
+    //
+    //
+    // UA_DateTime startTime = UA_DateTime_nowMonotonic() + delay;
+
+    //fprintf(stderr, "%s: delay=%lu us interval_date_time=%lu max_delay=%lu \n", __func__, delay/10, interval_date_time, interval_date_time_extra_max);
+
     return UA_Timer_addRepeatedCallback(&server->timer,
                                         (UA_ApplicationCallback)callback,
                                          server, data, interval_ms, NULL,

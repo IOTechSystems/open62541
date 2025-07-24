@@ -822,16 +822,18 @@ Service_DeleteMonitoredItems(UA_Server *server, UA_Session *session,
 UA_StatusCode
 UA_Server_deleteMonitoredItem(UA_Server *server, UA_UInt32 monitoredItemId) {
     UA_LOCK(&server->serviceMutex);
-    UA_MonitoredItem *mon, *mon_tmp;
-    LIST_FOREACH_SAFE(mon, &server->localMonitoredItems, listEntry, mon_tmp) {
-        if(mon->monitoredItemId != monitoredItemId)
-            continue;
-        UA_MonitoredItem_delete(server, mon);
+
+    UA_MonitoredItem *mon = UA_MonitoredItemTree_getMonitoredItem (
+        &server->localMonitoredItems,
+        monitoredItemId
+    );
+    if (!mon) {
         UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_GOOD;
+        return UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
     }
+    UA_MonitoredItem_delete(server, mon);
     UA_UNLOCK(&server->serviceMutex);
-    return UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
+    return UA_STATUSCODE_GOOD;
 }
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS */

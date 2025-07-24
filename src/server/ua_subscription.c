@@ -24,6 +24,21 @@
 
 #define UA_MAX_RETRANSMISSIONQUEUESIZE 256
 
+
+static void deleteMonitoredItemsCb(UA_MonitoredItem *item, void *ctx)
+{
+    UA_Server *server = (UA_Server*) ctx;
+    UA_MonitoredItem_delete(server, item);
+}
+
+inline void UA_MonitoredItemTree_deleteMonitoredItems (UA_Server *server, UA_MonitoredItemTree *tree) {
+    ZIP_ITER (UA_MonitoredItemTree, tree, deleteMonitoredItemsCb, server);
+}
+
+inline UA_MonitoredItem* UA_MonitoredItemTree_getMonitoredItem (UA_MonitoredItemTree *tree, UA_UInt32 monitoredItemId) {
+    return ZIP_FIND(UA_MonitoredItemTree, tree, &monitoredItemId);
+}
+
 UA_Subscription *
 UA_Subscription_new(void) {
     /* Allocate the memory */
@@ -93,10 +108,8 @@ UA_Subscription_delete(UA_Server *server, UA_Subscription *sub) {
 
     /* Delete monitored Items */
     UA_assert(server->monitoredItemsSize >= sub->monitoredItemsSize);
-    UA_MonitoredItem *mon, *tmp_mon;
-    LIST_FOREACH_SAFE(mon, &sub->monitoredItems, listEntry, tmp_mon) {
-        UA_MonitoredItem_delete(server, mon);
-    }
+    UA_MonitoredItemTree_deleteMonitoredItems (server, &sub->monitoredItems);
+
     UA_assert(sub->monitoredItemsSize == 0);
 
     /* Delete Retransmission Queue */
@@ -122,14 +135,76 @@ UA_Subscription_delete(UA_Server *server, UA_Subscription *sub) {
     UA_Timer_addTimerEntry(&server->timer, &sub->delayedFreePointers, NULL);
 }
 
+static void countMonitoredItemsCb(UA_MonitoredItem *item, void *ctx)
+{
+    UA_UInt32 *sizeOfOutput = (UA_UInt32 *) ctx;
+    (*sizeOfOutput)++;
+}
+
+UA_UInt32 Subscription_monitoredItemsCount(UA_Subscription *sub) {
+    UA_UInt32 sizeOfOutput = 0;
+    ZIP_ITER (UA_MonitoredItemTree, &sub->monitoredItems, countMonitoredItemsCb, &sizeOfOutput);
+    return sizeOfOutput;
+}
+
+struct populateHandlesCtx{
+    UA_UInt32 *clientHandles;
+    UA_UInt32 *serverHandles;
+    UA_UInt32 idx;
+};
+
+static void populateHandlesCb(UA_MonitoredItem *item,  void *ctx)
+{
+    struct populateHandlesCtx *handles = (struct populateHandlesCtx *) ctx;
+    handles->clientHandles[handles->idx] = item->parameters.clientHandle;
+    handles->serverHandles[handles->idx] = item->monitoredItemId;
+    handles->idx++;
+}
+
+UA_StatusCode Subscription_createHandleArrays(
+    UA_Subscription *sub,
+    UA_UInt32 **clientHandlesOut,
+    UA_UInt32 **serverHandlesOut,
+    UA_UInt32 *handlesCount
+) {
+    /* Count the MonitoredItems */
+    UA_UInt32 sizeOfOutput = Subscription_monitoredItemsCount(sub);
+    if(sizeOfOutput == 0) {
+        *handlesCount = 0;
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* Allocate the output arrays */
+    UA_UInt32 *clientHandles = (UA_UInt32*)
+        UA_Array_new(sizeOfOutput, &UA_TYPES[UA_TYPES_UINT32]);
+    if(!clientHandles) {
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    UA_UInt32 *serverHandles = (UA_UInt32*)
+        UA_Array_new(sizeOfOutput, &UA_TYPES[UA_TYPES_UINT32]);
+    if(!serverHandles) {
+        UA_free(clientHandles);
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+
+    /* Fill the array */
+    struct populateHandlesCtx iterCtx = {
+        .clientHandles = clientHandles,
+        .serverHandles = serverHandles,
+        .idx = 0
+    };
+    ZIP_ITER (UA_MonitoredItemTree, &sub->monitoredItems, populateHandlesCb, &iterCtx);
+
+    *handlesCount = sizeOfOutput;
+    *clientHandlesOut = clientHandles;
+    *serverHandlesOut = serverHandles;
+
+    return UA_STATUSCODE_GOOD;
+}
+
 UA_MonitoredItem *
 UA_Subscription_getMonitoredItem(UA_Subscription *sub, UA_UInt32 monitoredItemId) {
-    UA_MonitoredItem *mon;
-    LIST_FOREACH(mon, &sub->monitoredItems, listEntry) {
-        if(mon->monitoredItemId == monitoredItemId)
-            break;
-    }
-    return mon;
+    return UA_MonitoredItemTree_getMonitoredItem (&sub->monitoredItems, monitoredItemId);
 }
 
 static void

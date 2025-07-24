@@ -453,6 +453,36 @@ setTransferredSequenceNumbers(const UA_Subscription *sub, UA_TransferResult *res
     return UA_STATUSCODE_GOOD;
 }
 
+static void updateBackpointerCb(UA_MonitoredItem *item,  void *ctx)
+{
+    UA_Subscription *sub = ctx;
+    item->subscription = ctx;
+}
+
+static void updateDataChangeNotificationCb(UA_MonitoredItem *mon,  void *ctx) {
+    UA_Server *server = ctx;
+    /* Create only DataChange notifications */
+    if(mon->itemToMonitor.attributeId == UA_ATTRIBUTEID_EVENTNOTIFIER)
+        return;
+
+    /* Only if the mode is monitoring */
+    if(mon->monitoringMode != UA_MONITORINGMODE_REPORTING)
+        return;
+
+    /* If a value is queued for a data MonitoredItem, the next value in
+     * the queue is sent in the Publish response. */
+    if(mon->queueSize > 0)
+        return;
+
+    /* Create a notification with the last sampled value */
+    UA_MonitoredItem_createDataChangeNotification(
+        server,
+        mon->subscription,
+        mon,
+        &mon->lastValue
+    );
+}
+
 static void
 Operation_TransferSubscription(UA_Server *server, UA_Session *session,
                                const UA_Boolean *sendInitialValues,
@@ -533,14 +563,18 @@ Operation_TransferSubscription(UA_Server *server, UA_Session *session,
     /* <-- The point of no return --> */
 
     /* Move over the MonitoredItems and adjust the backpointers */
-    LIST_INIT(&newSub->monitoredItems);
-    UA_MonitoredItem *mon, *mon_tmp;
-    LIST_FOREACH_SAFE(mon, &sub->monitoredItems, listEntry, mon_tmp) {
-        LIST_REMOVE(mon, listEntry);
-        mon->subscription = newSub;
-        LIST_INSERT_HEAD(&newSub->monitoredItems, mon, listEntry);
-    }
+    ZIP_ITER (UA_MonitoredItemTree, &newSub->monitoredItems, updateBackpointerCb, newSub);
     sub->monitoredItemsSize = 0;
+    ZIP_INIT(&sub->monitoredItems);
+
+    // LIST_INIT(&newSub->monitoredItems);
+    // UA_MonitoredItem *mon, *mon_tmp;
+    // LIST_FOREACH_SAFE(mon, &sub->monitoredItems, listEntry, mon_tmp) {
+    //     LIST_REMOVE(mon, listEntry);
+    //     mon->subscription = newSub;
+    //     LIST_INSERT_HEAD(&newSub->monitoredItems, mon, listEntry);
+    // }
+    // sub->monitoredItemsSize = 0;
 
     /* Move over the notification queue */
     TAILQ_INIT(&newSub->notificationQueue);
@@ -586,25 +620,27 @@ Operation_TransferSubscription(UA_Server *server, UA_Session *session,
 
     /* Re-create notifications with the current values for the new subscription */
     if(*sendInitialValues) {
-        LIST_FOREACH(mon, &newSub->monitoredItems, listEntry) {
 
-            /* Create only DataChange notifications */
-            if(mon->itemToMonitor.attributeId == UA_ATTRIBUTEID_EVENTNOTIFIER)
-                continue;
-
-            /* Only if the mode is monitoring */
-            if(mon->monitoringMode != UA_MONITORINGMODE_REPORTING)
-                continue;
-
-            /* If a value is queued for a data MonitoredItem, the next value in
-             * the queue is sent in the Publish response. */
-            if(mon->queueSize > 0)
-                continue;
-
-            /* Create a notification with the last sampled value */
-            UA_MonitoredItem_createDataChangeNotification(server, newSub, mon,
-                                                          &mon->lastValue);
-        }
+        ZIP_ITER (UA_MonitoredItemTree, &newSub->monitoredItems, updateDataChangeNotificationCb, server);
+        // LIST_FOREACH(mon, &newSub->monitoredItems, listEntry) {
+        //
+        //     /* Create only DataChange notifications */
+        //     if(mon->itemToMonitor.attributeId == UA_ATTRIBUTEID_EVENTNOTIFIER)
+        //         continue;
+        //
+        //     /* Only if the mode is monitoring */
+        //     if(mon->monitoringMode != UA_MONITORINGMODE_REPORTING)
+        //         continue;
+        //
+        //     /* If a value is queued for a data MonitoredItem, the next value in
+        //      * the queue is sent in the Publish response. */
+        //     if(mon->queueSize > 0)
+        //         continue;
+        //
+        //     /* Create a notification with the last sampled value */
+        //     UA_MonitoredItem_createDataChangeNotification(server, newSub, mon,
+        //                                                   &mon->lastValue);
+        // }
     }
 
     /* Do not update the statistics for the number of Subscriptions here. The

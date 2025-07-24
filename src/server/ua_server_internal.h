@@ -133,8 +133,9 @@ struct UA_Server {
                                                  * from a session. */
     UA_UInt32 lastSubscriptionId; /* To generate unique SubscriptionIds */
 
-    /* To be cast to UA_LocalMonitoredItem to get the callback and context */
-    LIST_HEAD(, UA_MonitoredItem) localMonitoredItems;
+    /* Tree items to be cast to UA_LocalMonitoredItem to get the callback and context */
+    UA_MonitoredItemTree localMonitoredItems;
+
     UA_UInt32 lastLocalMonitoredItemId;
 
 # ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS

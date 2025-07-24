@@ -600,41 +600,28 @@ readMonitoredItems(UA_Server *server, const UA_NodeId *sessionId, void *sessionC
         return UA_STATUSCODE_BADUSERACCESSDENIED;
     }
 
-    /* Count the MonitoredItems */
-    UA_UInt32 sizeOfOutput = 0;
-    UA_MonitoredItem* monitoredItem;
-    LIST_FOREACH(monitoredItem, &subscription->monitoredItems, listEntry) {
-        ++sizeOfOutput;
+    UA_UInt32 count = 0;
+    UA_UInt32 *clientHandles = NULL;
+    UA_UInt32 *serverHandles = NULL;
+
+    UA_StatusCode ret = Subscription_createHandleArrays(
+            subscription,
+            &clientHandles,
+            &serverHandles,
+            &count
+    );
+    if (ret != UA_STATUSCODE_GOOD) {
+        UA_UNLOCK(&server->serviceMutex);
+       return ret;
     }
-    if(sizeOfOutput == 0) {
+
+    if (count == 0) {
         UA_UNLOCK(&server->serviceMutex);
         return UA_STATUSCODE_GOOD;
     }
 
-    /* Allocate the output arrays */
-    UA_UInt32 *clientHandles = (UA_UInt32*)
-        UA_Array_new(sizeOfOutput, &UA_TYPES[UA_TYPES_UINT32]);
-    if(!clientHandles) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADOUTOFMEMORY;
-    }
-    UA_UInt32 *serverHandles = (UA_UInt32*)
-        UA_Array_new(sizeOfOutput, &UA_TYPES[UA_TYPES_UINT32]);
-    if(!serverHandles) {
-        UA_UNLOCK(&server->serviceMutex);
-        UA_free(clientHandles);
-        return UA_STATUSCODE_BADOUTOFMEMORY;
-    }
-
-    /* Fill the array */
-    UA_UInt32 i = 0;
-    LIST_FOREACH(monitoredItem, &subscription->monitoredItems, listEntry) {
-        clientHandles[i] = monitoredItem->parameters.clientHandle;
-        serverHandles[i] = monitoredItem->monitoredItemId;
-        ++i;
-    }
-    UA_Variant_setArray(&output[0], serverHandles, sizeOfOutput, &UA_TYPES[UA_TYPES_UINT32]);
-    UA_Variant_setArray(&output[1], clientHandles, sizeOfOutput, &UA_TYPES[UA_TYPES_UINT32]);
+    UA_Variant_setArray(&output[0], serverHandles, count, &UA_TYPES[UA_TYPES_UINT32]);
+    UA_Variant_setArray(&output[1], clientHandles, count, &UA_TYPES[UA_TYPES_UINT32]);
 
     UA_UNLOCK(&server->serviceMutex);
     return UA_STATUSCODE_GOOD;

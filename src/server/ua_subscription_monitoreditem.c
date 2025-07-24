@@ -427,15 +427,19 @@ UA_Server_registerMonitoredItem(UA_Server *server, UA_MonitoredItem *mon) {
 
     /* Register in Subscription and Server */
     UA_Subscription *sub = mon->subscription;
+    UA_MonitoredItemTree *tree = NULL;
     if(sub) {
         mon->monitoredItemId = ++sub->lastMonitoredItemId;
         mon->subscription = sub;
         sub->monitoredItemsSize++;
-        LIST_INSERT_HEAD(&sub->monitoredItems, mon, listEntry);
+        //LIST_INSERT_HEAD(&sub->monitoredItems, mon, listEntry);
+        tree = &sub->monitoredItems;
     } else {
         mon->monitoredItemId = ++server->lastLocalMonitoredItemId;
-        LIST_INSERT_HEAD(&server->localMonitoredItems, mon, listEntry);
+        //LIST_INSERT_HEAD(&server->localMonitoredItems, mon, listEntry);
+        tree = &server->localMonitoredItems;
     }
+    ZIP_INSERT(UA_MonitoredItemTree, tree, mon,  ZIP_RANK(mon, zipEntry));
     server->monitoredItemsSize++;
 
     /* Register the MonitoredItem in userland */
@@ -488,9 +492,17 @@ UA_Server_unregisterMonitoredItem(UA_Server *server, UA_MonitoredItem *mon) {
     }
 
     /* Deregister in Subscription and server */
-    if(sub)
+    UA_MonitoredItemTree *tree = NULL;
+    if(sub) {
         sub->monitoredItemsSize--;
-    LIST_REMOVE(mon, listEntry); /* Also for LocalMonitoredItems */
+        tree = &sub->monitoredItems;
+    }
+    else {
+        tree = &server->localMonitoredItems;
+    }
+    //LIST_REMOVE(mon, listEntry); /* Also for LocalMonitoredItems */
+    ZIP_REMOVE (UA_MonitoredItemTree, tree, mon);
+
     server->monitoredItemsSize--;
 
     mon->registered = false;
