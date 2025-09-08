@@ -285,9 +285,9 @@ readValueAttribute(UA_Server *server, UA_Session *session,
                                       UA_TIMESTAMPSTORETURN_NEITHER, NULL, v);
 }
 
-static const UA_String binEncoding = {sizeof("Default Binary")-1, (UA_Byte*)"Default Binary"};
-static const UA_String xmlEncoding = {sizeof("Default XML")-1, (UA_Byte*)"Default XML"};
-static const UA_String jsonEncoding = {sizeof("Default JSON")-1, (UA_Byte*)"Default JSON"};
+static const UA_String binEncoding = UA_STRING_STATIC("Default Binary");
+static const UA_String xmlEncoding = UA_STRING_STATIC("Default XML");
+static const UA_String jsonEncoding = UA_STRING_STATIC("Default JSON");
 
 #define CHECK_NODECLASS(CLASS)                                  \
     if(!(node->head.nodeClass & (CLASS))) {                     \

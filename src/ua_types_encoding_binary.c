@@ -1116,7 +1116,7 @@ Variant_decodeBinaryUnwrapExtensionObjectArray(void *UA_RESTRICT *UA_RESTRICT ds
     }
 
     /* Compare the header of all array members if the array can be unwrapped */
-    UA_ByteString header = {(uintptr_t)ctx->pos - (uintptr_t)orig_pos - 4, &orig_pos[4]};
+    UA_ByteString header = {(uintptr_t)ctx->pos - (uintptr_t)orig_pos - 4, &orig_pos[4], false};
     UA_ByteString compare_header = header;
     ctx->pos = &orig_pos[4];
 

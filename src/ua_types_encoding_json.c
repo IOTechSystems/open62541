@@ -702,7 +702,7 @@ ENCODE_JSON(DateTime) {
         pos--;
 
     *(++pos) = 'Z';
-    UA_String str = {((uintptr_t)pos - (uintptr_t)buffer)+1, (UA_Byte*)buffer};
+    UA_String str = {((uintptr_t)pos - (uintptr_t)buffer)+1, (UA_Byte*)buffer, false};
     return ENCODE_DIRECT_JSON(&str, String);
 }
 
@@ -1684,7 +1684,7 @@ DECODE_JSON(Guid) {
     GET_TOKEN;
 
     /* Use the existing parsing routine if available */
-    UA_String str = {tokenSize, (UA_Byte*)(uintptr_t)tokenData};
+    UA_String str = {tokenSize, (UA_Byte*)(uintptr_t)tokenData, false};
     ctx->index++;
     return UA_Guid_parse(dst, str);
 }
@@ -1886,7 +1886,7 @@ DECODE_JSON(NodeId) {
     /* Non-standard decoding of NodeIds from the string representation */
     if(currentTokenType(ctx) == CJ5_TOKEN_STRING) {
         GET_TOKEN;
-        UA_String str = {tokenSize, (UA_Byte*)(uintptr_t)tokenData};
+        UA_String str = {tokenSize, (UA_Byte*)(uintptr_t)tokenData, false};
         ctx->index++;
         return UA_NodeId_parse(dst, str);
     }
@@ -1965,7 +1965,7 @@ DECODE_JSON(ExpandedNodeId) {
     /* Non-standard decoding of ExpandedNodeIds from the string representation */
     if(currentTokenType(ctx) == CJ5_TOKEN_STRING) {
         GET_TOKEN;
-        UA_String str = {tokenSize, (UA_Byte*)(uintptr_t)tokenData};
+        UA_String str = {tokenSize, (UA_Byte*)(uintptr_t)tokenData, false};
         ctx->index++;
         return UA_ExpandedNodeId_parse(dst, str);
     }

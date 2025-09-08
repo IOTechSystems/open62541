@@ -530,7 +530,7 @@ findChildByBrowsename(UA_Server *server, UA_Session *session,
 }
 
 static const UA_ExpandedNodeId mandatoryId =
-    {{0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_MODELLINGRULE_MANDATORY}}, {0, NULL}, 0};
+    {{0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_MODELLINGRULE_MANDATORY}}, {0, NULL, false}, 0};
 
 static UA_Boolean
 isMandatoryChild(UA_Server *server, UA_Session *session,

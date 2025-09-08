@@ -380,8 +380,8 @@ ETH_connectionSocketCallback(UA_ConnectionManager *cm, UA_RegisteredFD *rfd,
     unsigned char sourceAddrBytes[18];
     setAddrString(destAddrBytes, destAddr);
     setAddrString(sourceAddrBytes, sourceAddr);
-    UA_String destAddrStr = {17, destAddrBytes};
-    UA_String sourceAddrStr = {17, sourceAddrBytes};
+    UA_String destAddrStr = {17, destAddrBytes, false};
+    UA_String sourceAddrStr = {17, sourceAddrBytes, false};
 
     size_t paramsSize = 2;
     UA_KeyValuePair params[6];

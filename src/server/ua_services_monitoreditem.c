@@ -341,7 +341,7 @@ checkEventFilterParam(UA_Server *server, UA_Session *session,
 #endif
 
 static const UA_String
-binaryEncoding = {sizeof("Default Binary") - 1, (UA_Byte *)"Default Binary"};
+binaryEncoding = UA_STRING_STATIC("Default Binary");
 
 /* Structure to pass additional arguments into the operation */
 struct createMonContext {

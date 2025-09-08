@@ -57,9 +57,9 @@ UA_SecureChannel_generateLocalKeys(const UA_SecureChannel *channel) {
 
     UA_StatusCode retval = UA_ByteString_allocBuffer(&buf, encrBS + signKL + encrKL);
     UA_CHECK_STATUS(retval, return retval);
-    UA_ByteString localSigningKey = {signKL, buf.data};
-    UA_ByteString localEncryptingKey = {encrKL, &buf.data[signKL]};
-    UA_ByteString localIv = {encrBS, &buf.data[signKL + encrKL]};
+    UA_ByteString localSigningKey = {signKL, buf.data, false};
+    UA_ByteString localEncryptingKey = {encrKL, &buf.data[signKL], false};
+    UA_ByteString localIv = {encrBS, &buf.data[signKL + encrKL], false};
 
     /* Generate key */
     retval = sm->generateKey(sp->policyContext, &channel->remoteNonce,
@@ -100,9 +100,9 @@ generateRemoteKeys(const UA_SecureChannel *channel) {
 
     UA_StatusCode retval = UA_ByteString_allocBuffer(&buf, encrBS + signKL + encrKL);
     UA_CHECK_STATUS(retval, return retval);
-    UA_ByteString remoteSigningKey = {signKL, buf.data};
-    UA_ByteString remoteEncryptingKey = {encrKL, &buf.data[signKL]};
-    UA_ByteString remoteIv = {encrBS, &buf.data[signKL + encrKL]};
+    UA_ByteString remoteSigningKey = {signKL, buf.data, false};
+    UA_ByteString remoteEncryptingKey = {encrKL, &buf.data[signKL], false};
+    UA_ByteString remoteIv = {encrBS, &buf.data[signKL + encrKL], false};
 
     /* Generate key */
     retval = sm->generateKey(sp->policyContext, &channel->localNonce,
@@ -425,8 +425,8 @@ verifySignature(const UA_SecureChannel *channel,
     UA_LOG_TRACE_CHANNEL(channel->securityPolicy->logger, channel,
                          "Verifying chunk signature");
     UA_CHECK(sigsize < chunk->length, return UA_STATUSCODE_BADSECURITYCHECKSFAILED);
-    const UA_ByteString content = {chunk->length - sigsize, chunk->data};
-    const UA_ByteString sig = {sigsize, chunk->data + chunk->length - sigsize};
+    const UA_ByteString content = {chunk->length - sigsize, chunk->data, false};
+    const UA_ByteString sig = {sigsize, chunk->data + chunk->length - sigsize, false};
     UA_StatusCode retval = cryptoModule->signatureAlgorithm.
         verify(channel->channelContext, &content, &sig);
     return retval;
@@ -443,7 +443,7 @@ decryptAndVerifyChunk(const UA_SecureChannel *channel,
     UA_StatusCode res = UA_STATUSCODE_GOOD;
     if(channel->securityMode == UA_MESSAGESECURITYMODE_SIGNANDENCRYPT ||
        messageType == UA_MESSAGETYPE_OPN) {
-        UA_ByteString cipher = {chunk->length - offset, chunk->data + offset};
+        UA_ByteString cipher = {chunk->length - offset, chunk->data + offset, false};
         res = cryptoModule->encryptionAlgorithm.decrypt(channel->channelContext, &cipher);
         UA_CHECK_STATUS(res, return res);
         chunk->length = cipher.length + offset;

@@ -39,11 +39,11 @@
 
 /* Global definition of NULL type instances. These are always zeroed out, as
  * mandated by the C/C++ standard for global values with no initializer. */
-const UA_String UA_STRING_NULL = {0, NULL};
-const UA_ByteString UA_BYTESTRING_NULL = {0, NULL};
+const UA_String UA_STRING_NULL = {0, NULL, false};
+const UA_ByteString UA_BYTESTRING_NULL = {0, NULL, false};
 const UA_Guid UA_GUID_NULL = {0, 0, 0, {0,0,0,0,0,0,0,0}};
 const UA_NodeId UA_NODEID_NULL = {0, UA_NODEIDTYPE_NUMERIC, {0}};
-const UA_ExpandedNodeId UA_EXPANDEDNODEID_NULL = {{0, UA_NODEIDTYPE_NUMERIC, {0}}, {0, NULL}, 0};
+const UA_ExpandedNodeId UA_EXPANDEDNODEID_NULL = {{0, UA_NODEIDTYPE_NUMERIC, {0}}, {0, NULL, false}, 0};
 
 typedef UA_StatusCode
 (*UA_copySignature)(const void *src, void *dst, const UA_DataType *type);
@@ -124,6 +124,7 @@ UA_String_fromFormat (char *format, ...)
 {
     UA_String s;
     s.data = NULL;
+    s.isRef = false;
     va_list args;
     va_list args_copy;
 
@@ -141,7 +142,7 @@ UA_String_fromFormat (char *format, ...)
 
 UA_String
 UA_String_fromChars(const char *src) {
-    UA_String s; s.length = 0; s.data = NULL;
+    UA_String s; s.length = 0; s.data = NULL; s.isRef = false;
     if(!src)
         return s;
     s.length = strlen(src);
@@ -192,6 +193,12 @@ UA_String_equal_ignorecase(const UA_String *s1, const UA_String *s2) {
 
 static UA_StatusCode
 String_copy(UA_String const *src, UA_String *dst, const UA_DataType *_) {
+
+    if (src->isRef) {
+        *dst = *src;
+        return UA_STATUSCODE_GOOD;
+    }
+
     UA_StatusCode res =
         UA_Array_copy(src->data, src->length, (void**)&dst->data,
                       &UA_TYPES[UA_TYPES_BYTE]);
@@ -202,6 +209,7 @@ String_copy(UA_String const *src, UA_String *dst, const UA_DataType *_) {
 
 static void
 String_clear(UA_String *s, const UA_DataType *_) {
+    if (s->isRef) return;
     UA_Array_delete(s->data, s->length, &UA_TYPES[UA_TYPES_BYTE]);
 }
 

@@ -339,16 +339,16 @@ const UA_NodeId hierarchicalReferences = {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_HI
 
 const UA_ObjectAttributes UA_ObjectAttributes_default = {
     0,                      /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}}, /* displayName */
-    {{0, NULL}, {0, NULL}}, /* description */
+    {{0, NULL, false}, {0, NULL, false}}, /* displayName */
+    {{0, NULL, false}, {0, NULL, false}}, /* description */
     0, 0,                   /* writeMask (userWriteMask) */
     0                       /* eventNotifier */
 };
 
 const UA_VariableAttributes UA_VariableAttributes_default = {
     0,                           /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}},      /* displayName */
-    {{0, NULL}, {0, NULL}},      /* description */
+    {{0, NULL, false}, {0, NULL, false}},      /* displayName */
+    {{0, NULL, false}, {0, NULL, false}},      /* description */
     0, 0,                        /* writeMask (userWriteMask) */
     {NULL, UA_VARIANT_DATA,
      0, NULL, 0, NULL},          /* value */
@@ -366,24 +366,24 @@ const UA_VariableAttributes UA_VariableAttributes_default = {
 
 const UA_MethodAttributes UA_MethodAttributes_default = {
     0,                      /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}}, /* displayName */
-    {{0, NULL}, {0, NULL}}, /* description */
+    {{0, NULL, false}, {0, NULL, false}}, /* displayName */
+    {{0, NULL, false}, {0, NULL, false}}, /* description */
     0, 0,                   /* writeMask (userWriteMask) */
     true, true              /* executable (userExecutable) */
 };
 
 const UA_ObjectTypeAttributes UA_ObjectTypeAttributes_default = {
     0,                      /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}}, /* displayName */
-    {{0, NULL}, {0, NULL}}, /* description */
+    {{0, NULL, false}, {0, NULL, false}}, /* displayName */
+    {{0, NULL, false}, {0, NULL, false}}, /* description */
     0, 0,                   /* writeMask (userWriteMask) */
     false                   /* isAbstract */
 };
 
 const UA_VariableTypeAttributes UA_VariableTypeAttributes_default = {
     0,                           /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}},      /* displayName */
-    {{0, NULL}, {0, NULL}},      /* description */
+    {{0, NULL, false}, {0, NULL, false}},      /* displayName */
+    {{0, NULL, false}, {0, NULL, false}},      /* description */
     0, 0,                        /* writeMask (userWriteMask) */
     {NULL, UA_VARIANT_DATA,
      0, NULL, 0, NULL},          /* value */
@@ -396,26 +396,26 @@ const UA_VariableTypeAttributes UA_VariableTypeAttributes_default = {
 
 const UA_ReferenceTypeAttributes UA_ReferenceTypeAttributes_default = {
     0,                      /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}}, /* displayName */
-    {{0, NULL}, {0, NULL}}, /* description */
+    {{0, NULL, false}, {0, NULL, false}}, /* displayName */
+    {{0, NULL, false}, {0, NULL, false}}, /* description */
     0, 0,                   /* writeMask (userWriteMask) */
     false,                  /* isAbstract */
     false,                  /* symmetric */
-    {{0, NULL}, {0, NULL}}  /* inverseName */
+    {{0, NULL, false}, {0, NULL, false}}  /* inverseName */
 };
 
 const UA_DataTypeAttributes UA_DataTypeAttributes_default = {
     0,                      /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}}, /* displayName */
-    {{0, NULL}, {0, NULL}}, /* description */
+    {{0, NULL, false}, {0, NULL, false}}, /* displayName */
+    {{0, NULL, false}, {0, NULL, false}}, /* description */
     0, 0,                   /* writeMask (userWriteMask) */
     false                   /* isAbstract */
 };
 
 const UA_ViewAttributes UA_ViewAttributes_default = {
     0,                      /* specifiedAttributes */
-    {{0, NULL}, {0, NULL}}, /* displayName */
-    {{0, NULL}, {0, NULL}}, /* description */
+    {{0, NULL, false}, {0, NULL, false}}, /* displayName */
+    {{0, NULL, false}, {0, NULL, false}}, /* description */
     0, 0,                   /* writeMask (userWriteMask) */
     false,                  /* containsNoLoops */
     0                       /* eventNotifier */

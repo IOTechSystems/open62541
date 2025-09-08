@@ -360,7 +360,7 @@ static void addPublisher2(UA_Server *server, UA_NodeId publishedDataSetId) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), stringAttr, NULL, &ds2StringId);
 
     UA_Byte data[] = { 0x00 };
-    UA_ByteString byteStringVal = { 1, data };
+    UA_ByteString byteStringVal = { 1, data, false};
 
     UA_NodeId_init(&ds2ByteStringId);
     UA_VariableAttributes byteStringAttr = UA_VariableAttributes_default;

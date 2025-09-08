@@ -24,7 +24,7 @@
 #define UA_BITMASK_CHUNKTYPE 0xff000000u
 
 const UA_String UA_SECURITY_POLICY_NONE_URI =
-    {47, (UA_Byte *)"http://opcfoundation.org/UA/SecurityPolicy#None"};
+    {47, (UA_Byte *)"http://opcfoundation.org/UA/SecurityPolicy#None", false};
 
 void
 UA_SecureChannel_init(UA_SecureChannel *channel) {
@@ -52,7 +52,7 @@ UA_SecureChannel_setSecurityPolicy(UA_SecureChannel *channel,
 
     /* Compute the certificate thumbprint */
     UA_ByteString remoteCertificateThumbprint =
-        {20, channel->remoteCertificateThumbprint};
+        {20, channel->remoteCertificateThumbprint, false};
     res = securityPolicy->asymmetricModule.
         makeCertificateThumbprint(securityPolicy, &channel->remoteCertificate,
                                   &remoteCertificateThumbprint);

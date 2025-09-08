@@ -47,7 +47,7 @@ def splitStringLiterals(value, splitLength=500):
 
 def generateStringCode(value, alloc=False):
     value = makeCLiteral(value)
-    return u"UA_STRING{}({})".format("_ALLOC" if alloc else "", splitStringLiterals(value))
+    return u"UA_STRING{}({})".format("_ALLOC" if alloc else "_REF", splitStringLiterals(value))
 
 def generateXmlElementCode(value, alloc=False):
     value = makeCLiteral(value)
@@ -77,12 +77,12 @@ def generateLocalizedTextCode(value, alloc=False):
     if value.text is None:
         value.text = ""
     vt = makeCLiteral(value.text)
-    return u"UA_LOCALIZEDTEXT{}(\"{}\", {})".format("_ALLOC" if alloc else "", '' if value.locale is None else value.locale,
+    return u"UA_LOCALIZEDTEXT{}(\"{}\", {})".format("_ALLOC" if alloc else "_REF", '' if value.locale is None else value.locale,
                                                    splitStringLiterals(vt))
 
 def generateQualifiedNameCode(value, alloc=False,):
     vn = makeCLiteral(value.name)
-    return u"UA_QUALIFIEDNAME{}(ns[{}], {})".format("_ALLOC" if alloc else "",
+    return u"UA_QUALIFIEDNAME{}(ns[{}], {})".format("_ALLOC" if alloc else "_REF",
                                                      str(value.ns), splitStringLiterals(vn))
 
 def generateGuidCode(value):

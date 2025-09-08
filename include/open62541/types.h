@@ -191,6 +191,7 @@ UA_INLINABLE(UA_Boolean
 typedef struct {
     size_t length; /* The length of the string */
     UA_Byte *data; /* The content (not null-terminated) */
+    UA_Boolean isRef;
 } UA_String;
 
 /* Copies the content on the heap. Returns a null-string when alloc fails */
@@ -216,13 +217,21 @@ UA_INLINABLE(UA_String
     if(!chars)
         return s;
     s.length = strlen(chars); s.data = (UA_Byte*)chars;
+    s.isRef = false;
+    return s;
+})
+
+UA_INLINABLE(UA_String
+             UA_STRING_REF(char *chars), {
+    UA_String s = UA_STRING(chars);
+    s.isRef = true;
     return s;
 })
 
 #define UA_STRING_ALLOC(CHARS) UA_String_fromChars(CHARS)
 
 /* Define strings at compile time (in ROM) */
-#define UA_STRING_STATIC(CHARS) {sizeof(CHARS)-1, (UA_Byte*)CHARS}
+#define UA_STRING_STATIC(CHARS) { sizeof(CHARS)-1, (UA_Byte*)CHARS, false }
 
 /**
  * .. _datetime:
@@ -627,6 +636,14 @@ UA_INLINABLE(UA_QualifiedName
 })
 
 UA_INLINABLE(UA_QualifiedName
+             UA_QUALIFIEDNAME_REF(UA_UInt16 nsIndex, char *chars), {
+    UA_QualifiedName qn;
+    qn.namespaceIndex = nsIndex;
+    qn.name = UA_STRING_REF(chars);
+    return qn;
+})
+
+UA_INLINABLE(UA_QualifiedName
              UA_QUALIFIEDNAME_ALLOC(UA_UInt16 nsIndex, const char *chars), {
     UA_QualifiedName qn;
     qn.namespaceIndex = nsIndex;
@@ -652,12 +669,21 @@ UA_INLINABLE(UA_LocalizedText
 })
 
 UA_INLINABLE(UA_LocalizedText
+             UA_LOCALIZEDTEXT_REF(char *locale, char *text), {
+    UA_LocalizedText lt;
+    lt.locale = UA_STRING_REF(locale);
+    lt.text = UA_STRING_REF(text);
+    return lt;
+})
+
+UA_INLINABLE(UA_LocalizedText
              UA_LOCALIZEDTEXT_ALLOC(const char *locale, const char *text), {
     UA_LocalizedText lt;
     lt.locale = UA_STRING_ALLOC(locale);
     lt.text = UA_STRING_ALLOC(text);
     return lt;
 })
+
 
 /**
  * .. _numericrange:

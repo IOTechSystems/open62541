@@ -62,7 +62,7 @@ def generateReferenceTypeNodeCode(node):
     if node.symmetric:
         code.append("attr.symmetric  = true;")
     if node.inverseName != "":
-        code.append("attr.inverseName  = UA_LOCALIZEDTEXT(\"\", \"%s\");" % \
+        code.append("attr.inverseName  = UA_LOCALIZEDTEXT_REF(\"\", \"%s\");" % \
                     node.inverseName)
     return code
 

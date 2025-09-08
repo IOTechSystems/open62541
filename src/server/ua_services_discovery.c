@@ -304,7 +304,7 @@ securityPolicyUriPostfix(const UA_String uri) {
     for(UA_Byte *b = uri.data + uri.length - 1; b >= uri.data; b--) {
         if(*b != '#')
             continue;
-        UA_String postfix = {uri.length - (size_t)(b - uri.data), b};
+        UA_String postfix = {uri.length - (size_t)(b - uri.data), b, false};
         return postfix;
     }
     return uri;
