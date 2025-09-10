@@ -193,6 +193,59 @@ START_TEST(createDelete) {
     }
 } END_TEST
 
+START_TEST(memtest) {
+    UA_StatusCode retval;
+
+    UA_ServerConfig *config = UA_Server_getConfig(acserver);
+    UA_ServerConfig_setBasics_withPort (config, 4840);
+
+
+
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Condition createDelete"),
+        .parentNodeId = UA_NODEID_NUMERIC (0, UA_NS0ID_OBJECTSFOLDER),
+        .hierarchialReferenceType = UA_NODEID_NUMERIC (0, UA_NS0ID_HASCOMPONENT)
+    };
+
+    UA_LevelAlarmProperties props = {
+        .alarmConditionProperties = {
+            .acknowledgeableConditionProperties = {
+                .confirmable = true
+            },
+            .isSuppressible = true,
+            .isLatching = true,
+            .isServiceable = true,
+            .isShelvable = true,
+        },
+        .hasHighHighLimit = true,
+        .highHighLimit = 1000.0f,
+        .hasHighLimit = true,
+        .highLimit = 800.0f,
+        .hasLowLimit = true,
+        .lowLimit = 400.0f,
+        .hasLowLowLimit = true,
+        .lowLowLimit = 200.0f,
+    };
+
+    // Loop to increase the chance of capturing dead pointers
+    for(UA_UInt16 i = 0; i < 1000; ++i)
+    {
+        UA_NodeId conditionInstance = UA_NODEID_NULL;
+        retval = UA_Server_createExclusiveLevelAlarm (
+            acserver,
+            UA_NODEID_NULL,
+            &conditionProperties,
+            &props,
+            &conditionInstance
+        );
+        ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+        ck_assert_msg(!UA_NodeId_isNull(&conditionInstance), "ConditionId is null");
+    }
+    UA_Server_runUntilInterrupt(acserver);
+    uint32_t a = 0;
+} END_TEST
+
 typedef struct
 {
     UA_Boolean acked;
@@ -1204,6 +1257,7 @@ int main(void) {
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     TCase *tc = tcase_create("Alarms and Conditions");
+    //tcase_add_test(tc, memtest);
     tcase_add_test(tc, createDelete);
     tcase_add_test(tc, createMultiple);
     tcase_add_test(tc, conditionSequence1);

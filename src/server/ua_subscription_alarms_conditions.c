@@ -650,13 +650,13 @@ updateShelvedStateMachineState (UA_Server *server, const UA_NodeId *shelvedState
     UA_Variant duration_val;
     UA_Duration tmp = duration ? *duration : 0;
     UA_Variant_setScalar(&duration_val, &tmp, &UA_TYPES[UA_TYPES_DURATION]);
-    UA_QualifiedName path [] = {UA_QUALIFIEDNAME (0, "UnshelveTime")};
+    UA_QualifiedName path [] = {UA_QUALIFIEDNAME_REF (0, "UnshelveTime")};
     UA_StatusCode retval = writeValueSimplifiedBrowsePath (server, *shelvedStateId, duration_val, 1, path);
     CONDITION_ASSERT_RETURN_RETVAL (retval, "Set UnshelveTime value failed",);
 
     UA_NodeId currentStateId;
     UA_Variant value;
-    retval = getNodeIdWithBrowseName(server, shelvedStateId, UA_QUALIFIEDNAME(0, FIELD_CURRENT_STATE), &currentStateId);
+    retval = getNodeIdWithBrowseName(server, shelvedStateId, UA_QUALIFIEDNAME_REF(0, FIELD_CURRENT_STATE), &currentStateId);
     CONDITION_ASSERT_GOTOLABEL(retval, "Get CurrentState Id failed", done);
 
     UA_LocalizedText stateText = UA_LOCALIZEDTEXT(LOCALE, (char *) (uintptr_t) currentStateText);
@@ -706,8 +706,8 @@ static UA_StatusCode
 getShelvedStateMachineStateId (UA_Server *server, const UA_NodeId *shelvedStateId, UA_NodeId *shelvedId)
 {
     UA_QualifiedName path[] = {
-        UA_QUALIFIEDNAME(0, FIELD_CURRENT_STATE),
-        UA_QUALIFIEDNAME(0, FIELD_ID)
+        UA_QUALIFIEDNAME_REF(0, FIELD_CURRENT_STATE),
+        UA_QUALIFIEDNAME_REF(0, FIELD_ID)
     };
     UA_Variant val;
     UA_Variant_init(&val);
@@ -830,9 +830,9 @@ static UA_StatusCode
 setRefreshMethodEventFields(UA_Server *server, const UA_NodeId *refreshEventNodId) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
-    UA_QualifiedName fieldSeverity = UA_QUALIFIEDNAME(0, CONDITION_FIELD_SEVERITY);
-    UA_QualifiedName fieldSourceName = UA_QUALIFIEDNAME(0, CONDITION_FIELD_SOURCENAME);
-    UA_QualifiedName fieldReceiveTime = UA_QUALIFIEDNAME(0, CONDITION_FIELD_RECEIVETIME);
+    UA_QualifiedName fieldSeverity = UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_SEVERITY);
+    UA_QualifiedName fieldSourceName = UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_SOURCENAME);
+    UA_QualifiedName fieldReceiveTime = UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_RECEIVETIME);
     UA_String sourceNameString = UA_STRING("Server"); //server is the source of Refresh Events
     UA_UInt16 severityValue = REFRESHEVENT_SEVERITY_DEFAULT;
     UA_ByteString eventId  = UA_BYTESTRING_NULL;
@@ -954,7 +954,7 @@ UA_ConditionBranch_State_updateSeverity(UA_ConditionBranch *branch, UA_Server *s
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Read current condition Severity failed",);
     UA_Variant value;
     UA_Variant_setScalar(&value, &currentSeverity, &UA_TYPES[UA_TYPES_UINT16]);
-    retval = setConditionField (server, branch->id, &value, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LASTSEVERITY));
+    retval = setConditionField (server, branch->id, &value, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_LASTSEVERITY));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "set Condition LastSeverity failed",);
     return UA_ConditionBranch_State_setSeverity (branch, server, severity);
 }
@@ -995,7 +995,7 @@ UA_ConditionBranch_State_setMessage(UA_ConditionBranch *branch, UA_Server *serve
 static inline UA_StatusCode setAcked (UA_Server *server, UA_NodeId id, UA_Boolean acked)
 {
     return setTwoStateVariable (
-        server, &id, fieldAckedStateQN, acked, UA_LOCALIZEDTEXT(LOCALE, acked ? ACKED_TEXT : UNACKED_TEXT)
+        server, &id, fieldAckedStateQN, acked, UA_LOCALIZEDTEXT_REF(LOCALE, acked ? ACKED_TEXT : UNACKED_TEXT)
     );
 }
 
@@ -1003,7 +1003,7 @@ static inline UA_StatusCode setConfirmed (UA_Server *server, UA_NodeId id, UA_Bo
 {
     return setOptionalTwoStateVariable (
         server, &id, fieldConfirmedStateQN, confirmed,
-        UA_LOCALIZEDTEXT(LOCALE, confirmed ? CONFIRMED_TEXT: UNCONFIRMED_TEXT)
+        UA_LOCALIZEDTEXT_REF(LOCALE, confirmed ? CONFIRMED_TEXT: UNCONFIRMED_TEXT)
     );
 }
 
@@ -1098,7 +1098,7 @@ UA_Condition_State_setEnabledState(UA_Condition *condition, UA_Server *server, U
 {
     return setTwoStateVariable (
         server, &condition->mainBranch->id, fieldEnabledStateQN, enabled,
-        UA_LOCALIZEDTEXT (LOCALE, enabled ? ENABLED_TEXT : DISABLED_TEXT)
+        UA_LOCALIZEDTEXT_REF (LOCALE, enabled ? ENABLED_TEXT : DISABLED_TEXT)
     );
 }
 
@@ -1107,7 +1107,7 @@ Condition_State_setActiveState (UA_Server *server, const UA_NodeId * condition, 
 {
     return setTwoStateVariable (
         server, condition, fieldActiveStateQN, active,
-        UA_LOCALIZEDTEXT (LOCALE, active ? ACTIVE_TEXT : INACTIVE_TEXT)
+        UA_LOCALIZEDTEXT_REF (LOCALE, active ? ACTIVE_TEXT : INACTIVE_TEXT)
     );
 }
 
@@ -1130,7 +1130,7 @@ UA_Condition_State_setLatchedState (UA_Condition *condition, UA_Server *server, 
 {
     return setOptionalTwoStateVariable (
         server, &condition->mainBranch->id, fieldLatchedStateQN, latched,
-        UA_LOCALIZEDTEXT (LOCALE, latched ? LATCHED_TEXT: NOT_LATCHED_TEXT)
+        UA_LOCALIZEDTEXT_REF (LOCALE, latched ? LATCHED_TEXT: NOT_LATCHED_TEXT)
     );
 }
 
@@ -1139,7 +1139,7 @@ UA_Condition_State_setSuppressedState (UA_Condition *condition, UA_Server *serve
 {
     return setOptionalTwoStateVariable (
         server, &condition->mainBranch->id, fieldSuppressedStateQN, suppressed,
-        UA_LOCALIZEDTEXT (LOCALE, suppressed ? SUPPRESSED_TEXT : NOT_SUPPRESSED_TEXT)
+        UA_LOCALIZEDTEXT_REF (LOCALE, suppressed ? SUPPRESSED_TEXT : NOT_SUPPRESSED_TEXT)
     );
 }
 
@@ -1148,7 +1148,7 @@ UA_Condition_State_setOutOfServiceState (UA_Condition *condition, UA_Server *ser
 {
     return setOptionalTwoStateVariable (
         server, &condition->mainBranch->id, fieldOutOfServiceStateQN, outOfService,
-        UA_LOCALIZEDTEXT (LOCALE, outOfService ? OUT_OF_SERVICE_TEXT : IN_SERVICE_TEXT)
+        UA_LOCALIZEDTEXT_REF (LOCALE, outOfService ? OUT_OF_SERVICE_TEXT : IN_SERVICE_TEXT)
     );
 }
 
@@ -1411,7 +1411,7 @@ conditionEnable (UA_Server *server, UA_Condition *condition, UA_Boolean enable, 
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     UA_ConditionEventInfo info = {
-        .message =  UA_LOCALIZEDTEXT(LOCALE, enable ? ENABLED_MESSAGE : DISABLED_MESSAGE)
+        .message =  UA_LOCALIZEDTEXT_REF(LOCALE, enable ? ENABLED_MESSAGE : DISABLED_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     /**
@@ -1518,7 +1518,7 @@ conditionBranch_addCommentAndEvent (UA_Server *server, UA_ConditionBranch *branc
     UA_StatusCode ret = conditionBranch_addComment(server, branch, comment);
     if (ret != UA_STATUSCODE_GOOD) return ret;
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, COMMENT_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, COMMENT_MESSAGE)
     };
     return UA_ConditionBranch_triggerEvent (branch, server, &info);
 }
@@ -1581,7 +1581,7 @@ conditionBranchAcknowledge(UA_Server *server, UA_ConditionBranch *branch, const 
     UA_ConditionBranch_State_setAckedState(branch, server, true);
     if (comment) conditionBranch_addComment (server, branch, comment);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, ACKED_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, ACKED_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     return UA_ConditionBranch_notifyNewBranchState(branch, server, eventInfo);
@@ -1615,7 +1615,7 @@ conditionBranchConfirm(UA_Server *server, UA_ConditionBranch *branch, const UA_L
     UA_ConditionBranch_State_setConfirmedState(branch, server, true);
     if (comment) conditionBranch_addComment (server, branch, comment);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, CONFIRMED_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     return UA_ConditionBranch_notifyNewBranchState(branch, server, eventInfo);
@@ -1649,7 +1649,7 @@ condition_reset (UA_Server *server, UA_Condition *condition, const UA_LocalizedT
     UA_Condition_State_setLatchedState(condition, server, false);
     UA_ConditionBranch_State_setRetain(condition->mainBranch, server, false);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, RESET_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, RESET_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
@@ -1677,7 +1677,7 @@ condition_suppress (UA_Server *server, UA_Condition *condition, const UA_Localiz
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_Condition_State_setSuppressedState (condition, server, true);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, SUPPRESSED_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, SUPPRESSED_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     UA_Condition_State_updateSuppressedOrShelved (condition, server);
@@ -1691,7 +1691,7 @@ condition_unsuppress (UA_Server *server, UA_Condition *condition, const UA_Local
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_Condition_State_setSuppressedState (condition, server, false);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, UNSUPPRESSED_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, UNSUPPRESSED_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     UA_Condition_State_updateSuppressedOrShelved (condition, server);
@@ -1735,7 +1735,7 @@ condition_removeFromService (UA_Server *server, UA_Condition *condition, const U
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_Condition_State_setOutOfServiceState (condition, server, true);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, REMOVEDFROMSRVICE_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, REMOVEDFROMSRVICE_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     UA_Condition_State_updateSuppressedOrShelved (condition, server);
@@ -1749,7 +1749,7 @@ condition_placeInService (UA_Server *server, UA_Condition *condition, const UA_L
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_Condition_State_setOutOfServiceState (condition, server, false);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, PLACEDINSERVICE_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, PLACEDINSERVICE_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     UA_Condition_State_updateSuppressedOrShelved (condition, server);
@@ -1804,7 +1804,7 @@ condition_unshelve (UA_Server *server, UA_Condition *condition, const UA_Localiz
     }
     condition_clearShelve(server, condition);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, UNSHELVED_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, UNSHELVED_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
@@ -1817,7 +1817,7 @@ static void onShelvedTimeExpireCallback (UA_Server *server, void *data)
     lockServer(server);
     UA_Condition_State_setShelvingStateUnshelved(condition, server);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, SHELVEDTIMEEXPIRED_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, SHELVEDTIMEEXPIRED_MESSAGE)
     };
     UA_ConditionBranch_triggerEvent(condition->mainBranch, server, &info);
     unlockServer(server);
@@ -1850,7 +1850,7 @@ condition_timedShelve (UA_Server *server, UA_Condition *condition,
     status = createUnshelveTimedCallback(server, condition, shelvingTime);
     if (status != UA_STATUSCODE_GOOD) return status;
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, TIMEDSHELVE_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, TIMEDSHELVE_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
@@ -1879,7 +1879,7 @@ condition_oneShotShelve (UA_Server *server, UA_Condition *condition, const UA_Lo
 
     if (status != UA_STATUSCODE_GOOD) return status;
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, ONESHOTSHELVE_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, ONESHOTSHELVE_MESSAGE)
     };
     eventInfo = eventInfo ? eventInfo : &info;
     if (comment) conditionBranch_addComment(server, condition->mainBranch, comment);
@@ -2086,7 +2086,7 @@ static UA_StatusCode setConditionProperties (
     UA_Variant value;
     UA_Variant_setScalar(&value, (void*)(uintptr_t) conditionType, &UA_TYPES[UA_TYPES_NODEID]);
     UA_StatusCode retval = setConditionField(server, *conditionId, &value,
-                                             UA_QUALIFIEDNAME(0,CONDITION_FIELD_EVENTTYPE));
+                                             UA_QUALIFIEDNAME_REF(0,CONDITION_FIELD_EVENTTYPE));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Set EventType Field failed",);
 
     if (!UA_NodeId_isNull(&properties->sourceNode))
@@ -2114,7 +2114,7 @@ static UA_StatusCode setConditionProperties (
     }
 
     /* Set EnabledState */
-    retval = setTwoStateVariable (server, conditionId, fieldEnabledStateQN, false, UA_LOCALIZEDTEXT(LOCALE, DISABLED_TEXT));
+    retval = setTwoStateVariable (server, conditionId, fieldEnabledStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE, DISABLED_TEXT));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Enabled state failed",);
     return retval;
 }
@@ -2340,7 +2340,7 @@ static UA_StatusCode UA_ConditionBranch_createBranch (UA_ConditionBranch *branch
     conditionType = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
 
     UA_ObjectAttributes oa = UA_ObjectAttributes_default;
-    oa.displayName = UA_LOCALIZEDTEXT("en", "ConditionBranch");
+    oa.displayName = UA_LOCALIZEDTEXT_REF("en", "ConditionBranch");
     const UA_QualifiedName qn = STATIC_QN("ConditionBranch");
     UA_NodeId branchId;
     UA_StatusCode retval = addNode_begin (server, UA_NODECLASS_OBJECT, UA_NODEID_NULL,
@@ -2358,7 +2358,7 @@ static UA_StatusCode UA_ConditionBranch_createBranch (UA_ConditionBranch *branch
     UA_Variant value;
     UA_Variant_setScalar(&value, (void*)(uintptr_t) &branchId, &UA_TYPES[UA_TYPES_NODEID]);
     retval = setConditionField(server, branchId, &value,
-                               UA_QUALIFIEDNAME(0,CONDITION_FIELD_BRANCHID));
+                               UA_QUALIFIEDNAME_REF(0,CONDITION_FIELD_BRANCHID));
     CONDITION_ASSERT_GOTOLABEL(retval, "Set BranchId Field failed", fail);
 
     retval = newConditionBranchEntry (server, &branchId, &branch->eventId, branch->condition, false);
@@ -2597,7 +2597,7 @@ static void reAlarmCallback (UA_Server *server, void *data)
     condition->reAlarmCallbackId = 0;
     Condition_State_setReAlarmRepeatCount (server, &condition->mainBranch->id, condition->reAlarmCount);
     UA_ConditionEventInfo info = {
-        .message = UA_LOCALIZEDTEXT(LOCALE, REALARM_MESSAGE)
+        .message = UA_LOCALIZEDTEXT_REF(LOCALE, REALARM_MESSAGE)
     };
     alarmActivate(server, condition, &info);
     unlockServer(server);
@@ -3285,7 +3285,7 @@ setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditio
                                               const UA_AcknowledgeableConditionProperties *properties)
 {
     UA_NodeId acknowledgeableConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE);
-    UA_StatusCode retval = setTwoStateVariable (server, condition, fieldAckedStateQN, true, UA_LOCALIZEDTEXT(LOCALE,ACKED_TEXT));
+    UA_StatusCode retval = setTwoStateVariable (server, condition, fieldAckedStateQN, true, UA_LOCALIZEDTEXT_REF(LOCALE,ACKED_TEXT));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Acked state failed",);
     /* add optional field ConfirmedState*/
     if (properties->confirmable)
@@ -3294,7 +3294,7 @@ setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditio
                                   fieldConfirmedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding ConfirmedState optional Field failed",);
 
-        retval = setTwoStateVariable (server, condition, fieldConfirmedStateQN, true, UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_TEXT));
+        retval = setTwoStateVariable (server, condition, fieldConfirmedStateQN, true, UA_LOCALIZEDTEXT_REF(LOCALE, CONFIRMED_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Confirmed state failed",);
 
         /* add reference from Condition to Confirm Method */
@@ -3328,11 +3328,11 @@ setupAlarmConditionShelvingState(UA_Server *server, const UA_NodeId *condition)
     CONDITION_ASSERT_GOTOLABEL(retval, "Adding ShelvingState optional Field failed",done);
 
     UA_NodeId shelvedStateType = UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE);
-    retval = addOptionalField(server, shelvingStateId, shelvedStateType, UA_QUALIFIEDNAME(0, SHELVEDSTATE_METHOD_TIMEDSHELVE2), NULL);
+    retval = addOptionalField(server, shelvingStateId, shelvedStateType, UA_QUALIFIEDNAME_REF(0, SHELVEDSTATE_METHOD_TIMEDSHELVE2), NULL);
     CONDITION_ASSERT_GOTOLABEL(retval, "Adding ShelvingState optional TimedShelve2 Method failed",done);
-    retval = addOptionalField(server, shelvingStateId, shelvedStateType, UA_QUALIFIEDNAME(0, SHELVEDSTATE_METHOD_ONESHOTSHELVE2), NULL);
+    retval = addOptionalField(server, shelvingStateId, shelvedStateType, UA_QUALIFIEDNAME_REF(0, SHELVEDSTATE_METHOD_ONESHOTSHELVE2), NULL);
     CONDITION_ASSERT_GOTOLABEL(retval, "Adding ShelvingState optional OneShotShelve2 Method failed",done);
-    retval = addOptionalField(server, shelvingStateId, shelvedStateType, UA_QUALIFIEDNAME(0, SHELVEDSTATE_METHOD_UNSHELVE2), NULL);
+    retval = addOptionalField(server, shelvingStateId, shelvedStateType, UA_QUALIFIEDNAME_REF(0, SHELVEDSTATE_METHOD_UNSHELVE2), NULL);
     CONDITION_ASSERT_GOTOLABEL(retval, "Adding ShelvingState optional Unshelve2 Method failed", done);
 
     retval = setShelvedStateMachineUnshelved(server, &shelvingStateId);
@@ -3352,7 +3352,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
 
     UA_NodeId alarmConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE);
     UA_Variant value;
-    setTwoStateVariable (server, condition, fieldActiveStateQN, false, UA_LOCALIZEDTEXT(LOCALE, INACTIVE_TEXT));
+    setTwoStateVariable (server, condition, fieldActiveStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE, INACTIVE_TEXT));
     if (!UA_NodeId_isNull(&properties->inputNode))
     {
         UA_Variant_setScalar(&value,(void *)(uintptr_t) &properties->inputNode, &UA_TYPES[UA_TYPES_NODEID]);
@@ -3365,7 +3365,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldLatchedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding LatchedState optional Field failed",);
-        setTwoStateVariable (server, condition, fieldLatchedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_LATCHED_TEXT));
+        setTwoStateVariable (server, condition, fieldLatchedStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE, NOT_LATCHED_TEXT));
 
         /* add reference from Condition to Reset Method */
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
@@ -3386,7 +3386,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldSuppressedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SuppressedState optional Field failed",);
-        setTwoStateVariable(server, condition, fieldSuppressedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_SUPPRESSED_TEXT));
+        setTwoStateVariable(server, condition, fieldSuppressedStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE, NOT_SUPPRESSED_TEXT));
 
         /* add reference from Condition to Suppress Method */
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
@@ -3419,7 +3419,7 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldOutOfServiceStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OutOfServiceState optional Field failed",);
-        setTwoStateVariable(server, condition, fieldOutOfServiceStateQN, false, UA_LOCALIZEDTEXT(LOCALE,IN_SERVICE_TEXT));
+        setTwoStateVariable(server, condition, fieldOutOfServiceStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE,IN_SERVICE_TEXT));
 
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
         UA_NodeId place = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE);
@@ -3580,24 +3580,24 @@ setupCertificateExpirationAlarmNodes (UA_Server *server, const UA_NodeId *condit
     {
         UA_NodeId certificateConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CERTIFICATEEXPIRATIONALARMTYPE);
         retval = addOptionalField(server, *condition, certificateConditionTypeId,
-                                  UA_QUALIFIEDNAME(0,CONDITION_FIELD_EXPIRATION_LIMIT), NULL);
+                                  UA_QUALIFIEDNAME_REF(0,CONDITION_FIELD_EXPIRATION_LIMIT), NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding Expiration Limit optional field failed",);
 
         /* Set the default value for the Expiration limit property */
-        retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_EXPIRATION_LIMIT),
+        retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_EXPIRATION_LIMIT),
                                               &properties->expirationLimit, &UA_TYPES[UA_TYPES_DURATION]);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting Expiration Limit value failed",);
     }
 
-    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_CERTIFICATE),
+    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_CERTIFICATE),
                                          &properties->certificate, &UA_TYPES[UA_TYPES_BYTESTRING]);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting Certificate value failed",);
 
-    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_CERTIFICATE_TYPE),
+    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_CERTIFICATE_TYPE),
                                          &properties->certificateType, &UA_TYPES[UA_TYPES_NODEID]);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting CertificateType value failed",);
 
-    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_EXPIRATION_DATE),
+    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_EXPIRATION_DATE),
                                          &properties->expirationDate, &UA_TYPES[UA_TYPES_DATETIME]);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting ExpirationDate value failed",);
 
@@ -3808,7 +3808,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowLowStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional LowLowState Field failed",);
-        setTwoStateVariable(server, condition, fieldLowLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOWLOW_TEXT));
+        setTwoStateVariable(server, condition, fieldLowLowStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE,INACTIVE_LOWLOW_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowState failed",);
     }
 
@@ -3816,7 +3816,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional LowState Field failed",);
-        setTwoStateVariable(server, condition, fieldLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOW_TEXT));
+        setTwoStateVariable(server, condition, fieldLowStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE,INACTIVE_LOW_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowState failed",);
     }
 
@@ -3824,7 +3824,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldHighStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional HighState Field failed",);
-        setTwoStateVariable(server, condition, fieldHighStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_HIGH_TEXT));
+        setTwoStateVariable(server, condition, fieldHighStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE,INACTIVE_HIGH_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighState failed",);
 
     }
@@ -3833,7 +3833,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     {
         retval = addOptionalField(server, *condition, typeId, fieldHighHighStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional HighHighState Field failed",);
-        setTwoStateVariable(server, condition, fieldHighHighStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_HIGHHIGH_TEXT));
+        setTwoStateVariable(server, condition, fieldHighHighStateQN, false, UA_LOCALIZEDTEXT_REF(LOCALE,INACTIVE_HIGHHIGH_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighHighState failed",);
     }
     return retval;
@@ -3857,17 +3857,17 @@ setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
 
     UA_Variant value;
     UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->setpointNode, &UA_TYPES[UA_TYPES_NODEID]);
-    retval = setConditionField(server, *condition, &value, UA_QUALIFIEDNAME(0, CONDITION_FIELD_SETPOINTNODE));
+    retval = setConditionField(server, *condition, &value, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_SETPOINTNODE));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Set SetpointNode Field failed",);
 
     if (properties->hasBaseSetpointNode)
     {
         UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE);
-        retval = addOptionalField(server, *condition, typeId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_BASESETPOINTNODE), NULL);
+        retval = addOptionalField(server, *condition, typeId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_BASESETPOINTNODE), NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional BaseSetpointNode Field failed",);
 
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseSetpointNode, &UA_TYPES[UA_TYPES_NODEID]);
-        retval = setConditionField(server, *condition, &value, UA_QUALIFIEDNAME(0, CONDITION_FIELD_BASESETPOINTNODE));
+        retval = setConditionField(server, *condition, &value, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_BASESETPOINTNODE));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseSetpointNode Field failed",);
     }
 
@@ -3920,7 +3920,7 @@ void initNs0ConditionAndAlarms (UA_Server *server)
 {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
 
-    UA_QualifiedName supportsFilteredRetainQN = UA_QUALIFIEDNAME(0, CONDITION_FIELD_SUPPORTSFILTEREDRETAIN);
+    UA_QualifiedName supportsFilteredRetainQN = UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_SUPPORTSFILTEREDRETAIN);
     UA_Variant value;
     UA_Variant_setScalar(&value, (void *)(uintptr_t) &server->config.supportsFilteredRetain, &UA_TYPES[UA_TYPES_BOOLEAN]);
     UA_NodeId conditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
@@ -4063,8 +4063,8 @@ static UA_StatusCode calculateNewLimitState (
     UA_Double lowLowDeadband = 0;
 
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_HIGHHIGHDEADBAND), &highHighDeadband);
-    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_HIGHHIGHLIMIT), &highHighLimit);
+    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_HIGHHIGHDEADBAND), &highHighDeadband);
+    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_HIGHHIGHLIMIT), &highHighLimit);
     if (retval == UA_STATUSCODE_GOOD)
     {
         UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHHIGHSTATEBIT) ?
@@ -4076,8 +4076,8 @@ static UA_StatusCode calculateNewLimitState (
         }
     }
 
-    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_HIGHDEADBAND), &highDeadband);
-    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_HIGHLIMIT), &highLimit);
+    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_HIGHDEADBAND), &highDeadband);
+    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_HIGHLIMIT), &highLimit);
     if (retval == UA_STATUSCODE_GOOD)
     {
         UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHSTATEBIT) ?
@@ -4089,8 +4089,8 @@ static UA_StatusCode calculateNewLimitState (
         }
     }
 
-    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWDEADBAND), &lowLowDeadband);
-    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLOWLIMIT), &lowLowLimit);
+    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_LOWLOWDEADBAND), &lowLowDeadband);
+    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_LOWLOWLIMIT), &lowLowLimit);
     if (retval == UA_STATUSCODE_GOOD)
     {
         UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWLOWSTATEBIT) ?
@@ -4102,8 +4102,8 @@ static UA_StatusCode calculateNewLimitState (
         }
     }
 
-    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWDEADBAND), &lowDeadband);
-    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLIMIT), &lowLimit);
+    readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_LOWDEADBAND), &lowDeadband);
+    retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME_REF(0, CONDITION_FIELD_LOWLIMIT), &lowLimit);
     if (retval == UA_STATUSCODE_GOOD)
     {
         UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWSTATEBIT) ?
@@ -4132,13 +4132,13 @@ exclusiveLimitStateMachine_getState (UA_Server *server, const UA_NodeId *limitSt
     UA_NodeId currentStateIdId;
     UA_NodeId_init (&currentStateIdId);
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    retval = getNodeIdWithBrowseName(server, limitStateId, UA_QUALIFIEDNAME(0, "CurrentState"), &currentStateId);
+    retval = getNodeIdWithBrowseName(server, limitStateId, UA_QUALIFIEDNAME_REF(0, "CurrentState"), &currentStateId);
     if (retval != UA_STATUSCODE_GOOD)
     {
         CONDITION_LOG_ERROR(retval, "Could not get LimitState CurrentState nodeId")
         goto done;
     }
-    retval = getNodeIdWithBrowseName(server, &currentStateId, UA_QUALIFIEDNAME(0, "Id"), &currentStateIdId);
+    retval = getNodeIdWithBrowseName(server, &currentStateId, UA_QUALIFIEDNAME_REF(0, "Id"), &currentStateIdId);
     if (retval != UA_STATUSCODE_GOOD)
     {
         CONDITION_LOG_ERROR(retval, "Could not get LimitState CurrentState Id nodeId")
@@ -4177,13 +4177,13 @@ exclusiveLimitStateMachine_setState (UA_Server *server, const UA_NodeId *limitSt
     UA_NodeId_init (&currentStateId);
     UA_NodeId currentStateIdId;
     UA_NodeId_init (&currentStateIdId);
-    UA_StatusCode retval = getNodeIdWithBrowseName(server, limitStateId, UA_QUALIFIEDNAME(0, "CurrentState"), &currentStateId);
+    UA_StatusCode retval = getNodeIdWithBrowseName(server, limitStateId, UA_QUALIFIEDNAME_REF(0, "CurrentState"), &currentStateId);
     if (retval != UA_STATUSCODE_GOOD)
     {
         CONDITION_LOG_ERROR(retval, "Could not get LimitState CurrentState nodeId")
         goto done;
     }
-    retval = getNodeIdWithBrowseName(server, &currentStateId, UA_QUALIFIEDNAME(0, "Id"), &currentStateIdId);
+    retval = getNodeIdWithBrowseName(server, &currentStateId, UA_QUALIFIEDNAME_REF(0, "Id"), &currentStateIdId);
     if (retval != UA_STATUSCODE_GOOD)
     {
         CONDITION_LOG_ERROR(retval, "Could not get LimitState CurrentState Id nodeId")
@@ -4195,27 +4195,27 @@ exclusiveLimitStateMachine_setState (UA_Server *server, const UA_NodeId *limitSt
 
     if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHHIGHSTATEBIT))
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_HIGHHIGH_TEXT);
+        currentStateValue = UA_LOCALIZEDTEXT_REF(LOCALE, ACTIVE_HIGHHIGH_TEXT);
         currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_HIGHHIGH);
     }
     else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHSTATEBIT))
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_HIGH_TEXT);
+        currentStateValue = UA_LOCALIZEDTEXT_REF(LOCALE, ACTIVE_HIGH_TEXT);
         currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_HIGH);
     }
     else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_LOWSTATEBIT))
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_LOW_TEXT);
+        currentStateValue = UA_LOCALIZEDTEXT_REF(LOCALE, ACTIVE_LOW_TEXT);
         currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_LOW);
     }
     else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_LOWLOWSTATEBIT))
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, ACTIVE_LOWLOW_TEXT);
+        currentStateValue = UA_LOCALIZEDTEXT_REF(LOCALE, ACTIVE_LOWLOW_TEXT);
         currentStateIdValue = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITSTATEMACHINETYPE_LOWLOW);
     }
     else
     {
-        currentStateValue = UA_LOCALIZEDTEXT(LOCALE, "Normal");
+        currentStateValue = UA_LOCALIZEDTEXT_REF(LOCALE, "Normal");
         currentStateIdValue = UA_NODEID_NULL;
     }
 
@@ -4291,7 +4291,7 @@ limitAlarmCalculateEventInfo (UA_Server *server, const UA_NodeId *conditionId,
 {
     if (state == 0)
     {
-        info->message = UA_LOCALIZEDTEXT(LOCALE, "Alarm state is Normal");
+        info->message = UA_LOCALIZEDTEXT_REF(LOCALE, "Alarm state is Normal");
         info->hasSeverity = true;
         info->severity = 0;
         return;
@@ -4301,22 +4301,22 @@ limitAlarmCalculateEventInfo (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHHIGHSTATEBIT))
     {
         stateText = "HighHigh";
-        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityHighHigh"), &severity);
+        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME_REF(0, "SeverityHighHigh"), &severity);
     }
     else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHSTATEBIT))
     {
         stateText = "High";
-        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityHigh"), &severity);
+        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME_REF(0, "SeverityHigh"), &severity);
     }
     else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_LOWLOWSTATEBIT))
     {
         stateText = "LowLow";
-        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityLowLow"), &severity);
+        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME_REF(0, "SeverityLowLow"), &severity);
     }
     else if (UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_LOWSTATEBIT))
     {
         stateText = "Low";
-        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME(0, "SeverityLow"), &severity);
+        readObjectPropertyUInt16(server, *conditionId, UA_QUALIFIEDNAME_REF(0, "SeverityLow"), &severity);
     }
 
     info->message.locale = UA_STRING(LOCALE);
@@ -4388,7 +4388,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWSTATEBIT) != lowStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowStateQN, lowStateVal,
-                                          UA_LOCALIZEDTEXT(LOCALE, lowStateVal ? ACTIVE_LOW_TEXT : INACTIVE_LOW_TEXT));
+                                          UA_LOCALIZEDTEXT_REF(LOCALE, lowStateVal ? ACTIVE_LOW_TEXT : INACTIVE_LOW_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 
@@ -4396,7 +4396,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWLOWSTATEBIT) != lowLowStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowLowStateQN, lowLowStateVal,
-                                          UA_LOCALIZEDTEXT(LOCALE, lowLowStateVal ? ACTIVE_LOWLOW_TEXT : INACTIVE_LOWLOW_TEXT));
+                                          UA_LOCALIZEDTEXT_REF(LOCALE, lowLowStateVal ? ACTIVE_LOWLOW_TEXT : INACTIVE_LOWLOW_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 
@@ -4405,7 +4405,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHSTATEBIT) != highStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowStateQN, highStateVal,
-                                          UA_LOCALIZEDTEXT(LOCALE, highStateVal ? ACTIVE_HIGH_TEXT : INACTIVE_HIGH_TEXT));
+                                          UA_LOCALIZEDTEXT_REF(LOCALE, highStateVal ? ACTIVE_HIGH_TEXT : INACTIVE_HIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 
@@ -4413,7 +4413,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHHIGHSTATEBIT) != highHighStateVal)
     {
         ret = setOptionalTwoStateVariable(server, conditionId, fieldLowLowStateQN, highHighStateVal,
-                                          UA_LOCALIZEDTEXT(LOCALE, highHighStateVal ? ACTIVE_HIGHHIGH_TEXT : INACTIVE_HIGHHIGH_TEXT));
+                                          UA_LOCALIZEDTEXT_REF(LOCALE, highHighStateVal ? ACTIVE_HIGHHIGH_TEXT : INACTIVE_HIGHHIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
 
