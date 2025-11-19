@@ -868,6 +868,22 @@ UA_NODESTORE_GETFROMREF(UA_Server *server, UA_NodePointer target) {
     server->config.nodestore.getReferenceTypeId(server->config.nodestore.context, \
                                                 index)
 
+#ifdef UA_ENABLE_IOTECH_NODESTORE_MODIFICATIONS
+
+/* Get the editable node with all attributes and references */
+static UA_INLINE UA_Node *
+UA_NODESTORE_GET_EDIT(UA_Server *server, const UA_NodeId *nodeId) {
+    return server->config.nodestore.getEditNode(server->config.nodestore.context, nodeId,
+                    UA_NODEATTRIBUTESMASK_ALL, UA_REFERENCETYPESET_ALL,
+                    UA_BROWSEDIRECTION_BOTH);
+}
+
+#define UA_NODESTORE_GET_EDIT_SELECTIVE(server, nodeid, attrMask, refs, refDirs) \
+    server->config.nodestore.getEditNode(server->config.nodestore.context,      \
+                                          nodeid, attrMask, refs, refDirs)
+
+#endif
+
 /* Handling of Locales */
 
 /* Returns a shallow copy */

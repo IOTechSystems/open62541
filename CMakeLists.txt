@@ -110,6 +110,10 @@ option(UA_ENABLE_XML_ENCODING "Enable XML encoding (EXPERIMENTAL)" OFF)
 option(UA_ENABLE_NODESETLOADER "Enable nodesetLoader public API" OFF)
 option(UA_ENABLE_DATATYPES_ALL "Generate all datatypes for namespace zero (uses more binary space)" ON)
 
+# Enable support for optimised nodestore. These changes should be made in the 1.5 version of the library
+# but we have backported them. So in 1.5 we can remove this and all code within the tags
+option(UA_ENABLE_IOTECH_NODESTORE_MODIFICATIONS "getEdit node options" OFF)
+
 if(UA_INFORMATION_MODEL_AUTOLOAD AND NOT UA_ENABLE_NODESETLOADER AND NOT UA_BUILD_FUZZING)
     set(UA_ENABLE_NODESET_INJECTOR ON)
 endif()

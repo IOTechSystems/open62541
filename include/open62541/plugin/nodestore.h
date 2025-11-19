@@ -790,6 +790,38 @@ typedef struct {
                                       UA_ReferenceTypeSet references,
                                       UA_BrowseDirection referenceDirections);
 
+#ifdef UA_ENABLE_IOTECH_NODESTORE_MODIFICATIONS
+
+     /* _getEditNode returns a pointer to a mutable version of the node. A
+     * plugin implementation that keeps all nodes in RAM can return the same
+     * pointer from _getNode and _getEditNode. The differences are more
+     * important if, for example, nodes are stored in a backend database. Then
+     * the _getEditNode version is used to indicate that modifications are
+     * being made.
+     *
+     * Call _releaseNode to indicate when editing is done and the pointer is
+     * no longer used. Note that changes are not (necessarily) visible in other
+     * (const) node-pointers that were previously retrieved. Changes are however
+     * visible in all newly retrieved node-pointers for the given NodeId after
+     * calling _releaseNode.
+     *
+     * The attribute-mask and reference-description indicate if only a subset of
+     * the attributes and referencs are to be modified. Other attributes and
+     * references shall not be changed. */
+    UA_Node * (*getEditNode)(void *nsCtx, const UA_NodeId *nodeId,
+                             UA_UInt32 attributeMask,
+                             UA_ReferenceTypeSet references,
+                             UA_BrowseDirection referenceDirections);
+
+    /* Similar to _getEditNode. But it can take advantage of the NodePointer
+     * structure, e.g. if it contains a direct pointer. */
+    UA_Node * (*getEditNodeFromPtr)(void *nsCtx, UA_NodePointer ptr,
+                                    UA_UInt32 attributeMask,
+                                    UA_ReferenceTypeSet references,
+                                    UA_BrowseDirection referenceDirections);
+
+#endif
+
     /* Release a node that has been retrieved with ``getNode`` or
      * ``getNodeFromPtr``. */
     void (*releaseNode)(void *nsCtx, const UA_Node *node);
