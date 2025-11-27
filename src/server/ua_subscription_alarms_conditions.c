@@ -3290,7 +3290,7 @@ static UA_StatusCode
 setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *condition,
                                               const UA_AcknowledgeableConditionProperties *properties)
 {
-    UA_StatusCode retval;
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
     UA_NodeId acknowledgeableConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE);
     /* add optional field ConfirmedState*/
     if (properties->confirmable)
