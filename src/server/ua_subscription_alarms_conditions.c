@@ -2472,9 +2472,17 @@ addOptionalField(UA_Server *server, const UA_NodeId object,
                  UA_NodeId *outOptionalNode) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
+    //Check if the object already has the field
+    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, object, 1, &fieldName);
+    UA_StatusCode browseResult = bpr.statusCode;
+    UA_BrowsePathResult_clear(&bpr);
+
+    if (browseResult == UA_STATUSCODE_GOOD) return UA_STATUSCODE_GOOD;
+    if (browseResult != UA_STATUSCODE_BADNOMATCH) return browseResult;
+
     /* Get optional Field NodId from Type -> user should give the
      * correct ConditionType or Subtype!!!! */
-    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, type, 1, &fieldName);
+    bpr = browseSimplifiedBrowsePath(server, type, 1, &fieldName);
     if(bpr.statusCode != UA_STATUSCODE_GOOD)
         return bpr.statusCode;
 
