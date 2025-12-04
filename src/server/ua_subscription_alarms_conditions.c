@@ -2475,9 +2475,17 @@ addOptionalField(UA_Server *server, const UA_NodeId object,
     //Check if the object already has the field
     UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, object, 1, &fieldName);
     UA_StatusCode browseResult = bpr.statusCode;
+    if (browseResult == UA_STATUSCODE_GOOD) {
+        if (outOptionalNode) 
+        {
+            *outOptionalNode = bpr.targets[0].targetId.nodeId;
+            UA_NodeId_init(&bpr.targets[0].targetId.nodeId);
+        }
+        UA_BrowsePathResult_clear(&bpr);
+        return UA_STATUSCODE_GOOD;
+    }
     UA_BrowsePathResult_clear(&bpr);
 
-    if (browseResult == UA_STATUSCODE_GOOD) return UA_STATUSCODE_GOOD;
     if (browseResult != UA_STATUSCODE_BADNOMATCH) return browseResult;
 
     /* Get optional Field NodId from Type -> user should give the
