@@ -119,6 +119,7 @@ static UA_Condition *UA_Condition_new (void)
 
 static void UA_Condition_delete (UA_Condition *condition)
 {
+    UA_NodeId_clear(&condition->sourceId);
     UA_free (condition);
 }
 
@@ -2049,7 +2050,7 @@ newConditionEntry (UA_Server *server, const UA_NodeId *conditionNodeId,
 
     UA_StatusCode status = UA_STATUSCODE_GOOD;
     UA_Condition *condition = UA_Condition_new();
-    status = UA_NodeId_copy (&conditionProperties->sourceNode, (UA_NodeId *) &condition->sourceId);
+    status = UA_NodeId_copy (&conditionProperties->sourceNode, &condition->sourceId);
     if (status != UA_STATUSCODE_GOOD) goto fail;
     condition->canBranch = conditionProperties->canBranch;
     *out = condition;
