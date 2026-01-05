@@ -119,6 +119,7 @@ static UA_Condition *UA_Condition_new (void)
 
 static void UA_Condition_delete (UA_Condition *condition)
 {
+    UA_NodeId_clear(&condition->sourceId);
     UA_free (condition);
 }
 
@@ -2049,7 +2050,7 @@ newConditionEntry (UA_Server *server, const UA_NodeId *conditionNodeId,
 
     UA_StatusCode status = UA_STATUSCODE_GOOD;
     UA_Condition *condition = UA_Condition_new();
-    status = UA_NodeId_copy (&conditionProperties->sourceNode, (UA_NodeId *) &condition->sourceId);
+    status = UA_NodeId_copy (&conditionProperties->sourceNode, &condition->sourceId);
     if (status != UA_STATUSCODE_GOOD) goto fail;
     condition->canBranch = conditionProperties->canBranch;
     *out = condition;
@@ -2126,19 +2127,23 @@ addCondition_finish(
     const UA_NodeId *conditionType,
     const UA_CreateConditionProperties *conditionProperties,
     UA_ConditionTypeSetupFn setupNodesFn,
+    UA_ConditionTypeSetupFn initNodesFn,
     const void *setupNodesUserData
 ) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_StatusCode retval = addNode_finish(server, &server->adminSession, conditionId);
+
+    UA_StatusCode retval = setupNodesFn ? setupNodesFn (server, conditionId, setupNodesUserData) : UA_STATUSCODE_GOOD;
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setup Nodes failed",);
+
+    retval = addNode_finish(server, &server->adminSession, conditionId);
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Finish node failed",);
 
     retval = setConditionProperties(server, conditionType, conditionId, conditionProperties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
-    unlockServer(server);
-    retval = setupNodesFn ? setupNodesFn (server, conditionId, setupNodesUserData) : UA_STATUSCODE_GOOD;
-    lockServer(server);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setup Nodes failed",);
+    retval = initNodesFn ? initNodesFn (server, conditionId, setupNodesUserData) : UA_STATUSCODE_GOOD;
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Init Nodes failed",);
+
 
     if (!UA_NodeId_isNull(&conditionProperties->sourceNode))
     {
@@ -2170,11 +2175,12 @@ __UA_Server_addCondition_finish(
     const UA_NodeId *conditionType,
     const UA_CreateConditionProperties *conditionProperties,
     UA_ConditionTypeSetupFn setupNodesFn,
+    UA_ConditionTypeSetupFn initNodesFn,
     const void *setupNodesUserData
 )
 {
     lockServer(server);
-    UA_StatusCode retval = addCondition_finish(server, conditionId, conditionType, conditionProperties, setupNodesFn, setupNodesUserData);
+    UA_StatusCode retval = addCondition_finish(server, conditionId, conditionType, conditionProperties, setupNodesFn, initNodesFn, setupNodesUserData);
     unlockServer(server);
     return retval;
 }
@@ -2231,7 +2237,8 @@ __UA_Server_createCondition(UA_Server *server,
                             const UA_NodeId conditionId,
                             const UA_NodeId conditionType,
                             const UA_CreateConditionProperties *conditionProperties,
-                            UA_ConditionTypeSetupFn setupFn,
+                            UA_ConditionTypeSetupFn setupNodesFn,
+                            UA_ConditionTypeSetupFn initNodesFn,
                             const void *setupData,
                             UA_NodeId *outNodeId) {
 
@@ -2246,7 +2253,7 @@ __UA_Server_createCondition(UA_Server *server,
         return retval;
     }
 
-    retval = addCondition_finish (server, &tmpOutId, &conditionType, conditionProperties, setupFn, setupData);
+    retval = addCondition_finish (server, &tmpOutId, &conditionType, conditionProperties, setupNodesFn, initNodesFn, setupData);
     unlockServer(server);
     if (outNodeId) *outNodeId = tmpOutId;
     else UA_NodeId_clear (&tmpOutId);
@@ -2466,9 +2473,25 @@ addOptionalField(UA_Server *server, const UA_NodeId object,
                  UA_NodeId *outOptionalNode) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
+    //Check if the object already has the field
+    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, object, 1, &fieldName);
+    UA_StatusCode browseResult = bpr.statusCode;
+    if (browseResult == UA_STATUSCODE_GOOD) {
+        if (outOptionalNode) 
+        {
+            *outOptionalNode = bpr.targets[0].targetId.nodeId;
+            UA_NodeId_init(&bpr.targets[0].targetId.nodeId);
+        }
+        UA_BrowsePathResult_clear(&bpr);
+        return UA_STATUSCODE_GOOD;
+    }
+    UA_BrowsePathResult_clear(&bpr);
+
+    if (browseResult != UA_STATUSCODE_BADNOMATCH) return browseResult;
+
     /* Get optional Field NodId from Type -> user should give the
      * correct ConditionType or Subtype!!!! */
-    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, type, 1, &fieldName);
+    bpr = browseSimplifiedBrowsePath(server, type, 1, &fieldName);
     if(bpr.statusCode != UA_STATUSCODE_GOOD)
         return bpr.statusCode;
 
@@ -3284,9 +3307,8 @@ static UA_StatusCode
 setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *condition,
                                               const UA_AcknowledgeableConditionProperties *properties)
 {
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
     UA_NodeId acknowledgeableConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE);
-    UA_StatusCode retval = setTwoStateVariable (server, condition, fieldAckedStateQN, true, UA_LOCALIZEDTEXT(LOCALE,ACKED_TEXT));
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Acked state failed",);
     /* add optional field ConfirmedState*/
     if (properties->confirmable)
     {
@@ -3294,15 +3316,27 @@ setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditio
                                   fieldConfirmedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding ConfirmedState optional Field failed",);
 
-        retval = setTwoStateVariable (server, condition, fieldConfirmedStateQN, true, UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_TEXT));
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Confirmed state failed",);
-
         /* add reference from Condition to Confirm Method */
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
         UA_NodeId confirm = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_CONFIRM);
         retval = addRef(server, *condition, hasComponent, confirm, true);
         CONDITION_ASSERT_RETURN_RETVAL(retval,
                                        "Adding HasComponent Reference to Confirm Method failed",);
+    }
+    return retval;
+}
+
+static UA_StatusCode
+initAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *condition,
+                                              const UA_AcknowledgeableConditionProperties *properties)
+{
+    UA_StatusCode retval = setTwoStateVariable (server, condition, fieldAckedStateQN, true, UA_LOCALIZEDTEXT(LOCALE,ACKED_TEXT));
+    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Acked state failed",);
+    /* add optional field ConfirmedState*/
+    if (properties->confirmable)
+    {
+        retval = setTwoStateVariable (server, condition, fieldConfirmedStateQN, true, UA_LOCALIZEDTEXT(LOCALE, CONFIRMED_TEXT));
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting initial Confirmed state failed",);
     }
     return retval;
 }
@@ -3344,6 +3378,22 @@ done:
 }
 
 static UA_StatusCode
+initAlarmConditionShelvingState(UA_Server *server, const UA_NodeId *condition)
+{
+
+    UA_NodeId shelvingStateId;
+    UA_StatusCode retval = getNodeIdWithBrowseName(server, condition, fieldShelvingStateQN, &shelvingStateId);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    retval = setShelvedStateMachineUnshelved(server, &shelvingStateId);
+    CONDITION_ASSERT_GOTOLABEL(retval, "Could not set the initial state",done);
+
+    done:
+        UA_NodeId_clear (&shelvingStateId);
+    return retval;
+}
+
+static UA_StatusCode
 setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
                                     const UA_AlarmConditionProperties *properties)
 {
@@ -3351,21 +3401,11 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     UA_NodeId alarmConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE);
-    UA_Variant value;
-    setTwoStateVariable (server, condition, fieldActiveStateQN, false, UA_LOCALIZEDTEXT(LOCALE, INACTIVE_TEXT));
-    if (!UA_NodeId_isNull(&properties->inputNode))
-    {
-        UA_Variant_setScalar(&value,(void *)(uintptr_t) &properties->inputNode, &UA_TYPES[UA_TYPES_NODEID]);
-        retval = setConditionField (server, *condition, &value, fieldInputNodeQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set InputNode Field failed",);
-    }
-
     if (properties->isLatching)
     {
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldLatchedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding LatchedState optional Field failed",);
-        setTwoStateVariable (server, condition, fieldLatchedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_LATCHED_TEXT));
 
         /* add reference from Condition to Reset Method */
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
@@ -3386,7 +3426,6 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldSuppressedStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SuppressedState optional Field failed",);
-        setTwoStateVariable(server, condition, fieldSuppressedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_SUPPRESSED_TEXT));
 
         /* add reference from Condition to Suppress Method */
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
@@ -3419,7 +3458,6 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldOutOfServiceStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OutOfServiceState optional Field failed",);
-        setTwoStateVariable(server, condition, fieldOutOfServiceStateQN, false, UA_LOCALIZEDTEXT(LOCALE,IN_SERVICE_TEXT));
 
         UA_NodeId hasComponent = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
         UA_NodeId place = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_PLACEINSERVICE);
@@ -3453,9 +3491,6 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
             retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                       fieldMaxTimeShelvedQN, NULL);
             CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding MaxTimeShelved optional Field failed",);
-            UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->maxTimeShelved, &UA_TYPES[UA_TYPES_DURATION]);
-            retval = setConditionField (server, *condition, &value, fieldMaxTimeShelvedQN);
-            CONDITION_ASSERT_RETURN_RETVAL(retval, "Set MaxTimeShelved Field failed",);
         }
     }
 
@@ -3464,9 +3499,6 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldOnDelayQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OnDelay optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->onDelay, &UA_TYPES[UA_TYPES_DURATION]);
-        retval = setConditionField (server, *condition, &value, fieldOnDelayQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set OnDelay Field failed",);
     }
 
     if (properties->hasOffDelay)
@@ -3474,9 +3506,6 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldOffDelayQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding OffDelay optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->offDelay, &UA_TYPES[UA_TYPES_DURATION]);
-        retval = setConditionField (server, *condition, &value, fieldOffDelayQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set OffDelay Field failed",);
     }
 
     if (properties->hasReAlarmTime)
@@ -3484,13 +3513,81 @@ setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldReAlarmTimeQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding ReAlarmTime optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->reAlarmTime, &UA_TYPES[UA_TYPES_DURATION]);
-        retval = setConditionField (server, *condition, &value, fieldReAlarmTimeQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set ReAlarmTime Field failed",);
 
         retval = addOptionalField(server, *condition, alarmConditionTypeId,
                                   fieldReAlarmRepeatCountQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding ReAlarmRepeatCount optional Field failed",);
+    }
+
+    //TODO add support for alarm audio
+    //TODO alarm suppression groups
+    return retval;
+}
+
+static UA_StatusCode
+initAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_AlarmConditionProperties *properties)
+{
+    UA_StatusCode retval = initAcknowledgeableConditionNodes(server, condition, &properties->acknowledgeableConditionProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    UA_Variant value;
+    setTwoStateVariable (server, condition, fieldActiveStateQN, false, UA_LOCALIZEDTEXT(LOCALE, INACTIVE_TEXT));
+    if (!UA_NodeId_isNull(&properties->inputNode))
+    {
+        UA_Variant_setScalar(&value,(void *)(uintptr_t) &properties->inputNode, &UA_TYPES[UA_TYPES_NODEID]);
+        retval = setConditionField (server, *condition, &value, fieldInputNodeQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set InputNode Field failed",);
+    }
+
+    if (properties->isLatching)
+    {
+        setTwoStateVariable (server, condition, fieldLatchedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_LATCHED_TEXT));
+    }
+
+    if (properties->isSuppressible)
+    {
+        setTwoStateVariable(server, condition, fieldSuppressedStateQN, false, UA_LOCALIZEDTEXT(LOCALE, NOT_SUPPRESSED_TEXT));
+    }
+
+    if (properties->isServiceable)
+    {
+        setTwoStateVariable(server, condition, fieldOutOfServiceStateQN, false, UA_LOCALIZEDTEXT(LOCALE,IN_SERVICE_TEXT));
+    }
+
+    if (properties->isShelvable)
+    {
+        retval = initAlarmConditionShelvingState (server, condition);
+        if (retval != UA_STATUSCODE_GOOD) return retval;
+
+        if (properties->maxTimeShelved)
+        {
+            UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->maxTimeShelved, &UA_TYPES[UA_TYPES_DURATION]);
+            retval = setConditionField (server, *condition, &value, fieldMaxTimeShelvedQN);
+            CONDITION_ASSERT_RETURN_RETVAL(retval, "Set MaxTimeShelved Field failed",);
+        }
+    }
+
+    if (properties->hasOnDelay)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->onDelay, &UA_TYPES[UA_TYPES_DURATION]);
+        retval = setConditionField (server, *condition, &value, fieldOnDelayQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set OnDelay Field failed",);
+    }
+
+    if (properties->hasOffDelay)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->offDelay, &UA_TYPES[UA_TYPES_DURATION]);
+        retval = setConditionField (server, *condition, &value, fieldOffDelayQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set OffDelay Field failed",);
+    }
+
+    if (properties->hasReAlarmTime)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->reAlarmTime, &UA_TYPES[UA_TYPES_DURATION]);
+        retval = setConditionField (server, *condition, &value, fieldReAlarmTimeQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set ReAlarmTime Field failed",);
+
         UA_Int16 repeatCount = 0;
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &repeatCount, &UA_TYPES[UA_TYPES_INT16]);
         retval = setConditionField (server, *condition, &value, fieldReAlarmRepeatCountQN);
@@ -3512,6 +3609,16 @@ UA_Server_setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *conditio
     return retval;
 }
 
+UA_StatusCode
+UA_Server_initAlarmConditionNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                              const UA_AlarmConditionProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initAlarmConditionNodes (server, conditionId, properties);
+    unlockServer(server);
+    return retval;
+}
+
 static UA_StatusCode
 setupDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                                       const UA_DiscrepancyAlarmProperties *properties)
@@ -3519,20 +3626,11 @@ setupDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *condition,
     UA_StatusCode ret = setupAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
     if (ret != UA_STATUSCODE_GOOD) return ret;
 
-    ret = writeObjectProperty_scalar(server, *condition, fieldExpectedTimeQN, &properties->expectedTime, &UA_TYPES[UA_TYPES_DURATION]);
-    CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting ExpectedTime value failed",);
-
-    ret = writeObjectProperty_scalar(server, *condition, fieldTargetValueNodeQN, &properties->targetValue, &UA_TYPES[UA_TYPES_NODEID]);
-    CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting TargetValueNode value failed",);
-
     if (properties->hasTolerance)
     {
         UA_NodeId type = UA_NODEID_NUMERIC(0, UA_NS0ID_DISCREPANCYALARMTYPE);
         ret = addOptionalField(server, *condition, type, fieldToleranceQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(ret, "Adding Tolerance optional field failed",);
-
-        ret = writeObjectProperty_scalar(server, *condition, fieldToleranceQN, &properties->tolerance, &UA_TYPES[UA_TYPES_DOUBLE]);
-        CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting Tolerance value failed",);
     }
     return ret;
 }
@@ -3548,15 +3646,41 @@ UA_Server_setupDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *condit
 }
 
 static UA_StatusCode
+initDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                      const UA_DiscrepancyAlarmProperties *properties)
+{
+    UA_StatusCode ret = initAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+
+    ret = writeObjectProperty_scalar(server, *condition, fieldExpectedTimeQN, &properties->expectedTime, &UA_TYPES[UA_TYPES_DURATION]);
+    CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting ExpectedTime value failed",);
+
+    ret = writeObjectProperty_scalar(server, *condition, fieldTargetValueNodeQN, &properties->targetValue, &UA_TYPES[UA_TYPES_NODEID]);
+    CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting TargetValueNode value failed",);
+
+    if (properties->hasTolerance)
+    {
+        ret = writeObjectProperty_scalar(server, *condition, fieldToleranceQN, &properties->tolerance, &UA_TYPES[UA_TYPES_DOUBLE]);
+        CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting Tolerance value failed",);
+    }
+    return ret;
+}
+
+UA_StatusCode
+UA_Server_initDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                            const UA_DiscrepancyAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initDiscrepancyAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
+static UA_StatusCode
 setupOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                                     const UA_OffNormalAlarmProperties *properties)
 {
-    UA_StatusCode ret = setupAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
-    if (ret != UA_STATUSCODE_GOOD) return ret;
-
-    ret = writeObjectProperty_scalar(server, *condition, fieldNormalStateQN, &properties->normalState, &UA_TYPES[UA_TYPES_NODEID]);
-    CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting NormalState value failed",);
-    return ret;
+    return setupAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
 }
 
 UA_StatusCode
@@ -3570,46 +3694,23 @@ UA_Server_setupOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *conditio
 }
 
 static UA_StatusCode
-setupCertificateExpirationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
-                                                const UA_CertificateExpirationAlarmProperties *properties)
+initOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_OffNormalAlarmProperties *properties)
 {
-    UA_StatusCode retval = setupOffNormalAlarmNodes (server, condition, &properties->offNormalAlarmProperties);
-    if (retval != UA_STATUSCODE_GOOD) return retval;
+    UA_StatusCode ret = initAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
 
-    if (properties->hasExpirationLimit)
-    {
-        UA_NodeId certificateConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_CERTIFICATEEXPIRATIONALARMTYPE);
-        retval = addOptionalField(server, *condition, certificateConditionTypeId,
-                                  UA_QUALIFIEDNAME(0,CONDITION_FIELD_EXPIRATION_LIMIT), NULL);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding Expiration Limit optional field failed",);
-
-        /* Set the default value for the Expiration limit property */
-        retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_EXPIRATION_LIMIT),
-                                              &properties->expirationLimit, &UA_TYPES[UA_TYPES_DURATION]);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting Expiration Limit value failed",);
-    }
-
-    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_CERTIFICATE),
-                                         &properties->certificate, &UA_TYPES[UA_TYPES_BYTESTRING]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting Certificate value failed",);
-
-    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_CERTIFICATE_TYPE),
-                                         &properties->certificateType, &UA_TYPES[UA_TYPES_NODEID]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting CertificateType value failed",);
-
-    retval = writeObjectProperty_scalar (server, *condition, UA_QUALIFIEDNAME(0, CONDITION_FIELD_EXPIRATION_DATE),
-                                         &properties->expirationDate, &UA_TYPES[UA_TYPES_DATETIME]);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setting ExpirationDate value failed",);
-
-    return retval;
+    ret = writeObjectProperty_scalar(server, *condition, fieldNormalStateQN, &properties->normalState, &UA_TYPES[UA_TYPES_NODEID]);
+    CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting NormalState value failed",);
+    return ret;
 }
 
 UA_StatusCode
-UA_Server_setupCertificateExpirationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
-                                      const UA_CertificateExpirationAlarmProperties *properties)
+UA_Server_initOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_OffNormalAlarmProperties *properties)
 {
     lockServer(server);
-    UA_StatusCode retval = setupCertificateExpirationAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = initOffNormalAlarmNodes (server, condition, properties);
     unlockServer(server);
     return retval;
 }
@@ -3627,42 +3728,29 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
     }
 
     UA_NodeId LimitAlarmTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_LIMITALARMTYPE);
-    UA_Variant value;
     /* Limits */
     if (properties->hasLowLowLimit)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldLowLowLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding LowLowLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowLowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField (server, *condition, &value, fieldLowLowLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowLimit Field failed",);
     }
 
     if (properties->hasLowLimit)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldLowLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding LowLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField (server, *condition, &value, fieldLowLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLimit Field failed",);
     }
 
     if (properties->hasHighLimit)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldHighLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding HighLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField (server, *condition, &value, fieldHighLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighLimit Field failed",);
     }
 
     if (properties->hasHighHighLimit)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldHighHighLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding HighHighLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highHighLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField (server, *condition, &value, fieldHighHighLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighHighLimit Field failed",);
     }
 
     /* Base Limits */
@@ -3670,36 +3758,24 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldBaseLowLowLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding BaseLowLowLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseLowLowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField (server, *condition, &value, fieldBaseLowLowLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseLowLowLimit Field failed",);
     }
 
     if (properties->hasBaseLowLimit)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldBaseLowLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding BaseLowLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseLowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField(server, *condition, &value, fieldBaseLowLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseLowLimit Field failed",);
     }
 
     if (properties->hasBaseHighLimit)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldBaseHighLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding BaseHighLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseHighLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField(server, *condition, &value, fieldBaseHighLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseHighLimit Field failed",);
     }
 
     if (properties->hasBaseHighHighLimit)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldBaseHighHighLimitQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding BaseHighHighLimit optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseHighHighLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField(server, *condition, &value, fieldBaseHighHighLimitQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseHighHighLimit Field failed",);
     }
 
     /* Deadband */
@@ -3707,36 +3783,24 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldLowLowDeadbandQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding LowLowDeadband optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowLowDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField(server, *condition, &value, fieldLowLowDeadbandQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowDeadband Field failed",);
     }
 
     if (properties->hasLowDeadband)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldLowDeadbandQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding LowDeadband optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField(server, *condition, &value, fieldLowDeadbandQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowDeadband Field failed",);
     }
 
     if (properties->hasHighDeadband)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldHighDeadbandQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding HighDeadband optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField(server, *condition, &value, fieldHighDeadbandQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighDeadband Field failed",);
     }
 
     if (properties->hasHighHighDeadband)
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldHighHighDeadbandQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding HighHighDeadband optional Field failed",);
-        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highHighDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
-        retval = setConditionField(server, *condition, &value, fieldHighHighDeadbandQN);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighHighDeadband Field failed",);
     }
 
     /* Limit Severity */
@@ -3745,6 +3809,126 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
     {
         retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldSeverityLowLowQN , NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SeverityLowLow optional Field failed",);
+    }
+
+    if (properties->hasSeverityLow)
+    {
+        retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldSeverityLowQN , NULL);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SeverityLow optional Field failed",);
+    }
+
+    if (properties->hasSeverityHigh)
+    {
+        retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldSeverityHighQN , NULL);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SeverityHigh optional Field failed",);
+    }
+
+    if (properties->hasSeverityHighHigh)
+    {
+        retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldSeverityHighHighQN , NULL);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SeverityHighHigh optional Field failed",);
+    }
+
+    return retval;
+}
+
+static UA_StatusCode
+initLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+{
+    UA_StatusCode retval = initAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    UA_Variant value;
+    /* Limits */
+    if (properties->hasLowLowLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowLowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField (server, *condition, &value, fieldLowLowLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowLimit Field failed",);
+    }
+
+    if (properties->hasLowLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField (server, *condition, &value, fieldLowLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLimit Field failed",);
+    }
+
+    if (properties->hasHighLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField (server, *condition, &value, fieldHighLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighLimit Field failed",);
+    }
+
+    if (properties->hasHighHighLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highHighLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField (server, *condition, &value, fieldHighHighLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighHighLimit Field failed",);
+    }
+
+    /* Base Limits */
+    if (properties->hasBaseLowLowLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseLowLowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField (server, *condition, &value, fieldBaseLowLowLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseLowLowLimit Field failed",);
+    }
+
+    if (properties->hasBaseLowLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseLowLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField(server, *condition, &value, fieldBaseLowLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseLowLimit Field failed",);
+    }
+
+    if (properties->hasBaseHighLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseHighLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField(server, *condition, &value, fieldBaseHighLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseHighLimit Field failed",);
+    }
+
+    if (properties->hasBaseHighHighLimit)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseHighHighLimit, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField(server, *condition, &value, fieldBaseHighHighLimitQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseHighHighLimit Field failed",);
+    }
+
+    /* Deadband */
+    if (properties->hasLowLowDeadband)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowLowDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField(server, *condition, &value, fieldLowLowDeadbandQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowDeadband Field failed",);
+    }
+
+    if (properties->hasLowDeadband)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->lowDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField(server, *condition, &value, fieldLowDeadbandQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowDeadband Field failed",);
+    }
+
+    if (properties->hasHighDeadband)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField(server, *condition, &value, fieldHighDeadbandQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighDeadband Field failed",);
+    }
+
+    if (properties->hasHighHighDeadband)
+    {
+        UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->highHighDeadband, &UA_TYPES[UA_TYPES_DOUBLE]);
+        retval = setConditionField(server, *condition, &value, fieldHighHighDeadbandQN);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighHighDeadband Field failed",);
+    }
+
+    /* Limit Severity */
+    if (properties->hasSeverityLowLow)
+    {
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->severityLowLow, &UA_TYPES[UA_TYPES_UINT16]);
         retval = setConditionField(server, *condition, &value, fieldSeverityLowLowQN);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set SeverityLowLow Field failed",);
@@ -3752,8 +3936,6 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
 
     if (properties->hasSeverityLow)
     {
-        retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldSeverityLowQN , NULL);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SeverityLow optional Field failed",);
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->severityLow, &UA_TYPES[UA_TYPES_UINT16]);
         retval = setConditionField(server, *condition, &value, fieldSeverityLowQN);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set SeverityLow Field failed",);
@@ -3761,8 +3943,6 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
 
     if (properties->hasSeverityHigh)
     {
-        retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldSeverityHighQN , NULL);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SeverityHigh optional Field failed",);
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->severityHigh, &UA_TYPES[UA_TYPES_UINT16]);
         retval = setConditionField(server, *condition, &value, fieldSeverityHighQN);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set SeverityHigh Field failed",);
@@ -3770,13 +3950,10 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
 
     if (properties->hasSeverityHighHigh)
     {
-        retval = addOptionalField(server, *condition, LimitAlarmTypeId, fieldSeverityHighHighQN , NULL);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding SeverityHighHigh optional Field failed",);
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->severityHighHigh, &UA_TYPES[UA_TYPES_UINT16]);
         retval = setConditionField(server, *condition, &value, fieldSeverityHighHighQN);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set SeverityHighHigh Field failed",);
     }
-
 
     return retval;
 }
@@ -3786,6 +3963,15 @@ UA_Server_setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, co
 {
     lockServer(server);
     UA_StatusCode retval = setupLimitAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
+UA_StatusCode
+UA_Server_initLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initLimitAlarmNodes (server, condition, properties);
     unlockServer(server);
     return retval;
 }
@@ -3803,39 +3989,64 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
     }
 
     UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELEVELALARMTYPE);
-
     if (properties->hasLowLowLimit)
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowLowStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional LowLowState Field failed",);
-        setTwoStateVariable(server, condition, fieldLowLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOWLOW_TEXT));
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowState failed",);
     }
 
     if (properties->hasLowLimit)
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional LowState Field failed",);
-        setTwoStateVariable(server, condition, fieldLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOW_TEXT));
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowState failed",);
     }
 
     if (properties->hasHighLimit)
     {
         retval = addOptionalField(server, *condition, typeId, fieldHighStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional HighState Field failed",);
-        setTwoStateVariable(server, condition, fieldHighStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_HIGH_TEXT));
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighState failed",);
-
     }
 
     if (properties->hasHighHighLimit)
     {
         retval = addOptionalField(server, *condition, typeId, fieldHighHighStateQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional HighHighState Field failed",);
+    }
+
+    return retval;
+}
+
+
+static UA_StatusCode
+initNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+{
+    UA_StatusCode retval = initLimitAlarmNodes (server, condition, properties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    if (properties->hasLowLowLimit)
+    {
+        setTwoStateVariable(server, condition, fieldLowLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOWLOW_TEXT));
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowLowState failed",);
+    }
+
+    if (properties->hasLowLimit)
+    {
+        setTwoStateVariable(server, condition, fieldLowStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_LOW_TEXT));
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set LowState failed",);
+    }
+
+    if (properties->hasHighLimit)
+    {
+        setTwoStateVariable(server, condition, fieldHighStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_HIGH_TEXT));
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighState failed",);
+    }
+
+    if (properties->hasHighHighLimit)
+    {
         setTwoStateVariable(server, condition, fieldHighHighStateQN, false, UA_LOCALIZEDTEXT(LOCALE,INACTIVE_HIGHHIGH_TEXT));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set HighHighState failed",);
     }
+
     return retval;
 }
 
@@ -3848,11 +4059,37 @@ UA_Server_setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *c
     return retval;
 }
 
+UA_StatusCode
+UA_Server_initNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initNonExclusiveLimitAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
 static UA_StatusCode
 setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                           const UA_DeviationAlarmProperties *properties)
 {
     UA_StatusCode retval = setupLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    if (properties->hasBaseSetpointNode)
+    {
+        UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE);
+        retval = addOptionalField(server, *condition, typeId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_BASESETPOINTNODE), NULL);
+        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional BaseSetpointNode Field failed",);
+    }
+
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+initDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
+    UA_StatusCode retval = initLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     UA_Variant value;
@@ -3862,10 +4099,6 @@ setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
 
     if (properties->hasBaseSetpointNode)
     {
-        UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE);
-        retval = addOptionalField(server, *condition, typeId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_BASESETPOINTNODE), NULL);
-        CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional BaseSetpointNode Field failed",);
-
         UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->baseSetpointNode, &UA_TYPES[UA_TYPES_NODEID]);
         retval = setConditionField(server, *condition, &value, UA_QUALIFIEDNAME(0, CONDITION_FIELD_BASESETPOINTNODE));
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Set BaseSetpointNode Field failed",);
@@ -3884,6 +4117,16 @@ UA_Server_setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *conditio
     return retval;
 }
 
+UA_StatusCode
+UA_Server_initDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initDeviationAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
 static UA_StatusCode
 setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                              const UA_RateOfChangeAlarmProperties *properties)
@@ -3897,7 +4140,19 @@ setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
         retval = addOptionalField(server, *condition, RateOfChangeAlarmTypeId,
                                                 fieldEngineeringUnitsQN, NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional EngineeringUnits Field failed",);
+    }
+    return retval;
+}
 
+static UA_StatusCode
+initRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    UA_StatusCode retval = initLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+
+    if (properties->hasEngineeringUnits)
+    {
         UA_Variant value;
         UA_Variant_setScalar(&value, (void *)(uintptr_t) &properties->engineeringUnits, &UA_TYPES[UA_TYPES_EUINFORMATION]);
         retval = setConditionField(server, *condition, &value, fieldEngineeringUnitsQN);
@@ -3912,6 +4167,16 @@ UA_Server_setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condi
 {
     lockServer(server);
     UA_StatusCode retval = setupRateOfChangeAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
+UA_StatusCode
+UA_Server_initRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initRateOfChangeAlarmNodes (server, condition, properties);
     unlockServer(server);
     return retval;
 }

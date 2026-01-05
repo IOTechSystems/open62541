@@ -403,5 +403,22 @@ UA_Nodestore_ZipTree(UA_Nodestore *ns) {
     ns->getReferenceTypeId = zipNsGetReferenceTypeId;
     ns->iterate = zipNsIterate;
 
+#ifdef UA_ENABLE_IOTECH_NODESTORE_MODIFICATIONS
+
+    /* All nodes are stored in RAM. Changes are made in-situ. GetEditNode is
+     * identical to GetNode -- but the Node pointer is non-const. */
+    ns->getEditNode =
+        (UA_Node * (*)(void *ns, const UA_NodeId *nodeId,
+                       UA_UInt32 attributeMask,
+                       UA_ReferenceTypeSet references,
+                       UA_BrowseDirection referenceDirections))zipNsGetNode;
+    ns->getEditNodeFromPtr =
+        (UA_Node * (*)(void *ns, UA_NodePointer ptr,
+                       UA_UInt32 attributeMask,
+                       UA_ReferenceTypeSet references,
+                       UA_BrowseDirection referenceDirections))zipNsGetNodeFromPtr;
+
+#endif
+
     return UA_STATUSCODE_GOOD;
 }

@@ -269,6 +269,16 @@ UA_StatusCode
 UA_Server_editNode(UA_Server *server, UA_Session *session,
                    const UA_NodeId *nodeId, UA_EditNodeCallback callback,
                    void *data) {
+
+#ifdef UA_ENABLE_IOTECH_NODESTORE_MODIFICATIONS
+    UA_Node *node = UA_NODESTORE_GET_EDIT(server, nodeId);
+    if(!node)
+        return UA_STATUSCODE_BADNODEIDUNKNOWN;
+    UA_StatusCode retval = callback(server, session, node, data);
+    UA_NODESTORE_RELEASE(server, node);
+    return retval;
+#else
+
 #ifndef UA_ENABLE_IMMUTABLE_NODES
     /* Get the node and process it in-situ */
     const UA_Node *node = UA_NODESTORE_GET(server, nodeId);
@@ -298,6 +308,9 @@ UA_Server_editNode(UA_Server *server, UA_Session *session,
     } while(retval != UA_STATUSCODE_GOOD);
     return retval;
 #endif
+
+#endif
+
 }
 
 UA_StatusCode

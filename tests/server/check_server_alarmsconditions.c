@@ -153,6 +153,7 @@ START_TEST(createMultiple) {
             &conditionProperties,
             NULL,
             NULL,
+            NULL,
             &conditionInstance
         );
         UA_Server_Condition_enable(acserver, conditionInstance, true, NULL);
@@ -178,6 +179,7 @@ START_TEST(createDelete) {
             UA_NODEID_NULL,
             UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE),
             &conditionProperties,
+            NULL,
             NULL,
             NULL,
             &conditionInstance
@@ -273,6 +275,7 @@ START_TEST(conditionSequence1) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
         (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
     );
@@ -486,6 +489,7 @@ START_TEST(conditionSequence2) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
         (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
     );
@@ -757,6 +761,7 @@ START_TEST(enableDisable) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
         (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
     );
@@ -885,6 +890,7 @@ START_TEST(conditionSequence3) {
         UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
         &conditionProperties,
         (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initAlarmConditionNodes,
         &alarmProperties,
         &conditionInstance
     );
