@@ -1734,7 +1734,7 @@ static UA_StatusCode
 condition_removeFromService (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_Condition_State_setOutOfServiceState (condition, server, true);
+    UA_Condition_State_setOutOfServiceState (condition, server, false);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, REMOVEDFROMSRVICE_MESSAGE)
     };
@@ -1748,7 +1748,7 @@ static UA_StatusCode
 condition_placeInService (UA_Server *server, UA_Condition *condition, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
 {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_Condition_State_setOutOfServiceState (condition, server, false);
+    UA_Condition_State_setOutOfServiceState (condition, server, true);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, PLACEDINSERVICE_MESSAGE)
     };
