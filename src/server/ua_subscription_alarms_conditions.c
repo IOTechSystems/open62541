@@ -3723,8 +3723,9 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
 
     if (!properties->hasLowLimit && !properties->hasLowLowLimit && !properties->hasHighLimit && !properties->hasHighHighLimit)
     {
+        retval = UA_STATUSCODE_BADCONFIGURATIONERROR;
         CONDITION_LOG_ERROR (retval, "At least one limit field is mandatory");
-        return UA_STATUSCODE_BADCONFIGURATIONERROR;
+        return retval;
     }
 
     UA_NodeId LimitAlarmTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_LIMITALARMTYPE);
