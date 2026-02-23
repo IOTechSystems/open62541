@@ -2133,17 +2133,30 @@ addCondition_finish(
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     UA_StatusCode retval = setupNodesFn ? setupNodesFn (server, conditionId, setupNodesUserData) : UA_STATUSCODE_GOOD;
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setup Nodes failed",);
+    if (retval != UA_STATUSCODE_GOOD) {
+        CONDITION_LOG_ERROR(retval, "setup Nodes failed");
+        goto cleanup;
+    }
 
     retval = addNode_finish(server, &server->adminSession, conditionId);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Finish node failed",);
+    if (retval != UA_STATUSCODE_GOOD) {
+        CONDITION_LOG_ERROR(retval, "Finish node failed");
+        goto cleanup;
+    }
+
+    CONDITION_ASSERT_RETURN_RETVAL(retval, ,);
 
     retval = setConditionProperties(server, conditionType, conditionId, conditionProperties);
-    if (retval != UA_STATUSCODE_GOOD) return retval;
+    if (retval != UA_STATUSCODE_GOOD) {
+        CONDITION_LOG_ERROR(retval, "setting condition properties failed");
+        goto cleanup;
+    }
 
     retval = initNodesFn ? initNodesFn (server, conditionId, setupNodesUserData) : UA_STATUSCODE_GOOD;
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Init Nodes failed",);
-
+    if (retval != UA_STATUSCODE_GOOD) {
+        CONDITION_LOG_ERROR(retval, "init condition nodes failed");
+        goto cleanup;
+    }
 
     if (!UA_NodeId_isNull(&conditionProperties->sourceNode))
     {
@@ -2153,19 +2166,25 @@ addCondition_finish(
         UA_NodeId hasCondition = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCONDITION);
         if(!UA_NodeId_isNull(&conditionProperties->hierarchialReferenceType)) {
             retval = addRef(server, conditionProperties->sourceNode, hasCondition, *conditionId, true);
-            CONDITION_ASSERT_RETURN_RETVAL(retval, "Creating HasCondition Reference failed",);
+            if (retval != UA_STATUSCODE_GOOD) {
+                CONDITION_LOG_ERROR(retval, "Creating HasCondition Reference failed");
+                goto cleanup;
+            }
         } else {
             retval = addRef(server, conditionProperties->sourceNode, hasCondition, *conditionType, true);
             if(retval != UA_STATUSCODE_GOOD && retval != UA_STATUSCODE_BADDUPLICATEREFERENCENOTALLOWED)
             {
-                CONDITION_ASSERT_RETURN_RETVAL(retval, "Creating HasCondition Reference failed",);
+                CONDITION_LOG_ERROR(retval, "Creating HasCondition Reference failed");
+                goto cleanup;
             }
             retval = UA_STATUSCODE_GOOD;
         }
     }
-
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Setup Condition failed",);
+    //if this fails, the alarm node(s) will be deleted so no need to cleanup
     return newConditionInstanceEntry (server, conditionId, conditionProperties);
+cleanup:
+    deleteNode(server, *conditionId, true);
+    return retval;
 }
 
 UA_StatusCode
