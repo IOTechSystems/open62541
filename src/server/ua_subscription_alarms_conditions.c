@@ -2141,10 +2141,9 @@ addCondition_finish(
     retval = addNode_finish(server, &server->adminSession, conditionId);
     if (retval != UA_STATUSCODE_GOOD) {
         CONDITION_LOG_ERROR(retval, "Finish node failed");
-        goto cleanup;
+        //addNode_finish will clean up nodes - dont need to call deleteNode
+        return retval;
     }
-
-    CONDITION_ASSERT_RETURN_RETVAL(retval, ,);
 
     retval = setConditionProperties(server, conditionType, conditionId, conditionProperties);
     if (retval != UA_STATUSCODE_GOOD) {
