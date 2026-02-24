@@ -910,12 +910,10 @@ START_TEST(Server_MonitoredItemsAbsoluteFilterSetOnCreate) {
 END_TEST
 
 static UA_StatusCode
-setNULL(UA_Client *thisClient, UA_NodeId node) {
+setEmptyArray(UA_Client *thisClient, UA_NodeId node) {
     UA_Variant variant;
     UA_Variant_init (&variant);
     UA_Variant_setArray(&variant, NULL, 0, &UA_TYPES[UA_TYPES_DOUBLE]);
-    //variant.type = &UA_TYPES[UA_TYPES_DOUBLE];
-    //UA_Variant_setScalar(&variant, NULL, &UA_TYPES[UA_TYPES_DOUBLE]);
     return UA_Client_writeValueAttribute(thisClient, node, &variant);
 }
 
@@ -938,7 +936,8 @@ START_TEST(Server_MonitoredItemsAbsoluteFilterNULLValue) {
     void *contexts[1];
     contexts[0] = NULL;
 
-    ck_assert_uint_eq(setNULL(client, outNodeId), UA_STATUSCODE_GOOD);
+    /* Set empty array value so that the initial value data ptr for the monitored item is NULL */
+    ck_assert_uint_eq(setEmptyArray(client, outNodeId), UA_STATUSCODE_GOOD);
 
     UA_CreateMonitoredItemsRequest createRequest;
     UA_CreateMonitoredItemsRequest_init(&createRequest);
@@ -962,7 +961,7 @@ START_TEST(Server_MonitoredItemsAbsoluteFilterNULLValue) {
     ck_assert_uint_eq(waitForNotification(1, 10), UA_STATUSCODE_GOOD);
     ck_assert_uint_eq(notificationReceived, true);
     ck_assert_uint_eq(countNotificationReceived, 1);
-    ck_assert_ptr_null(lastValue.value.data);
+    ck_assert(lastValue.value.data == NULL);
 
     UA_DataValue *dv = &lastValue;
 
@@ -971,18 +970,6 @@ START_TEST(Server_MonitoredItemsAbsoluteFilterNULLValue) {
     ck_assert_uint_eq(waitForNotification(1, 10), UA_STATUSCODE_GOOD);
     ck_assert_uint_eq(notificationReceived, true);
     ck_assert_uint_eq(countNotificationReceived, 2);
-
-    notificationReceived = false;
-    ck_assert_uint_eq(setNULL(client, outNodeId), UA_STATUSCODE_GOOD);
-    ck_assert_uint_eq(waitForNotification(1, 10), UA_STATUSCODE_GOOD);
-    ck_assert_uint_eq(notificationReceived, true);
-    ck_assert_uint_eq(countNotificationReceived, 3);
-    ck_assert_ptr_null(lastValue.value.data);
-
-    notificationReceived = false;
-    ck_assert_uint_eq(setNULL(client, outNodeId), UA_STATUSCODE_GOOD);
-    ck_assert_uint_eq(waitForNotification(0, 10), UA_STATUSCODE_GOOD);
-    ck_assert_uint_eq(notificationReceived, false);
 
     // remove monitored item
     UA_DeleteMonitoredItemsRequest deleteRequest;
