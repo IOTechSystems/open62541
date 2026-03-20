@@ -2200,7 +2200,7 @@ UA_Server_createExclusiveDeviationAlarm(
 )
 {
     return __UA_Server_createCondition(
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE),
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVEDEVIATIONALARMTYPE),
         conditionProperties,
         (UA_ConditionTypeSetupFn) UA_Server_setupExclusiveDeviationAlarmNodes,
         (UA_ConditionTypeSetupFn) UA_Server_initExclusiveDeviationAlarmNodes,
@@ -2226,7 +2226,7 @@ UA_Server_createNonExclusiveDeviationAlarm(
 )
 {
     return __UA_Server_createCondition(
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVEDEVIATIONALARMTYPE),
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE),
         conditionProperties,
         (UA_ConditionTypeSetupFn) UA_Server_setupNonExclusiveDeviationAlarmNodes,
         (UA_ConditionTypeSetupFn) UA_Server_initNonExclusiveDeviationAlarmNodes,
