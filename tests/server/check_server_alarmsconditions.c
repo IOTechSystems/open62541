@@ -1300,18 +1300,18 @@ int main(void) {
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     TCase *tc = tcase_create("Alarms and Conditions");
-    // tcase_add_test(tc, createDelete);
-    // tcase_add_test(tc, createMultiple);
-    // tcase_add_test(tc, conditionSequence1);
-    // tcase_add_test(tc, conditionSequence2);
-    // tcase_add_test(tc, enableDisable);
+    tcase_add_test(tc, createDelete);
+    tcase_add_test(tc, createMultiple);
+    tcase_add_test(tc, conditionSequence1);
+    tcase_add_test(tc, conditionSequence2);
+    tcase_add_test(tc, enableDisable);
     tcase_add_test(tc, exclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);
 
     TCase *tc1 = tcase_create("Alarms and Conditions Supports Filtered Retain True");
-    // tcase_add_test(tc1, conditionSequence3);
+    tcase_add_test(tc1, conditionSequence3);
     tcase_add_checked_fixture(tc1, setupSupportsFilteredRetain, teardown);
     suite_add_tcase(s, tc1);
 
