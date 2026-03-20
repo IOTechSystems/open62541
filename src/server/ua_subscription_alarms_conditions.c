@@ -4007,7 +4007,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
         return UA_STATUSCODE_BADCONFIGURATIONERROR;
     }
 
-    UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELEVELALARMTYPE);
+    UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELIMITALARMTYPE);
     if (properties->hasLowLowLimit)
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowLowStateQN, NULL);
@@ -4688,7 +4688,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     UA_Boolean highStateVal = UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHSTATEBIT);
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHSTATEBIT) != highStateVal)
     {
-        ret = setOptionalTwoStateVariable(server, conditionId, fieldLowStateQN, highStateVal,
+        ret = setOptionalTwoStateVariable(server, conditionId, fieldHighStateQN, highStateVal,
                                           UA_LOCALIZEDTEXT(LOCALE, highStateVal ? ACTIVE_HIGH_TEXT : INACTIVE_HIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
@@ -4696,7 +4696,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     UA_Boolean highHighStateVal = UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHHIGHSTATEBIT) != highHighStateVal)
     {
-        ret = setOptionalTwoStateVariable(server, conditionId, fieldLowLowStateQN, highHighStateVal,
+        ret = setOptionalTwoStateVariable(server, conditionId, fieldHighHighStateQN, highHighStateVal,
                                           UA_LOCALIZEDTEXT(LOCALE, highHighStateVal ? ACTIVE_HIGHHIGH_TEXT : INACTIVE_HIGHHIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }

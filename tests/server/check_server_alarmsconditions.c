@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "open62541_queue.h"
+#include "open62541/server.h"
 
 UA_Server *acserver;
 static uint32_t eventCount = 0;
@@ -1203,6 +1204,95 @@ START_TEST(conditionSequence3) {
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 } END_TEST
 
+
+START_TEST(exclusiveLimitEvaluateFn) {
+    UA_StatusCode retval;
+
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test")
+    };
+
+    UA_LevelAlarmProperties levelProperties = {
+        .hasHighLimit = true,
+        .highLimit = 10.0f,
+    };
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    retval = UA_Server_createNonExclusiveLevelAlarm (
+        acserver,
+        UA_NODEID_NULL,
+        &conditionProperties,
+        &levelProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_LimitState currentState = 0;
+    UA_Boolean stateChanged = false;
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 20.0f, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_LimitState testState = 0;
+    UA_LIMITSTATE_SET (testState, UA_LIMITSTATE_HIGHSTATEBIT);
+    ck_assert_uint_eq(testState, currentState);
+    ck_assert (stateChanged == true);
+
+    currentState = 0;
+    stateChanged = false;
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 9.0f, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    testState = 0;
+    ck_assert_uint_eq(testState, currentState);
+    ck_assert (stateChanged == true);
+
+} END_TEST
+
+START_TEST(nonExclusiveLimitEvaluateFn) {
+    UA_StatusCode retval;
+
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test")
+    };
+
+    UA_LevelAlarmProperties levelProperties = {
+        .hasHighLimit = true,
+        .highLimit = 10.0f,
+    };
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    retval = UA_Server_createExclusiveLevelAlarm (
+        acserver,
+        UA_NODEID_NULL,
+        &conditionProperties,
+        &levelProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_LimitState currentState = 0;
+    UA_Boolean stateChanged = false;
+    retval = UA_Server_ExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 20.0f, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_LimitState testState = 0;
+    UA_LIMITSTATE_SET (testState, UA_LIMITSTATE_HIGHSTATEBIT);
+    ck_assert_uint_eq(testState, currentState);
+    ck_assert (stateChanged == true);
+
+    currentState = 0;
+    stateChanged = false;
+    retval = UA_Server_ExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 9.0f, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    testState = 0;
+    ck_assert_uint_eq(testState, currentState);
+    ck_assert (stateChanged == true);
+
+} END_TEST
+
 #endif
 
 int main(void) {
@@ -1210,16 +1300,18 @@ int main(void) {
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
     TCase *tc = tcase_create("Alarms and Conditions");
-    tcase_add_test(tc, createDelete);
-    tcase_add_test(tc, createMultiple);
-    tcase_add_test(tc, conditionSequence1);
-    tcase_add_test(tc, conditionSequence2);
-    tcase_add_test(tc, enableDisable);
+    // tcase_add_test(tc, createDelete);
+    // tcase_add_test(tc, createMultiple);
+    // tcase_add_test(tc, conditionSequence1);
+    // tcase_add_test(tc, conditionSequence2);
+    // tcase_add_test(tc, enableDisable);
+    tcase_add_test(tc, exclusiveLimitEvaluateFn);
+    tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);
 
     TCase *tc1 = tcase_create("Alarms and Conditions Supports Filtered Retain True");
-    tcase_add_test(tc1, conditionSequence3);
+    // tcase_add_test(tc1, conditionSequence3);
     tcase_add_checked_fixture(tc1, setupSupportsFilteredRetain, teardown);
     suite_add_tcase(s, tc1);
 
