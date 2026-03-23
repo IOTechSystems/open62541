@@ -3734,7 +3734,7 @@ UA_Server_initOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition
 }
 
 static UA_StatusCode
-setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+setupLimitAlarmNodesBase (UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
 {
     UA_StatusCode retval = setupAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
@@ -3852,7 +3852,7 @@ setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Lim
 }
 
 static UA_StatusCode
-initLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+initLimitAlarmNodesBase (UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
 {
     UA_StatusCode retval = initAlarmConditionNodes (server, condition, &properties->alarmConditionProperties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
@@ -3977,20 +3977,32 @@ initLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_Limi
     return retval;
 }
 
+static UA_StatusCode
+setupExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+{
+    return setupLimitAlarmNodesBase (server, condition, properties);
+}
+
+static UA_StatusCode
+initExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+{
+    return initLimitAlarmNodesBase (server, condition, properties);
+}
+
 UA_StatusCode
-UA_Server_setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+UA_Server_setupExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
 {
     lockServer(server);
-    UA_StatusCode retval = setupLimitAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = setupLimitAlarmNodesBase (server, condition, properties);
     unlockServer(server);
     return retval;
 }
 
 UA_StatusCode
-UA_Server_initLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
+UA_Server_initExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
 {
     lockServer(server);
-    UA_StatusCode retval = initLimitAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = initLimitAlarmNodesBase (server, condition, properties);
     unlockServer(server);
     return retval;
 }
@@ -3998,7 +4010,7 @@ UA_Server_initLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, con
 static UA_StatusCode
 setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
 {
-    UA_StatusCode retval = setupLimitAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = setupLimitAlarmNodesBase (server, condition, properties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     if (!properties->hasLowLimit && !properties->hasHighLimit)
@@ -4007,7 +4019,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
         return UA_STATUSCODE_BADCONFIGURATIONERROR;
     }
 
-    UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELEVELALARMTYPE);
+    UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELIMITALARMTYPE);
     if (properties->hasLowLowLimit)
     {
         retval = addOptionalField(server, *condition, typeId, fieldLowLowStateQN, NULL);
@@ -4039,7 +4051,7 @@ setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, 
 static UA_StatusCode
 initNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
 {
-    UA_StatusCode retval = initLimitAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = initLimitAlarmNodesBase (server, condition, properties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
 
     if (properties->hasLowLowLimit)
@@ -4088,16 +4100,13 @@ UA_Server_initNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *co
 }
 
 static UA_StatusCode
-setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+setupDeviationAlarmNodesBase (UA_Server *server, const UA_NodeId *condition,
                           const UA_DeviationAlarmProperties *properties)
 {
-    UA_StatusCode retval = setupLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
-    if (retval != UA_STATUSCODE_GOOD) return retval;
-
     if (properties->hasBaseSetpointNode)
     {
         UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE);
-        retval = addOptionalField(server, *condition, typeId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_BASESETPOINTNODE), NULL);
+        UA_StatusCode retval = addOptionalField(server, *condition, typeId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_BASESETPOINTNODE), NULL);
         CONDITION_ASSERT_RETURN_RETVAL(retval, "Adding optional BaseSetpointNode Field failed",);
     }
 
@@ -4105,15 +4114,30 @@ setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
 }
 
 static UA_StatusCode
-initDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+setupExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                           const UA_DeviationAlarmProperties *properties)
 {
-    UA_StatusCode retval = initLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    UA_StatusCode retval = setupExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
+    return setupDeviationAlarmNodesBase (server, condition, properties);
+}
 
+static UA_StatusCode
+setupNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
+    UA_StatusCode retval = setupNonExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+    return setupDeviationAlarmNodesBase (server, condition, properties);
+}
+
+static UA_StatusCode
+initDeviationAlarmNodesBase (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
     UA_Variant value;
     UA_Variant_setScalar(&value, (void *) (uintptr_t) &properties->setpointNode, &UA_TYPES[UA_TYPES_NODEID]);
-    retval = setConditionField(server, *condition, &value, UA_QUALIFIEDNAME(0, CONDITION_FIELD_SETPOINTNODE));
+    UA_StatusCode retval = setConditionField(server, *condition, &value, UA_QUALIFIEDNAME(0, CONDITION_FIELD_SETPOINTNODE));
     CONDITION_ASSERT_RETURN_RETVAL(retval, "Set SetpointNode Field failed",);
 
     if (properties->hasBaseSetpointNode)
@@ -4126,33 +4150,69 @@ initDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
     return UA_STATUSCODE_GOOD;
 }
 
+static UA_StatusCode
+initExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
+    UA_StatusCode retval = initExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+    return initDeviationAlarmNodesBase (server, condition, properties);
+}
+
+static UA_StatusCode
+initNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
+    UA_StatusCode retval = initNonExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+    return initDeviationAlarmNodesBase (server, condition, properties);
+}
+
 UA_StatusCode
-UA_Server_setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+UA_Server_setupExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                           const UA_DeviationAlarmProperties *properties)
 {
     lockServer(server);
-    UA_StatusCode retval = setupDeviationAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = setupExclusiveDeviationAlarmNodes (server, condition, properties);
     unlockServer(server);
     return retval;
 }
 
 UA_StatusCode
-UA_Server_initDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+UA_Server_initExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                           const UA_DeviationAlarmProperties *properties)
 {
     lockServer(server);
-    UA_StatusCode retval = initDeviationAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = initExclusiveDeviationAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
+UA_StatusCode
+UA_Server_setupNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = setupNonExclusiveDeviationAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
+UA_StatusCode
+UA_Server_initNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                          const UA_DeviationAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initNonExclusiveDeviationAlarmNodes (server, condition, properties);
     unlockServer(server);
     return retval;
 }
 
 static UA_StatusCode
-setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+setupRateOfChangeAlarmNodesBase (UA_Server *server, const UA_NodeId *condition,
                              const UA_RateOfChangeAlarmProperties *properties)
-{
-    UA_StatusCode retval = setupLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
-    if (retval != UA_STATUSCODE_GOOD) return retval;
-
+{ 
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
     UA_NodeId RateOfChangeAlarmTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVERATEOFCHANGEALARMTYPE);
     if (properties->hasEngineeringUnits)
     {
@@ -4164,12 +4224,10 @@ setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
 }
 
 static UA_StatusCode
-initRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+initRateOfChangeAlarmNodesBase (UA_Server *server, const UA_NodeId *condition,
                              const UA_RateOfChangeAlarmProperties *properties)
 {
-    UA_StatusCode retval = initLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
-    if (retval != UA_STATUSCODE_GOOD) return retval;
-
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
     if (properties->hasEngineeringUnits)
     {
         UA_Variant value;
@@ -4180,22 +4238,78 @@ initRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
     return retval;
 }
 
+static UA_StatusCode
+setupExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    UA_StatusCode retval = setupExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+    return setupRateOfChangeAlarmNodesBase (server, condition, properties);
+}
+
+static UA_StatusCode
+initExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    UA_StatusCode retval = initExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+    return initRateOfChangeAlarmNodesBase (server, condition, properties);
+}
+
 UA_StatusCode
-UA_Server_setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+UA_Server_setupExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                              const UA_RateOfChangeAlarmProperties *properties)
 {
     lockServer(server);
-    UA_StatusCode retval = setupRateOfChangeAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = setupExclusiveRateOfChangeAlarmNodes (server, condition, properties);
     unlockServer(server);
     return retval;
 }
 
 UA_StatusCode
-UA_Server_initRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+UA_Server_initExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                              const UA_RateOfChangeAlarmProperties *properties)
 {
     lockServer(server);
-    UA_StatusCode retval = initRateOfChangeAlarmNodes (server, condition, properties);
+    UA_StatusCode retval = initExclusiveRateOfChangeAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
+static UA_StatusCode
+setupNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    UA_StatusCode retval = setupNonExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+    return setupRateOfChangeAlarmNodesBase (server, condition, properties);
+}
+
+static UA_StatusCode
+initNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    UA_StatusCode retval = initNonExclusiveLimitAlarmNodes (server, condition, &properties->limitAlarmProperties);
+    if (retval != UA_STATUSCODE_GOOD) return retval;
+    return initRateOfChangeAlarmNodesBase (server, condition, properties);
+}
+
+UA_StatusCode
+UA_Server_setupNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = setupNonExclusiveRateOfChangeAlarmNodes (server, condition, properties);
+    unlockServer(server);
+    return retval;
+}
+
+UA_StatusCode
+UA_Server_initNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                             const UA_RateOfChangeAlarmProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initNonExclusiveRateOfChangeAlarmNodes (server, condition, properties);
     unlockServer(server);
     return retval;
 }
@@ -4688,7 +4802,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     UA_Boolean highStateVal = UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHSTATEBIT);
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHSTATEBIT) != highStateVal)
     {
-        ret = setOptionalTwoStateVariable(server, conditionId, fieldLowStateQN, highStateVal,
+        ret = setOptionalTwoStateVariable(server, conditionId, fieldHighStateQN, highStateVal,
                                           UA_LOCALIZEDTEXT(LOCALE, highStateVal ? ACTIVE_HIGH_TEXT : INACTIVE_HIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }
@@ -4696,7 +4810,7 @@ nonExclusiveLimitAlarmSetState (UA_Server *server, const UA_NodeId *conditionId,
     UA_Boolean highHighStateVal = UA_LIMITSTATE_CHECK(state, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
     if (UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHHIGHSTATEBIT) != highHighStateVal)
     {
-        ret = setOptionalTwoStateVariable(server, conditionId, fieldLowLowStateQN, highHighStateVal,
+        ret = setOptionalTwoStateVariable(server, conditionId, fieldHighHighStateQN, highHighStateVal,
                                           UA_LOCALIZEDTEXT(LOCALE, highHighStateVal ? ACTIVE_HIGHHIGH_TEXT : INACTIVE_HIGHHIGH_TEXT));
         if (ret != UA_STATUSCODE_GOOD) goto done;
     }

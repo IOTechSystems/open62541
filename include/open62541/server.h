@@ -2108,10 +2108,10 @@ typedef struct UA_LimitAlarmProperties
 } UA_LimitAlarmProperties;
 
 UA_StatusCode
-UA_Server_setupLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
+UA_Server_setupExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
 
 UA_StatusCode
-UA_Server_initLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
+UA_Server_initExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
 
 UA_StatusCode
 UA_Server_setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
@@ -2127,24 +2127,6 @@ UA_Server_exclusiveLimitAlarmEvaluate_default (
     const UA_Double *input
 );
 
-static inline UA_StatusCode
-UA_Server_createExclusiveLimitAlarm (
-    UA_Server *server,
-    UA_NodeId conditionId,
-    const UA_CreateConditionProperties *conditionProperties,
-    const UA_LimitAlarmProperties *limitAlarmProperties,
-    UA_NodeId* outConditionId
-)
-{
-    return __UA_Server_createCondition(
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELIMITALARMTYPE),
-        conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupLimitAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initLimitAlarmNodes,
-        limitAlarmProperties, outConditionId
-    );
-}
-
 UA_StatusCode UA_EXPORT
 UA_Server_nonExclusiveLimitAlarmEvaluate_default (
     UA_Server *server,
@@ -2152,76 +2134,6 @@ UA_Server_nonExclusiveLimitAlarmEvaluate_default (
     void *context,
     const UA_Double *input
 );
-
-static inline UA_StatusCode
-UA_Server_createNonExclusiveLimitAlarm (
-    UA_Server *server,
-    UA_NodeId conditionId,
-    const UA_CreateConditionProperties *conditionProperties,
-    const UA_LimitAlarmProperties *limitAlarmProperties,
-    UA_NodeId* outConditionId
-)
-{
-    return __UA_Server_createCondition(
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE),
-        conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupNonExclusiveLimitAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initNonExclusiveLimitAlarmNodes,
-        limitAlarmProperties, outConditionId
-    );
-}
-
-typedef struct UA_DeviationAlarmProperties
-{
-    UA_LimitAlarmProperties limitAlarmProperties;
-    UA_NodeId setpointNode;
-    UA_Boolean hasBaseSetpointNode;
-    UA_NodeId baseSetpointNode;
-} UA_DeviationAlarmProperties;
-
-UA_StatusCode UA_EXPORT
-UA_Server_setupDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
-                                    const UA_DeviationAlarmProperties *properties);
-
-UA_StatusCode UA_EXPORT
-UA_Server_initDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
-                                    const UA_DeviationAlarmProperties *properties);
-
-static inline UA_StatusCode
-UA_Server_createNonExclusiveDeviationAlarm(
-    UA_Server *server,
-    UA_NodeId conditionId,
-    const UA_CreateConditionProperties *conditionProperties,
-    const UA_DeviationAlarmProperties *properties,
-    UA_NodeId* outConditionId
-)
-{
-    return __UA_Server_createCondition(
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE),
-        conditionProperties,
-        (UA_ConditionTypeSetupFn) UA_Server_setupDeviationAlarmNodes,
-        (UA_ConditionTypeSetupFn) UA_Server_initDeviationAlarmNodes,
-        properties, outConditionId
-    );
-}
-
-static inline UA_StatusCode
-UA_Server_createExclusiveDeviationAlarm(
-    UA_Server *server,
-    UA_NodeId conditionId,
-    const UA_CreateConditionProperties *conditionProperties,
-    const UA_DeviationAlarmProperties *properties,
-    UA_NodeId* outConditionId
-)
-{
-    return __UA_Server_createCondition(
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVEDEVIATIONALARMTYPE),
-        conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupDeviationAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initDeviationAlarmNodes,
-        properties, outConditionId
-    );
-}
 
 typedef UA_LimitAlarmProperties UA_LevelAlarmProperties;
 
@@ -2237,8 +2149,8 @@ UA_Server_createNonExclusiveLevelAlarm(
     return __UA_Server_createCondition(
         server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELEVELALARMTYPE),
         conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupNonExclusiveLimitAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initNonExclusiveLimitAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_setupNonExclusiveLimitAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initNonExclusiveLimitAlarmNodes,
         properties, outConditionId
     );
 }
@@ -2255,8 +2167,69 @@ UA_Server_createExclusiveLevelAlarm(
     return __UA_Server_createCondition(
         server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELEVELALARMTYPE),
         conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupLimitAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initLimitAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_setupExclusiveLimitAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initExclusiveLimitAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+typedef struct UA_DeviationAlarmProperties
+{
+    UA_LimitAlarmProperties limitAlarmProperties;
+    UA_NodeId setpointNode;
+    UA_Boolean hasBaseSetpointNode;
+    UA_NodeId baseSetpointNode;
+} UA_DeviationAlarmProperties;
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+
+static inline UA_StatusCode
+UA_Server_createExclusiveDeviationAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_DeviationAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVEDEVIATIONALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupExclusiveDeviationAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initExclusiveDeviationAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+static inline UA_StatusCode
+UA_Server_createNonExclusiveDeviationAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_DeviationAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupNonExclusiveDeviationAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initNonExclusiveDeviationAlarmNodes,
         properties, outConditionId
     );
 }
@@ -2269,11 +2242,37 @@ typedef struct UA_RateOfChangeAlarmProperties
 } UA_RateOfChangeAlarmProperties;
 
 UA_StatusCode UA_EXPORT
-UA_Server_setupRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+UA_Server_setupExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                                        const UA_RateOfChangeAlarmProperties *properties);
 
 UA_StatusCode UA_EXPORT
-UA_Server_initRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+UA_Server_initExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                       const UA_RateOfChangeAlarmProperties *properties);
+
+static inline UA_StatusCode
+UA_Server_createExclusiveRateOfChangeAlarm (
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_RateOfChangeAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVERATEOFCHANGEALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupExclusiveRateOfChangeAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initExclusiveRateOfChangeAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                       const UA_RateOfChangeAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                                        const UA_RateOfChangeAlarmProperties *properties);
 
 static inline UA_StatusCode
@@ -2288,29 +2287,12 @@ UA_Server_createNonExclusiveRateOfChangeAlarm(
     return __UA_Server_createCondition(
         server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVERATEOFCHANGEALARMTYPE),
         conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupRateOfChangeAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initRateOfChangeAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_setupNonExclusiveRateOfChangeAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initNonExclusiveRateOfChangeAlarmNodes,
         properties, outConditionId
     );
 }
 
-static inline UA_StatusCode
-UA_Server_createExclusiveRateOfChangeAlarm(
-    UA_Server *server,
-    UA_NodeId conditionId,
-    const UA_CreateConditionProperties *conditionProperties,
-    const UA_RateOfChangeAlarmProperties *properties,
-    UA_NodeId* outConditionId
-)
-{
-    return __UA_Server_createCondition(
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVERATEOFCHANGEALARMTYPE),
-        conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupRateOfChangeAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initRateOfChangeAlarmNodes,
-        properties, outConditionId
-    );
-}
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
