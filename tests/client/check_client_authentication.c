@@ -13,6 +13,7 @@
 #include <open62541/plugin/securitypolicy.h>
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/plugin/accesscontrol_default.h>
+#include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/server.h>
 
 #include "client/ua_client_internal.h"
@@ -23,21 +24,22 @@
 
 #include "test_helpers.h"
 #include "certificates.h"
+#include "../encryption/certificates.h"
 #include "testing_clock.h"
 #include "thread_wrapper.h"
 
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
     UA_Server_run_iterate(server, true);
     return 0;
 }
 
 static void setup(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load server certificate and private key */
     UA_ByteString certificate;
@@ -70,19 +72,399 @@ static void setup(void) {
 
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_CertificateGroup_AcceptAll(&config->secureChannelPKI);
+    UA_CertificateGroup_AcceptAll(&config->sessionPKI);
+
+    /* Set the ApplicationUri used in the server certificate */
+    UA_String_clear(&config->applicationDescription.applicationUri);
+    config->applicationDescription.applicationUri =
+        UA_STRING_ALLOC("urn:open62541.server.application");
+
+    /* Add username/password auth */
+    UA_UsernamePasswordLogin login;
+    login.password = UA_STRING("admin");
+    login.username = UA_STRING("admin");
+    config->accessControl.clear(&config->accessControl);
+    const UA_String userTokenPolicy = UA_STRING("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
+    UA_AccessControl_default(config, true, &userTokenPolicy, 1, &login);
 
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
 }
 
 static void teardown(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
 }
 
+static void
+assertCertificateUserId(const UA_Client *client) {
+    UA_Variant userId;
+    UA_Variant_init(&userId);
+    UA_StatusCode res = UA_Server_getSessionAttributeCopy(
+        server, &client->sessionId, UA_QUALIFIEDNAME(0, "clientUserId"), &userId);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    ck_assert(UA_Variant_hasScalarType(&userId, &UA_TYPES[UA_TYPES_STRING]));
+    ck_assert_uint_gt(((UA_String*)userId.data)->length, 0);
+    UA_Variant_clear(&userId);
+}
+
 START_TEST(Client_connect_certificate) {
+    /* Load client certificate and private key for the SecureChannel */
+    UA_ByteString certificate;
+    certificate.length = CLIENT_CERT_DER_LENGTH;
+    certificate.data = CLIENT_CERT_DER_DATA;
+
+    UA_ByteString privateKey;
+    privateKey.length = CLIENT_KEY_DER_LENGTH;
+    privateKey.data = CLIENT_KEY_DER_DATA;
+
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+
+    /* Set securityMode and securityPolicyUri */
+    cc->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+    cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
+
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri =
+        UA_STRING_ALLOC("urn:open62541.server.application");
+
+    UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey, NULL, 0, NULL, 0);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+}
+END_TEST
+
+START_TEST(Client_connect_invalid_certificate) {
+    /* Load client certificate and private key for the SecureChannel */
+    UA_ByteString certificate;
+    certificate.length = CLIENT_CERT_DER_LENGTH;
+    certificate.data = CLIENT_CERT_DER_DATA;
+
+    UA_ByteString privateKey;
+    privateKey.length = CLIENT_KEY_DER_LENGTH;
+    privateKey.data = CLIENT_KEY_DER_DATA;
+
+    /* Load client certificate and private key for authentication
+     * This needs to be CLIENT_CERT_AUTH_DER_DATA, but we provoke a failure. */
+    UA_ByteString certificateAuth;
+    certificateAuth.length = CLIENT_CERT_DER_LENGTH;
+    certificateAuth.data = CLIENT_CERT_DER_DATA;
+
+    UA_ByteString privateKeyAuth;
+    privateKeyAuth.length = CLIENT_KEY_DER_LENGTH;
+    privateKeyAuth.data = CLIENT_KEY_DER_DATA;
+
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+
+    /* Set securityMode and securityPolicyUri */
+    cc->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+    cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
+
+    /* Also sets the authentication SecurityPolicies */
+    UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey, NULL, 0, NULL, 0);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+
+    /* Overrides the authentication SecurityPolicies */
+    UA_ClientConfig_setAuthenticationCert(cc, certificateAuth, privateKeyAuth);
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+
+    /* openssl v.3 returns a different exit code than other versions. */
+    //ck_assert_uint_eq(retval, UA_STATUSCODE_BADCERTIFICATEUNTRUSTED);
+    ck_assert_uint_ne(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+}
+END_TEST
+
+START_TEST(client_connect_none_username_basic256Sha256) {
+        /*
+         * Attempt to connect an endpoint with None security policy and username
+         * identity token with Basic256Sha256.
+         * The client is configured to only have the None security policy in
+         * securityPolicies and Basic256Sha256 in authSecurityPolicies.
+         */
+
+        /* Load client certificate and private key for the SecureChannel */
+        UA_ByteString certificate;
+        certificate.length = CLIENT_CERT_DER_LENGTH;
+        certificate.data = CLIENT_CERT_DER_DATA;
+
+        UA_ByteString privateKey;
+        privateKey.length = CLIENT_KEY_DER_LENGTH;
+        privateKey.data = CLIENT_KEY_DER_DATA;
+
+        UA_Client *client = UA_Client_newForUnitTest();
+        UA_ClientConfig *cc = UA_Client_getConfig(client);
+
+        /* Set securityMode and securityPolicyUri */
+        cc->securityMode = UA_MESSAGESECURITYMODE_NONE;
+        cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#None");
+
+        UA_ClientConfig_setDefault(cc);
+
+        /* Set the ApplicationUri used in the certificate */
+        UA_String_clear(&cc->clientDescription.applicationUri);
+        cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
+
+        /* Rebind the SecureChannel None policy with the client certificate */
+        for(size_t i = 0; i < cc->securityPoliciesSize; ++i) {
+            cc->securityPolicies[i].clear(&cc->securityPolicies[i]);
+            UA_SecurityPolicy_None(&cc->securityPolicies[i], certificate, cc->logging);
+        }
+
+        /* Use the relevant security policies in authSecurityPolicies */
+        for(size_t i = 0; i < cc->authSecurityPoliciesSize; ++i)
+            cc->authSecurityPolicies[i].clear(&cc->authSecurityPolicies[i]);
+        UA_free(cc->authSecurityPolicies);
+        cc->authSecurityPolicies = (UA_SecurityPolicy*)UA_calloc(2, sizeof(UA_SecurityPolicy));
+        cc->authSecurityPoliciesSize = 2;
+        UA_SecurityPolicy_None(&cc->authSecurityPolicies[0], certificate, cc->logging);
+        UA_SecurityPolicy_Basic256Sha256(&cc->authSecurityPolicies[1], certificate, privateKey, cc->logging);
+
+        UA_StatusCode retval = UA_Client_connectUsername(client, "opc.tcp://localhost:4840", "admin", "admin");
+
+        ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+        UA_Client_disconnect(client);
+        UA_Client_delete(client);
+    }
+END_TEST
+
+#if defined(UA_ENABLE_ENCRYPTION_OPENSSL)
+START_TEST(client_connect_none_username_eccpnist256) {
+    UA_ByteString certificate;
+    certificate.length = CERT_P256_DER_LENGTH;
+    certificate.data = CERT_P256_DER_DATA;
+
+    UA_ByteString privateKey;
+    privateKey.length = KEY_P256_DER_LENGTH;
+    privateKey.data = KEY_P256_DER_DATA;
+
+    /* Stop the server */
+    UA_atomic_store(&running, false);
+    THREAD_JOIN(server_thread);
+    UA_Server_run_shutdown(server);
+
+    /* Set ECC PNIST256 as the only available SecurityPolicy */
+    UA_ServerConfig *sConfig = UA_Server_getConfig(server);
+    for(size_t i = 0; i < sConfig->securityPoliciesSize; i++) {
+        UA_SecurityPolicy *sc = &sConfig->securityPolicies[i];
+        sc->clear(sc);
+    }
+    UA_SecurityPolicy_EccNistP256(sConfig->securityPolicies,
+                                  UA_APPLICATIONTYPE_SERVER, certificate,
+                                  privateKey, sConfig->logging);
+    UA_SecurityPolicy_None(sConfig->securityPolicies + 1, certificate,
+                           sConfig->logging);
+    sConfig->securityPoliciesSize = 2;
+
+    UA_String_clear(&sConfig->applicationDescription.applicationUri);
+    sConfig->applicationDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
+
+    /* Start the server */
+    UA_atomic_store(&running, true);
+    UA_Server_run_startup(server);
+    THREAD_CREATE(server_thread, serverloop);
+
+    /* Load client certificate and private key for the SecureChannel */
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+
+    /* Set securityMode and securityPolicyUri */
+    cc->securityMode = UA_MESSAGESECURITYMODE_NONE;
+    cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#None");
+
+    UA_ClientConfig_setDefault(cc);
+
+    /* Set the ApplicationUri used in the certificate */
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
+
+    /* Only use the relevant security policy in authSecurityPolicies */
+    for(size_t i = 0; i < cc->authSecurityPoliciesSize; ++i)
+        cc->authSecurityPolicies[i].clear(&cc->authSecurityPolicies[i]);
+    UA_free(cc->authSecurityPolicies);
+    cc->authSecurityPolicies = (UA_SecurityPolicy*)UA_calloc(2, sizeof(UA_SecurityPolicy));
+    cc->authSecurityPoliciesSize = 2;
+    UA_SecurityPolicy_None(&cc->authSecurityPolicies[0], certificate, cc->logging);
+    UA_SecurityPolicy_EccNistP256(&cc->authSecurityPolicies[1],
+                                  UA_APPLICATIONTYPE_CLIENT,
+                                  certificate, privateKey, cc->logging);
+
+    /* Rebind the SecureChannel None policy with the client certificate so the
+     * server can determine the session-level SecurityPolicy for ECC */
+    for(size_t i = 0; i < cc->securityPoliciesSize; ++i)
+        cc->securityPolicies[i].clear(&cc->securityPolicies[i]);
+    UA_free(cc->securityPolicies);
+    cc->securityPolicies = (UA_SecurityPolicy*)UA_calloc(1, sizeof(UA_SecurityPolicy));
+    cc->securityPoliciesSize = 1;
+    UA_SecurityPolicy_None(&cc->securityPolicies[0], certificate, cc->logging);
+
+    UA_StatusCode retval = UA_Client_connectUsername(client, "opc.tcp://localhost:4840", "admin", "admin");
+
+    /* ECC (and RSA-DH) policies must NOT be used to secure a UserIdentityToken
+     * over a #None SecureChannel: they rely on ephemeral key agreement that
+     * must be bound to a secured channel. With only an ECC policy available the
+     * server has no static-RSA policy to encrypt the password, so it does not
+     * offer the username UserTokenPolicy and the connect is rejected. */
+    ck_assert_uint_ne(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+}
+END_TEST
+
+START_TEST(client_connect_ecc_username_eccpnist256) {
+    UA_ByteString certificate;
+    certificate.length = CERT_P256_DER_LENGTH;
+    certificate.data = CERT_P256_DER_DATA;
+
+    UA_ByteString privateKey;
+    privateKey.length = KEY_P256_DER_LENGTH;
+    privateKey.data = KEY_P256_DER_DATA;
+
+    /* Stop the server */
+    UA_atomic_store(&running, false);
+    THREAD_JOIN(server_thread);
+    UA_Server_run_shutdown(server);
+
+    /* Set ECC PNIST256 as the only available SecurityPolicy */
+    UA_ServerConfig *sConfig = UA_Server_getConfig(server);
+    for(size_t i = 0; i < sConfig->securityPoliciesSize; i++) {
+        UA_SecurityPolicy *sc = &sConfig->securityPolicies[i];
+        sc->clear(sc);
+    }
+    UA_SecurityPolicy_EccNistP256(sConfig->securityPolicies,
+                                  UA_APPLICATIONTYPE_SERVER, certificate,
+                                  privateKey, sConfig->logging);
+    UA_SecurityPolicy_None(sConfig->securityPolicies + 1, certificate,
+                           sConfig->logging);
+    sConfig->securityPoliciesSize = 2;
+    UA_ServerConfig_addAllEndpoints(sConfig);
+
+    UA_String_clear(&sConfig->applicationDescription.applicationUri);
+    sConfig->applicationDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
+
+    /* Start the server */
+    UA_atomic_store(&running, true);
+    UA_Server_run_startup(server);
+    THREAD_CREATE(server_thread, serverloop);
+
+    /* Load client certificate and private key for the SecureChannel */
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+
+    /* Set securityMode and securityPolicyUri */
+    cc->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+    cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#ECC_nistP256");
+
+    UA_ClientConfig_setDefault(cc);
+
+    /* Set the ApplicationUri used in the certificate */
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
+
+    for(size_t i = 0; i < cc->securityPoliciesSize; ++i)
+        cc->securityPolicies[i].clear(&cc->securityPolicies[i]);
+    UA_free(cc->securityPolicies);
+    cc->securityPolicies = (UA_SecurityPolicy *)
+        UA_calloc(2, sizeof(UA_SecurityPolicy));
+    UA_SecurityPolicy_EccNistP256(&cc->securityPolicies[0],
+                                  UA_APPLICATIONTYPE_CLIENT,
+                                  certificate, privateKey, cc->logging);
+    UA_SecurityPolicy_None(&cc->securityPolicies[1], certificate,
+                           cc->logging);
+    cc->securityPoliciesSize = 2;
+
+    /* Only use the relevant security policy in authSecurityPolicies */
+    for(size_t i = 0; i < cc->authSecurityPoliciesSize; ++i)
+        cc->authSecurityPolicies[i].clear(&cc->authSecurityPolicies[i]);
+    UA_free(cc->authSecurityPolicies);
+    cc->authSecurityPolicies = (UA_SecurityPolicy *)
+        UA_calloc(1, sizeof(UA_SecurityPolicy));
+    cc->authSecurityPoliciesSize = 1;
+    UA_SecurityPolicy_EccNistP256(&cc->authSecurityPolicies[0],
+                                  UA_APPLICATIONTYPE_CLIENT,
+                                  certificate, privateKey, cc->logging);
+
+    UA_StatusCode retval = UA_Client_connectUsername(client, "opc.tcp://localhost:4840", "admin", "admin");
+
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+}
+END_TEST
+#endif
+
+START_TEST(client_connect_basic256Sha256_anonymous) {
+    /*
+     * Attempt to connect an endpoint with Basic256Sha256 security policy
+     * and anonymous identity token.
+     * The client is configured to only have the None and Basic256Sha256 security
+     * policy in securityPolicies and an empty authSecurityPolicies array.
+     */
+
+    /* Load client certificate and private key for the SecureChannel */
+    UA_ByteString certificate;
+    certificate.length = CLIENT_CERT_DER_LENGTH;
+    certificate.data = CLIENT_CERT_DER_DATA;
+
+    UA_ByteString privateKey;
+    privateKey.length = CLIENT_KEY_DER_LENGTH;
+    privateKey.data = CLIENT_KEY_DER_DATA;
+
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+
+    /* Set securityMode and securityPolicyUri */
+    cc->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+    cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
+
+    UA_ClientConfig_setDefault(cc);
+    cc->securityPolicies = (UA_SecurityPolicy*)UA_realloc(cc->securityPolicies, sizeof(UA_SecurityPolicy) * 2);
+    UA_SecurityPolicy_Basic256Sha256(&cc->securityPolicies[1], certificate, privateKey, cc->logging);
+    cc->securityPoliciesSize = 2;
+
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+
+    /* Set the ApplicationUri used in the certificate */
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
+
+    /* Override authSecurityPolicies with Basic256Sha256 so that an
+     * anonymous token can be matched against it */
+    for(size_t i = 0; i < cc->authSecurityPoliciesSize; ++i)
+        cc->authSecurityPolicies[i].clear(&cc->authSecurityPolicies[i]);
+    UA_free(cc->authSecurityPolicies);
+    cc->authSecurityPolicies = (UA_SecurityPolicy*)UA_calloc(1, sizeof(UA_SecurityPolicy));
+    cc->authSecurityPoliciesSize = 1;
+    UA_SecurityPolicy_Basic256Sha256(&cc->authSecurityPolicies[0], certificate, privateKey, cc->logging);
+
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+} END_TEST
+
+START_TEST(client_authenticate_with_certificate) {
     /* Load client certificate and private key for the SecureChannel */
     UA_ByteString certificate;
     certificate.length = CLIENT_CERT_DER_LENGTH;
@@ -108,68 +490,67 @@ START_TEST(Client_connect_certificate) {
     cc->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
     cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
 
-    UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
-                                         NULL, 0, NULL, 0);
-    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
-
-    /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&cc->clientDescription.applicationUri);
     cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
 
+    UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey, NULL, 0, NULL, 0);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+
+    /* Set the authentication certificate */
     UA_ClientConfig_setAuthenticationCert(cc, certificateAuth, privateKeyAuth);
+
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
 
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    assertCertificateUserId(client);
 
     UA_Client_disconnect(client);
     UA_Client_delete(client);
 }
 END_TEST
 
-START_TEST(Client_connect_invalid_certificate) {
-        /* Load client certificate and private key for the SecureChannel */
-        UA_ByteString certificate;
-        certificate.length = CLIENT_CERT_DER_LENGTH;
-        certificate.data = CLIENT_CERT_DER_DATA;
+START_TEST(client_authenticate_none_with_certificate) {
+    /* Load client certificate and private key for the SecureChannel */
+    UA_ByteString certificate;
+    certificate.length = CLIENT_CERT_DER_LENGTH;
+    certificate.data = CLIENT_CERT_DER_DATA;
 
-        UA_ByteString privateKey;
-        privateKey.length = CLIENT_KEY_DER_LENGTH;
-        privateKey.data = CLIENT_KEY_DER_DATA;
+    UA_ByteString privateKey;
+    privateKey.length = CLIENT_KEY_DER_LENGTH;
+    privateKey.data = CLIENT_KEY_DER_DATA;
 
-        /* Load client certificate and private key for authentication */
-        UA_ByteString certificateAuth;
-        certificateAuth.length = CLIENT_CERT_DER_LENGTH;
-        certificateAuth.data = CLIENT_CERT_DER_DATA;
+    /* Load client certificate and private key for authentication */
+    UA_ByteString certificateAuth;
+    certificateAuth.length = CLIENT_CERT_AUTH_DER_LENGTH;
+    certificateAuth.data = CLIENT_CERT_AUTH_DER_DATA;
 
-        UA_ByteString privateKeyAuth;
-        privateKeyAuth.length = CLIENT_KEY_DER_LENGTH;
-        privateKeyAuth.data = CLIENT_KEY_DER_DATA;
+    UA_ByteString privateKeyAuth;
+    privateKeyAuth.length = CLIENT_KEY_AUTH_DER_LENGTH;
+    privateKeyAuth.data = CLIENT_KEY_AUTH_DER_DATA;
 
-        UA_Client *client = UA_Client_newForUnitTest();
-        UA_ClientConfig *cc = UA_Client_getConfig(client);
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
 
-        /* Set securityMode and securityPolicyUri */
-        cc->securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
-        cc->securityPolicyUri = UA_String_fromChars("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
+    /* Set securityMode and securityPolicyUri */
+    cc->securityMode = UA_MESSAGESECURITYMODE_NONE;
 
-        UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
-                                             NULL, 0, NULL, 0);
-        UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
 
-        /* Set the ApplicationUri used in the certificate */
-        UA_String_clear(&cc->clientDescription.applicationUri);
-        cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
+    UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey, NULL, 0, NULL, 0);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
 
-        UA_ClientConfig_setAuthenticationCert(cc, certificateAuth, privateKeyAuth);
-        UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    /* Set the authentication certificate */
+    UA_ClientConfig_setAuthenticationCert(cc, certificateAuth, privateKeyAuth);
 
-        /* openssl v.3 returns a different exit code than other versions. */
-        //ck_assert_uint_eq(retval, UA_STATUSCODE_BADCERTIFICATEUNTRUSTED);
-        ck_assert_uint_ne(retval, UA_STATUSCODE_GOOD);
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
 
-        UA_Client_disconnect(client);
-        UA_Client_delete(client);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    assertCertificateUserId(client);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+}
 END_TEST
 
 static Suite* testSuite_Client(void) {
@@ -178,6 +559,14 @@ static Suite* testSuite_Client(void) {
     tcase_add_checked_fixture(tc_client, setup, teardown);
     tcase_add_test(tc_client, Client_connect_certificate);
     tcase_add_test(tc_client, Client_connect_invalid_certificate);
+    tcase_add_test(tc_client, client_connect_none_username_basic256Sha256);
+#if defined(UA_ENABLE_ENCRYPTION_OPENSSL)
+    tcase_add_test(tc_client, client_connect_none_username_eccpnist256);
+    tcase_add_test(tc_client, client_connect_ecc_username_eccpnist256);
+#endif
+    tcase_add_test(tc_client, client_connect_basic256Sha256_anonymous);
+    tcase_add_test(tc_client, client_authenticate_with_certificate);
+    tcase_add_test(tc_client, client_authenticate_none_with_certificate);
     suite_add_tcase(s,tc_client);
     return s;
 }

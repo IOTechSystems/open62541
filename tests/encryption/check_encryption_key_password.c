@@ -29,22 +29,37 @@
 
 static UA_StatusCode
 privateKeyPasswordCallback(UA_ClientConfig *cc, UA_ByteString *password) {
+    (void)cc;
     *password = UA_STRING_ALLOC("pass1234");
     return UA_STATUSCODE_GOOD;
 }
 
+static UA_StatusCode
+privateKeyPasswordCallbackWrong(UA_ClientConfig *cc, UA_ByteString *password) {
+    (void)cc;
+    *password = UA_STRING_ALLOC("wrong-password");
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+privateKeyPasswordCallbackFail(UA_ClientConfig *cc, UA_ByteString *password) {
+    (void)cc;
+    UA_ByteString_init(password);
+    return UA_STATUSCODE_BADINTERNALERROR;
+}
+
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
     UA_Server_run_iterate(server, true);
     return 0;
 }
 
 static void setup(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load certificate and private key */
     UA_ByteString certificate;
@@ -63,7 +78,7 @@ static void setup(void) {
     size_t issuerListSize = 0;
     UA_ByteString *issuerList = NULL;
 
-    /* Loading of a revocation list currently unsupported */
+    /* Revocation lists are supported, but not used here */
     UA_ByteString *revocationList = NULL;
     size_t revocationListSize = 0;
 
@@ -80,7 +95,7 @@ static void setup(void) {
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
-        UA_STRING_ALLOC("urn:unconfigured:application");
+        UA_STRING_ALLOC("urn:open62541.unconfigured.application");
 
     for(size_t i = 0; i < trustListSize; i++)
         UA_ByteString_clear(&trustList[i]);
@@ -90,7 +105,7 @@ static void setup(void) {
 }
 
 static void teardown(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
@@ -140,11 +155,15 @@ START_TEST(encryption_connect_pem) {
                                                   trustList, trustListSize,
                                                   revocationList, revocationListSize);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
-    cc->certificateVerification.clear(&cc->certificateVerification);
     UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Aes256_Sha256_RsaPss");
     ck_assert(client != NULL);
+
+    /* Set the ApplicationUri used in the certificate */
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
 
     for(size_t deleteCount = 0; deleteCount < trustListSize; deleteCount++) {
         UA_ByteString_clear(&trustList[deleteCount]);
@@ -166,12 +185,56 @@ START_TEST(encryption_connect_pem) {
 }
 END_TEST
 
+START_TEST(encryption_config_pem_passwordCallback_failure) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+    UA_ByteString certificate;
+    UA_ByteString privateKey;
+    UA_StatusCode retval;
+
+    certificate.length = CERT_PEM_LENGTH;
+    certificate.data = CERT_PEM_DATA;
+    privateKey.length = KEY_PEM_PASSWORD_LENGTH;
+    privateKey.data = KEY_PEM_PASSWORD_DATA;
+
+    cc->privateKeyPasswordCallback = privateKeyPasswordCallbackFail;
+    retval = UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
+                                                  NULL, 0, NULL, 0);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADINTERNALERROR);
+
+    UA_Client_delete(client);
+}
+END_TEST
+
+START_TEST(encryption_config_pem_passwordCallback_wrongPassword) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+    UA_ByteString certificate;
+    UA_ByteString privateKey;
+    UA_StatusCode retval;
+
+    certificate.length = CERT_PEM_LENGTH;
+    certificate.data = CERT_PEM_DATA;
+    privateKey.length = KEY_PEM_PASSWORD_LENGTH;
+    privateKey.data = KEY_PEM_PASSWORD_DATA;
+
+    cc->privateKeyPasswordCallback = privateKeyPasswordCallbackWrong;
+    retval = UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
+                                                  NULL, 0, NULL, 0);
+    ck_assert_uint_ne(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_delete(client);
+}
+END_TEST
+
 static Suite* testSuite_encryption(void) {
     Suite *s = suite_create("Encryption");
     TCase *tc_encryption = tcase_create("Encryption Aes256Sha256RsaPss security policy");
     tcase_add_checked_fixture(tc_encryption, setup, teardown);
 #ifdef UA_ENABLE_ENCRYPTION
     tcase_add_test(tc_encryption, encryption_connect_pem);
+    tcase_add_test(tc_encryption, encryption_config_pem_passwordCallback_failure);
+    tcase_add_test(tc_encryption, encryption_config_pem_passwordCallback_wrongPassword);
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_encryption);
     return s;

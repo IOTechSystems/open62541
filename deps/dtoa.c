@@ -35,7 +35,7 @@
 #define fracmask  0x000FFFFFFFFFFFFFU
 #define expmask   0x7FF0000000000000U
 #define hiddenbit 0x0010000000000000U
-#define signmask  0x8000000000000000U
+//#define signmask  0x8000000000000000U
 #define expbias   (1023 + 52)
 
 #define absv(n) ((n) < 0 ? -(n) : (n))
@@ -351,7 +351,6 @@ unsigned dtoa(double d, char* buffer) {
     if(sign) {
         buffer[0] = '-';
         pos++;
-        buffer++;
     }
 
     if(exponent == ((1u << exponent_bits) - 1u)) {
@@ -368,5 +367,5 @@ unsigned dtoa(double d, char* buffer) {
     char digits[18];
     memset(digits, 0, 18);
     unsigned ndigits = grisu2(bits, digits, &K);
-    return pos + emit_digits(digits, ndigits, buffer, K, sign);
+    return pos + emit_digits(digits, ndigits, &buffer[pos], K, sign);
 }

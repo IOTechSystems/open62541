@@ -4,25 +4,29 @@
  *
  *    Copyright 2018 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2019 (c) HMS Industrial Networks AB (Author: Jonas Green)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_SESSION_H_
 #define UA_SESSION_H_
 
+#include <open62541/plugin/securitypolicy.h>
 #include <open62541/util.h>
 
 #include "../ua_securechannel.h"
 
 _UA_BEGIN_DECLS
 
-#define UA_MAXCONTINUATIONPOINTS 5
+#define UA_MAXCONTINUATIONPOINTS 32
 
 struct ContinuationPoint;
 typedef struct ContinuationPoint ContinuationPoint;
 
-/* Returns the next entry in the linked list */
-ContinuationPoint *
-ContinuationPoint_clear(ContinuationPoint *cp);
+typedef TAILQ_HEAD(ContinuationPointQueue, ContinuationPoint)
+    ContinuationPointQueue;
+
+void
+ContinuationPointQueue_clear(ContinuationPointQueue *queue);
 
 struct UA_Subscription;
 typedef struct UA_Subscription UA_Subscription;
@@ -30,7 +34,7 @@ typedef struct UA_Subscription UA_Subscription;
 #ifdef UA_ENABLE_SUBSCRIPTIONS
 typedef struct UA_PublishResponseEntry {
     SIMPLEQ_ENTRY(UA_PublishResponseEntry) listEntry;
-    UA_UInt32 requestId;
+    UA_UInt64 responseToken;
     UA_DateTime maxTime; /* Based on the TimeoutHint of the request */
     UA_PublishResponse response;
 } UA_PublishResponseEntry;
@@ -43,26 +47,43 @@ struct UA_Session {
     UA_NodeId sessionId;
     UA_NodeId authenticationToken;
     UA_String sessionName;
-    UA_Boolean activated;
+    UA_SessionState state;
+
+    /* For ECC, client and server exchange ephemeral keys used for the
+     * EccEncryptedSecret. The ephemeral keys have to be attached to the session
+     * (and not the SecureChannel) so that the session can be re-activated on a
+     * different SecureChannel. The SecurityPolicy "context" is created with the
+     * client's ApplicationInstanceCertificate. */
+    UA_SecurityPolicy *sessionSp;
+    void *sessionSpContext;
 
     void *context; /* Pointer assigned by the user in the
                     * accessControl->activateSession context */
 
     UA_ByteString serverNonce;
 
+    /* The clientNonce from the CreateSession request. Retained for the
+     * v1.05.07 channel-bound ActivateSession ClientSignature verification
+     * (secureChannelEnhancements). */
+    UA_ByteString clientNonce;
+
     UA_ApplicationDescription clientDescription;
+    UA_ByteString clientCertificate; /* Must be the same as for the
+                                      * SecureChannel. If the SecureChannel is
+                                      * #None, verify and store here. */
     UA_String clientUserIdOfSession;
+    UA_UserTokenType userTokenType;
     UA_Double timeout; /* in ms */
     UA_DateTime validTill;
 
-    UA_KeyValueMap *attributes;
+    UA_KeyValueMap attributes;
 
     /* TODO: Currently unused */
     UA_UInt32 maxRequestMessageSize;
     UA_UInt32 maxResponseMessageSize;
 
-    UA_UInt16         availableContinuationPoints;
-    ContinuationPoint *continuationPoints;
+    size_t continuationPointsSize;
+    ContinuationPointQueue continuationPoints;
 
     /* Localization information */
     size_t localeIdsSize;
@@ -86,6 +107,13 @@ struct UA_Session {
     UA_SessionSecurityDiagnosticsDataType securityDiagnostics;
     UA_SessionDiagnosticsDataType diagnostics;
 #endif
+
+#ifdef UA_ENABLE_RBAC
+    /* Roles assigned to this session during activation.
+     * Populated by the activateSession callback. */
+    size_t rolesSize;
+    UA_NodeId *roles;
+#endif
 };
 
 /**
@@ -94,13 +122,18 @@ struct UA_Session {
 
 void UA_Session_init(UA_Session *session);
 void UA_Session_clear(UA_Session *session, UA_Server *server);
-void UA_Session_attachToSecureChannel(UA_Session *session, UA_SecureChannel *channel);
-void UA_Session_detachFromSecureChannel(UA_Session *session);
+void UA_Session_attachToSecureChannel(UA_Server *server, UA_Session *session,
+                                      UA_SecureChannel *channel);
+void UA_Session_detachFromSecureChannel(UA_Server *server, UA_Session *session);
 UA_StatusCode UA_Session_generateNonce(UA_Session *session);
 
 /* If any activity on a session happens, the timeout is extended */
 void UA_Session_updateLifetime(UA_Session *session, UA_DateTime now,
                                UA_DateTime nowMonotonic);
+
+void
+notifySession(UA_Server *server, UA_Session *session,
+              UA_ApplicationNotificationType type);
 
 /**
  * Subscription handling
@@ -142,6 +175,7 @@ UA_Session_dequeuePublishReq(UA_Session *session);
  * string of length zero). */
 
 #define UA_LOG_SESSION_INTERNAL(LOGGER, LEVEL, SESSION, MSG, ...)       \
+    do {                                                                \
     if(UA_LOGLEVEL <= UA_LOGLEVEL_##LEVEL) {                            \
         UA_String sessionName = (SESSION) ? (SESSION)->sessionName: UA_STRING_NULL; \
         unsigned long sockId = ((SESSION) && (SESSION)->channel) ?      \
@@ -150,8 +184,9 @@ UA_Session_dequeuePublishReq(UA_Session *session);
             (SESSION)->channel->securityToken.channelId : 0;            \
         UA_LOG_##LEVEL(LOGGER, UA_LOGCATEGORY_SESSION,                  \
                        "TCP %lu\t| SC %" PRIu32 "\t| Session \"%S\"\t| " MSG "%.0s", \
-                       sockId, chanId, sessionName, __VA_ARGS__);   \
-    }
+                       sockId, chanId, sessionName, __VA_ARGS__);       \
+    }                                                                   \
+    } while (0)
 
 #define UA_LOG_TRACE_SESSION(LOGGER, SESSION, ...)                      \
     UA_MACRO_EXPAND(UA_LOG_SESSION_INTERNAL(LOGGER, TRACE, SESSION, __VA_ARGS__, ""))

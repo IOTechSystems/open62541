@@ -2,12 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
- * Copyright (c) 2017-2022 Fraunhofer IOSB (Author: Andreas Ebner)
+ * Copyright (c) 2017-2025 Fraunhofer IOSB (Author: Andreas Ebner)
  * Copyright (c) 2018 Fraunhofer IOSB (Author: Julius Pfrommer)
  * Copyright (c) 2021 Fraunhofer IOSB (Author: Jan Hermes)
  * Copyright (c) 2022 Siemens AG (Author: Thomas Fischer)
  * Copyright (c) 2022 Fraunhofer IOSB (Author: Noel Graf)
  * Copyright (c) 2022 Linutronix GmbH (Author: Muddasir Shakil)
+ * Copyright 2025 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include "ua_pubsub_internal.h"
@@ -25,6 +26,12 @@ static const char *pubSubStateNames[6] = {
     "Disabled", "Paused", "Operational", "Error", "PreOperational", "Invalid"
 };
 
+static void
+UA_PubSubManager_stop(UA_Driver *drv);
+
+static UA_StatusCode
+UA_PubSubManager_start(UA_Driver *drv);
+
 const char *
 UA_PubSubState_name(UA_PubSubState state) {
     if(state < UA_PUBSUBSTATE_DISABLED || state > UA_PUBSUBSTATE_PREOPERATIONAL)
@@ -32,11 +39,71 @@ UA_PubSubState_name(UA_PubSubState state) {
     return pubSubStateNames[state];
 }
 
+UA_StatusCode
+UA_PubSubComponent_setPubSubState(UA_PubSubManager *psm, void *component,
+                                  UA_PubSubComponentType componentType,
+                                  UA_PubSubState targetState,
+                                  UA_StatusCode errorReason) {
+    switch(componentType) {
+    case UA_PUBSUBCOMPONENT_CONNECTION:
+        return UA_PubSubConnection_setPubSubState(
+            psm, (UA_PubSubConnection*)component, targetState);
+    case UA_PUBSUBCOMPONENT_WRITERGROUP:
+        return UA_WriterGroup_setPubSubState(
+            psm, (UA_WriterGroup*)component, targetState);
+    case UA_PUBSUBCOMPONENT_READERGROUP:
+        return UA_ReaderGroup_setPubSubState(
+            psm, (UA_ReaderGroup*)component, targetState);
+    case UA_PUBSUBCOMPONENT_DATASETREADER:
+        return UA_DataSetReader_setPubSubState(
+            psm, (UA_DataSetReader*)component, targetState, errorReason);
+    case UA_PUBSUBCOMPONENT_DATASETWRITER:
+        return UA_DataSetWriter_setPubSubState(
+            psm, (UA_DataSetWriter*)component, targetState);
+    default:
+        return UA_STATUSCODE_BADNOTSUPPORTED;
+    }
+}
+
 void
 UA_PubSubComponentHead_clear(UA_PubSubComponentHead *psch) {
     UA_NodeId_clear(&psch->identifier);
     UA_String_clear(&psch->logIdString);
     memset(psch, 0, sizeof(UA_PubSubComponentHead));
+}
+
+/* See declaration in ua_pubsub_internal.h for full documentation. */
+void
+UA_PubSubComponent_freeWithoutLifecycleCallback(UA_PubSubManager *psm,
+                                                void *component,
+                                                UA_PubSubComponentType type) {
+    /* Suppress application lifecycle vetoes while rolling back partial
+     * creation, then restore the callback after releasing the component. */
+    UA_Server *server = psm->drv.server;
+    UA_StatusCode (*savedCb)(UA_Server*, const UA_NodeId,
+                             const UA_PubSubComponentType, UA_Boolean) =
+        server->config.pubSubConfig.componentLifecycleCallback;
+    server->config.pubSubConfig.componentLifecycleCallback = NULL;
+    switch(type) {
+    case UA_PUBSUBCOMPONENT_CONNECTION:
+        UA_PubSubConnection_delete(psm, (UA_PubSubConnection*)component);
+        break;
+    case UA_PUBSUBCOMPONENT_WRITERGROUP:
+        UA_WriterGroup_remove(psm, (UA_WriterGroup*)component);
+        break;
+    case UA_PUBSUBCOMPONENT_READERGROUP:
+        UA_ReaderGroup_remove(psm, (UA_ReaderGroup*)component);
+        break;
+    case UA_PUBSUBCOMPONENT_DATASETWRITER:
+        UA_DataSetWriter_remove(psm, (UA_DataSetWriter*)component);
+        break;
+    case UA_PUBSUBCOMPONENT_DATASETREADER:
+        UA_DataSetReader_remove(psm, (UA_DataSetReader*)component);
+        break;
+    default:
+        break;
+    }
+    server->config.pubSubConfig.componentLifecycleCallback = savedCb;
 }
 
 UA_StatusCode
@@ -239,11 +306,11 @@ removeInactiveReserveId(void *context, UA_ReserveId *elem) {
     struct RemoveInactiveReserveIdContext *ctx =
         (struct RemoveInactiveReserveIdContext*)context;
 
-    if(UA_NodeId_equal(&ctx->psm->sc.server->adminSession.sessionId, &elem->sessionId))
+    if(UA_NodeId_equal(&ctx->psm->drv.server->adminSession.sessionId, &elem->sessionId))
         goto still_active;
 
     session_list_entry *session;
-    LIST_FOREACH(session, &ctx->psm->sc.server->sessions, pointers) {
+    LIST_FOREACH(session, &ctx->psm->drv.server->sessions, pointers) {
         if(UA_NodeId_equal(&session->session.sessionId, &elem->sessionId))
             goto still_active;
     }
@@ -307,6 +374,32 @@ UA_PubSubConfigurationVersionTimeDifference(UA_DateTime now) {
     return timeDiffSince2000;
 }
 
+UA_StatusCode
+UA_PubSubSecurityPolicy_validate(const UA_PubSubSecurityPolicy *policy,
+                                 UA_MessageSecurityMode securityMode) {
+    if(securityMode != UA_MESSAGESECURITYMODE_SIGN &&
+       securityMode != UA_MESSAGESECURITYMODE_SIGNANDENCRYPT)
+        return UA_STATUSCODE_GOOD;
+
+    if(!policy || !policy->newGroupContext || !policy->deleteGroupContext ||
+       !policy->verify || !policy->sign || !policy->getSignatureSize ||
+       !policy->getSignatureKeyLength || !policy->getEncryptionKeyLength ||
+       !policy->setSecurityKeys ||
+       !policy->generateNonce || !policy->clear ||
+       policy->keyMaterialLength == 0)
+        return UA_STATUSCODE_BADSECURITYPOLICYREJECTED;
+
+    if(securityMode == UA_MESSAGESECURITYMODE_SIGNANDENCRYPT) {
+        size_t nonceLength = policy->messageNonceLength;
+        if(!policy->encrypt || !policy->decrypt || !policy->setMessageNonce ||
+           nonceLength < sizeof(UA_UInt32) ||
+           nonceLength > UA_NETWORKMESSAGE_MAX_NONCE_LENGTH)
+            return UA_STATUSCODE_BADSECURITYPOLICYREJECTED;
+    }
+
+    return UA_STATUSCODE_GOOD;
+}
+
 /* Generate a new unique NodeId. This NodeId will be used for the information
  * model representation of PubSub entities. */
 #ifndef UA_ENABLE_PUBSUB_INFORMATIONMODEL
@@ -320,10 +413,10 @@ UA_Guid
 UA_PubSubManager_generateUniqueGuid(UA_PubSubManager *psm) {
     while(true) {
         UA_NodeId testId = UA_NODEID_GUID(1, UA_Guid_random());
-        const UA_Node *testNode = UA_NODESTORE_GET(psm->sc.server, &testId);
+        const UA_Node *testNode = UA_NODESTORE_GET(psm->drv.server, &testId);
         if(!testNode)
             return testId.identifier.guid;
-        UA_NODESTORE_RELEASE(psm->sc.server, testNode);
+        UA_NODESTORE_RELEASE(psm->drv.server, testNode);
     }
 }
 
@@ -340,15 +433,19 @@ generateRandomUInt64(void) {
 
 UA_StatusCode
 UA_Server_enableAllPubSubComponents(UA_Server *server) {
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_PubSubManager *psm = getPSM(server);
     if(!psm) {
-        UA_UNLOCK(&server->serviceMutex);
+        unlockServer(server);
         return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    UA_StatusCode res = UA_STATUSCODE_GOOD;
+    UA_StatusCode res = UA_PubSubManager_start(&psm->drv);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
 
+    /* Enable children before their parent groups and connections. Their state
+     * machines wait for the parent to become operational. */
     UA_PubSubConnection *c;
     TAILQ_FOREACH(c, &psm->connections, listEntry) {
         UA_WriterGroup *wg;
@@ -373,23 +470,16 @@ UA_Server_enableAllPubSubComponents(UA_Server *server) {
         res |= UA_PubSubConnection_setPubSubState(psm, c, UA_PUBSUBSTATE_OPERATIONAL);
     }
 
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
 static void
 disableAllPubSubComponents(UA_PubSubManager *psm) {
+    /* Disable readers and writers before shutting down their groups and
+     * connections so target updates and publish timers stop first. */
     UA_PubSubConnection *c;
     TAILQ_FOREACH(c, &psm->connections, listEntry) {
-        UA_WriterGroup *wg;
-        LIST_FOREACH(wg, &c->writerGroups, listEntry) {
-            UA_DataSetWriter *dsw;
-            LIST_FOREACH(dsw, &wg->writers, listEntry) {
-                UA_DataSetWriter_setPubSubState(psm, dsw, UA_PUBSUBSTATE_DISABLED);
-            }
-            UA_WriterGroup_setPubSubState(psm, wg, UA_PUBSUBSTATE_DISABLED);
-        }
-
         UA_ReaderGroup *rg;
         LIST_FOREACH(rg, &c->readerGroups, listEntry) {
             UA_DataSetReader *dsr;
@@ -400,17 +490,278 @@ disableAllPubSubComponents(UA_PubSubManager *psm) {
             UA_ReaderGroup_setPubSubState(psm, rg, UA_PUBSUBSTATE_DISABLED);
         }
 
+        UA_WriterGroup *wg;
+        LIST_FOREACH(wg, &c->writerGroups, listEntry) {
+            UA_DataSetWriter *dsw;
+            LIST_FOREACH(dsw, &wg->writers, listEntry) {
+                UA_DataSetWriter_setPubSubState(psm, dsw, UA_PUBSUBSTATE_DISABLED);
+            }
+            UA_WriterGroup_setPubSubState(psm, wg, UA_PUBSUBSTATE_DISABLED);
+        }
+
         UA_PubSubConnection_setPubSubState(psm, c, UA_PUBSUBSTATE_DISABLED);
     }
 }
 
 void
 UA_Server_disableAllPubSubComponents(UA_Server *server) {
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_PubSubManager *psm = getPSM(server);
     if(psm)
-        disableAllPubSubComponents(psm);
-    UA_UNLOCK(&server->serviceMutex);
+        UA_PubSubManager_stop(&psm->drv); /* Calls disableAll internally */
+    unlockServer(server);
+}
+
+static UA_StatusCode
+getPubSubComponentType(UA_PubSubManager *psm, UA_NodeId componentId,
+                       UA_PubSubComponentType *outType) {
+    /* Walk the connection hierarchy and return the type of the matching
+     * connection, group, reader or writer. */
+    UA_PubSubConnection *c;
+    TAILQ_FOREACH(c, &psm->connections, listEntry) {
+        if(UA_NodeId_equal(&componentId, &c->head.identifier)) {
+            *outType = c->head.componentType;
+            return UA_STATUSCODE_GOOD;
+        }
+
+        UA_WriterGroup *wg;
+        LIST_FOREACH(wg, &c->writerGroups, listEntry) {
+            if(UA_NodeId_equal(&componentId, &wg->head.identifier)) {
+                *outType = wg->head.componentType;
+                return UA_STATUSCODE_GOOD;
+            }
+
+            UA_DataSetWriter *dsw;
+            LIST_FOREACH(dsw, &wg->writers, listEntry) {
+                if(UA_NodeId_equal(&componentId, &dsw->head.identifier)) {
+                    *outType = dsw->head.componentType;
+                    return UA_STATUSCODE_GOOD;
+                }
+            }
+        }
+
+        UA_ReaderGroup *rg;
+        LIST_FOREACH(rg, &c->readerGroups, listEntry) {
+            if(UA_NodeId_equal(&componentId, &rg->head.identifier)) {
+                *outType = rg->head.componentType;
+                return UA_STATUSCODE_GOOD;
+            }
+
+            UA_DataSetReader *dsr;
+            LIST_FOREACH(dsr, &rg->readers, listEntry) {
+                if(UA_NodeId_equal(&componentId, &dsr->head.identifier)) {
+                    *outType = dsr->head.componentType;
+                    return UA_STATUSCODE_GOOD;
+                }
+            }
+        }
+    }
+
+    return UA_STATUSCODE_BADNOTFOUND;
+}
+
+UA_StatusCode
+UA_Server_getPubSubComponentType(UA_Server *server, UA_NodeId componentId,
+                                 UA_PubSubComponentType *outType) {
+    if(!outType)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    lockServer(server);
+    UA_PubSubManager *psm = getPSM(server);
+    UA_StatusCode res = (psm) ?
+        getPubSubComponentType(psm, componentId, outType) : UA_STATUSCODE_BADINTERNALERROR;
+    unlockServer(server);
+    return res;
+}
+
+static UA_StatusCode
+getPubSubComponentParent(UA_PubSubManager *psm, UA_NodeId componentId,
+                         UA_NodeId *outParent) {
+    /* Resolve the parent from the containing list. Connections have no parent
+     * within this component hierarchy. */
+    UA_PubSubConnection *c;
+    TAILQ_FOREACH(c, &psm->connections, listEntry) {
+        if(UA_NodeId_equal(&componentId, &c->head.identifier))
+            return UA_STATUSCODE_BADNOTSUPPORTED;
+
+        UA_WriterGroup *wg;
+        LIST_FOREACH(wg, &c->writerGroups, listEntry) {
+            if(UA_NodeId_equal(&componentId, &wg->head.identifier))
+                return UA_NodeId_copy(&c->head.identifier, outParent);
+
+            UA_DataSetWriter *dsw;
+            LIST_FOREACH(dsw, &wg->writers, listEntry) {
+                if(UA_NodeId_equal(&componentId, &dsw->head.identifier))
+                    return UA_NodeId_copy(&wg->head.identifier, outParent);
+            }
+        }
+
+        UA_ReaderGroup *rg;
+        LIST_FOREACH(rg, &c->readerGroups, listEntry) {
+            if(UA_NodeId_equal(&componentId, &rg->head.identifier))
+                return UA_NodeId_copy(&c->head.identifier, outParent);
+
+            UA_DataSetReader *dsr;
+            LIST_FOREACH(dsr, &rg->readers, listEntry) {
+                if(UA_NodeId_equal(&componentId, &dsr->head.identifier))
+                    return UA_NodeId_copy(&rg->head.identifier, outParent);
+            }
+        }
+    }
+
+    return UA_STATUSCODE_BADNOTFOUND;
+}
+
+UA_StatusCode
+UA_Server_getPubSubComponentParent(UA_Server *server, UA_NodeId componentId,
+                                   UA_NodeId *outParent) {
+    if(!outParent)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    lockServer(server);
+    UA_PubSubManager *psm = getPSM(server);
+    UA_StatusCode res = (psm) ?
+        getPubSubComponentParent(psm, componentId, outParent) : UA_STATUSCODE_BADINTERNALERROR;
+    unlockServer(server);
+    return res;
+}
+
+static UA_StatusCode
+getPubSubComponentChildren(UA_PubSubManager *psm, UA_NodeId componentId,
+                           size_t *outChildrenSize, UA_NodeId **outChildren) {
+    UA_WriterGroup *wg;
+    UA_ReaderGroup *rg;
+    UA_DataSetWriter *dsw;
+    UA_DataSetReader *dsr;
+    UA_PubSubConnection *c;
+
+    UA_StatusCode res = UA_STATUSCODE_GOOD;
+    TAILQ_FOREACH(c, &psm->connections, listEntry) {
+        if(UA_NodeId_equal(&componentId, &c->head.identifier)) {
+            /* Count the children */
+            size_t children = 0;
+            LIST_FOREACH(wg, &c->writerGroups, listEntry)
+                children++;
+            LIST_FOREACH(rg, &c->readerGroups, listEntry)
+                children++;
+
+            /* Empty array? */
+            if(children == 0) {
+                *outChildren = NULL;
+                *outChildrenSize = 0;
+                return UA_STATUSCODE_GOOD;
+            }
+
+            /* Allocate the array */
+            *outChildren = (UA_NodeId*)UA_calloc(children, sizeof(UA_NodeId));
+            if(!*outChildren)
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            *outChildrenSize = children;
+
+            /* Copy the NodeIds */
+            size_t pos = 0;
+            LIST_FOREACH(wg, &c->writerGroups, listEntry) {
+                res |= UA_NodeId_copy(&wg->head.identifier, (*outChildren) + pos);
+                pos++;
+            }
+            LIST_FOREACH(rg, &c->readerGroups, listEntry) {
+                res |= UA_NodeId_copy(&rg->head.identifier, (*outChildren) + pos);
+                pos++;
+            }
+            goto out;
+        }
+
+        LIST_FOREACH(wg, &c->writerGroups, listEntry) {
+            if(UA_NodeId_equal(&componentId, &wg->head.identifier)) {
+                /* Count the children */
+                size_t children = 0;
+                LIST_FOREACH(dsw, &wg->writers, listEntry)
+                    children++;
+
+                /* Empty array? */
+                if(children == 0) {
+                    *outChildren = NULL;
+                    *outChildrenSize = 0;
+                    return UA_STATUSCODE_GOOD;
+                }
+
+                /* Allocate the array */
+                *outChildren = (UA_NodeId*)UA_calloc(children, sizeof(UA_NodeId));
+                if(!*outChildren)
+                    return UA_STATUSCODE_BADOUTOFMEMORY;
+                *outChildrenSize = children;
+
+                /* Copy the NodeIds */
+                size_t pos = 0;
+                LIST_FOREACH(dsw, &wg->writers, listEntry) {
+                    res |= UA_NodeId_copy(&dsw->head.identifier, (*outChildren) + pos);
+                    pos++;
+                }
+                goto out;
+            }
+
+            /* DataSetWriter have no children (with a state machine) */
+            LIST_FOREACH(dsw, &wg->writers, listEntry) {
+                if(UA_NodeId_equal(&componentId, &dsw->head.identifier))
+                    return UA_STATUSCODE_BADNOTSUPPORTED;
+            }
+        }
+
+        LIST_FOREACH(rg, &c->readerGroups, listEntry) {
+            if(UA_NodeId_equal(&componentId, &rg->head.identifier)) {
+                /* Count the children */
+                size_t children = 0;
+                LIST_FOREACH(dsr, &rg->readers, listEntry)
+                    children++;
+
+                /* Empty array? */
+                if(children == 0) {
+                    *outChildren = NULL;
+                    *outChildrenSize = 0;
+                    return UA_STATUSCODE_GOOD;
+                }
+
+                /* Allocate the array */
+                *outChildren = (UA_NodeId*)UA_calloc(children, sizeof(UA_NodeId));
+                if(!*outChildren)
+                    return UA_STATUSCODE_BADOUTOFMEMORY;
+                *outChildrenSize = children;
+
+                /* Copy the NodeIds */
+                size_t pos = 0;
+                LIST_FOREACH(dsr, &rg->readers, listEntry) {
+                    res |= UA_NodeId_copy(&dsr->head.identifier, (*outChildren) + pos);
+                    pos++;
+                }
+                goto out;
+            }
+
+            /* DataSetReader have no children (with a state machine) */
+            LIST_FOREACH(dsr, &rg->readers, listEntry) {
+                if(UA_NodeId_equal(&componentId, &dsr->head.identifier))
+                    return UA_STATUSCODE_BADNOTSUPPORTED;
+            }
+        }
+    }
+
+    return UA_STATUSCODE_BADNOTFOUND;
+
+ out:
+    if(res != UA_STATUSCODE_GOOD)
+        UA_Array_delete(*outChildren, *outChildrenSize, &UA_TYPES[UA_TYPES_NODEID]);
+    return res;
+}
+
+UA_StatusCode
+UA_Server_getPubSubComponentChildren(UA_Server *server, UA_NodeId componentId,
+                                     size_t *outChildrenSize, UA_NodeId **outChildren) {
+    if(!outChildrenSize || !outChildren)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    lockServer(server);
+    UA_PubSubManager *psm = getPSM(server);
+    UA_StatusCode res = (psm) ?
+        getPubSubComponentChildren(psm, componentId,
+                                   outChildrenSize, outChildren) : UA_STATUSCODE_BADINTERNALERROR;
+    unlockServer(server);
+    return res;
 }
 
 void
@@ -443,33 +794,63 @@ UA_PubSubManager_setState(UA_PubSubManager *psm, UA_LifecycleState state) {
     }
 
  set_state:
-    if(state == psm->sc.state)
+    if(state == psm->drv.state)
         return;
-    psm->sc.state = state;
-    if(psm->sc.notifyState)
-        psm->sc.notifyState(&psm->sc, state);
+    psm->drv.state = state;
 
     /* When we just started, trigger all connections to go from PAUSED to
      * OPERATIONAL */
     if(state == UA_LIFECYCLESTATE_STARTED) {
         UA_PubSubConnection *c;
         TAILQ_FOREACH(c, &psm->connections, listEntry) {
-            UA_PubSubConnection_setPubSubState(psm, c, c->head.state);
+            if (psm->pubSubInitialSetupMode) {
+                UA_PubSubConnection_setPubSubState(psm, c, UA_PUBSUBSTATE_OPERATIONAL);
+            } else {
+                UA_PubSubConnection_setPubSubState(psm, c, c->head.state);
+            }
         }
     }
 }
 
+UA_PubSubState
+UA_PubSubManager_getPubSubState(const UA_PubSubManager *psm) {
+    if(psm->drv.state == UA_LIFECYCLESTATE_STOPPED)
+        return UA_PUBSUBSTATE_DISABLED;
+    if(psm->drv.state != UA_LIFECYCLESTATE_STARTED)
+        return UA_PUBSUBSTATE_PAUSED;
+
+    UA_PubSubState state = UA_PUBSUBSTATE_OPERATIONAL;
+    UA_PubSubConnection *connection;
+    TAILQ_FOREACH(connection, &psm->connections, listEntry) {
+        UA_PubSubState childState = connection->head.state;
+        if(childState == UA_PUBSUBSTATE_ERROR)
+            return childState;
+        if(childState == UA_PUBSUBSTATE_PREOPERATIONAL)
+            state = childState;
+        else if(childState == UA_PUBSUBSTATE_PAUSED &&
+                state == UA_PUBSUBSTATE_OPERATIONAL)
+            state = childState;
+    }
+    return state;
+}
+
 static UA_StatusCode
-UA_PubSubManager_start(UA_ServerComponent *sc, UA_Server *server) {
-    UA_PubSubManager *psm = (UA_PubSubManager*)sc;
-    if(psm->sc.state == UA_LIFECYCLESTATE_STOPPING) {
+UA_PubSubManager_start(UA_Driver *drv) {
+    /* Check that the server backpointer is set */
+    UA_Server *server = drv->server;
+    if(!server)
+        return UA_STATUSCODE_BADINTERNALERROR;
+
+    /* Re-cache logging for the case that the configuration has been updated */
+    UA_PubSubManager *psm = (UA_PubSubManager*)drv;
+    psm->logging = server->config.logging;
+
+    /* Cannot start an already started PubSubManager */
+    if(psm->drv.state == UA_LIFECYCLESTATE_STOPPING) {
         UA_LOG_ERROR(psm->logging, UA_LOGCATEGORY_PUBSUB,
                      "The PubSubManager is still stopping");
         return UA_STATUSCODE_BADINTERNALERROR;
     }
-
-    /* Re-cache for the case that the configuration has been updated */
-    psm->logging = server->config.logging;
 
     UA_PubSubManager_setState(psm, UA_LIFECYCLESTATE_STARTED);
 
@@ -477,23 +858,22 @@ UA_PubSubManager_start(UA_ServerComponent *sc, UA_Server *server) {
 }
 
 static void
-UA_PubSubManager_stop(UA_ServerComponent *sc) {
-    UA_PubSubManager *psm = (UA_PubSubManager*)sc;
+UA_PubSubManager_stop(UA_Driver *drv) {
+    UA_PubSubManager *psm = (UA_PubSubManager*)drv;
     disableAllPubSubComponents(psm);
     UA_PubSubManager_setState(psm, UA_LIFECYCLESTATE_STOPPED);
 }
 
 UA_StatusCode
 UA_PubSubManager_clear(UA_PubSubManager *psm) {
-    UA_Server *server = psm->sc.server;
-    if(psm->sc.state != UA_LIFECYCLESTATE_STOPPED) {
+    if(psm->drv.state != UA_LIFECYCLESTATE_STOPPED) {
         UA_LOG_ERROR(psm->logging, UA_LOGCATEGORY_PUBSUB,
                      "Cannot delete the PubSubManager because "
                      "it is not stopped");
         return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_LOCK_ASSERT(&psm->drv.server->serviceMutex);
 
     /* Remove Connections - this also remove WriterGroups and ReaderGroups */
     UA_PubSubConnection *c, *tmpC;
@@ -529,22 +909,33 @@ UA_PubSubManager_clear(UA_PubSubManager *psm) {
     LIST_FOREACH_SAFE(ks, &psm->pubSubKeyList, keyStorageList, ksTmp) {
         UA_PubSubKeyStorage_delete(psm, ks);
     }
+    if(!LIST_EMPTY(&psm->pubSubKeyList))
+        return UA_STATUSCODE_BADWOULDBLOCK;
 #endif
 
     return UA_STATUSCODE_GOOD;
 }
 
-UA_ServerComponent *
+static UA_StatusCode
+UA_PubSubManager_free(UA_Driver *drv) {
+    UA_PubSubManager *psm = (UA_PubSubManager *)drv;
+    UA_StatusCode res = UA_PubSubManager_clear(psm);
+    if(res == UA_STATUSCODE_GOOD)
+        UA_free(psm);
+    return res;
+}
+
+UA_Driver *
 UA_PubSubManager_new(UA_Server *server) {
     UA_PubSubManager *psm = (UA_PubSubManager*)UA_calloc(1, sizeof(UA_PubSubManager));
     if(!psm)
         return NULL;
 
-    psm->sc.server = server;
-    psm->sc.name = UA_STRING("pubsub");
-    psm->sc.start = UA_PubSubManager_start;
-    psm->sc.stop = UA_PubSubManager_stop;
-    psm->sc.clear = (UA_StatusCode (*)(UA_ServerComponent *))UA_PubSubManager_clear;
+    psm->drv.server = server;
+    psm->drv.name = UA_STRING("pubsub");
+    psm->drv.start = UA_PubSubManager_start;
+    psm->drv.stop = UA_PubSubManager_stop;
+    psm->drv.free = UA_PubSubManager_free;
 
     /* Set the logging shortcut */
     psm->logging = server->config.logging;
@@ -566,7 +957,7 @@ UA_PubSubManager_new(UA_Server *server) {
     initPubSubNS0(server);
 #endif
 
-    return &psm->sc;
+    return &psm->drv;
 }
 
 #endif /* UA_ENABLE_PUBSUB */

@@ -3,24 +3,26 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
  *    Copyright (c) 2023 Fraunhofer IOSB (Author: Noel Graf)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Andreas Ebner)
  *
  */
 
 #include <open62541/plugin/create_certificate.h>
-#include <time.h>
-
-#include "securitypolicy_common.h"
-#include "../../arch/eventloop_posix/eventloop_posix.h"
 
 #if defined(UA_ENABLE_ENCRYPTION_MBEDTLS)
+
+#include "securitypolicy_common.h"
+#include "securitypolicy_mbedtls_compat.h"
+#include "../deps/musl_inet_pton.h"
+
+#include <stdio.h>
 
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/oid.h>
 #include <mbedtls/asn1write.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
 #include <mbedtls/platform.h>
-#include <mbedtls/version.h>
+#include <mbedtls/platform_util.h>
+#include <mbedtls/psa_util.h>
 
 #define SET_OID(x, oid) \
     do { x.len = MBEDTLS_OID_SIZE(oid); x.p = (unsigned char *) oid; } while (0)
@@ -40,16 +42,48 @@ static size_t mbedtls_get_san_list_deep(const mbedtls_write_san_list* sanlist);
 
 int mbedtls_x509write_crt_set_subject_alt_name(mbedtls_x509write_cert *ctx, const mbedtls_write_san_list* sanlist);
 
-#if MBEDTLS_VERSION_NUMBER < 0x03030000
-int mbedtls_x509write_crt_set_ext_key_usage(mbedtls_x509write_cert *ctx,
-                                            const mbedtls_asn1_sequence *exts);
-#endif
-
 static int write_certificate(mbedtls_x509write_cert *crt, UA_CertificateFormat certFormat,
-                             UA_ByteString *outCertificate, int (*f_rng)(void *, unsigned char *, size_t),
-                             void *p_rng);
+                             UA_ByteString *outCertificate);
 
 static int write_private_key(mbedtls_pk_context *key, UA_CertificateFormat keyFormat, UA_ByteString *outPrivateKey);
+
+static void
+clearSanList(mbedtls_write_san_list *head) {
+    while(head) {
+        mbedtls_write_san_list *next = head->next;
+        if(head->node.type == MBEDTLS_X509_SAN_IP_ADDRESS)
+            mbedtls_free(head->node.host);
+        mbedtls_free(head);
+        head = next;
+    }
+}
+
+static UA_Boolean
+formatCertificateTime(UA_DateTime time, char output[15]) {
+    UA_DateTimeStruct value = UA_DateTime_toStruct(time);
+    if(value.year < 0 || value.year > 9999)
+        return false;
+    return snprintf(output, 15, "%04d%02u%02u%02u%02u%02u",
+                    (int)value.year, (unsigned)value.month,
+                    (unsigned)value.day, (unsigned)value.hour,
+                    (unsigned)value.min, (unsigned)value.sec) == 14;
+}
+
+/* Case-insensitive comparison of a UA_String with a C string literal */
+static UA_Boolean
+uaStringEqualsCI_mbedtls(const UA_String *uaStr, const char *cStr) {
+    size_t cLen = strlen(cStr);
+    if(uaStr->length != cLen)
+        return false;
+    for(size_t i = 0; i < cLen; i++) {
+        char a = (char)uaStr->data[i];
+        char b = cStr[i];
+        if(a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if(b >= 'A' && b <= 'Z') b = (char)(b + 32);
+        if(a != b) return false;
+    }
+    return true;
+}
 
 UA_StatusCode
 UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
@@ -61,11 +95,22 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
        subjectAltNameSize == 0 || subjectSize == 0 ||
        (certFormat != UA_CERTIFICATEFORMAT_DER && certFormat != UA_CERTIFICATEFORMAT_PEM))
         return UA_STATUSCODE_BADINVALIDARGUMENT;
+    for(size_t i = 0; i < subjectSize; i++) {
+        if(subject[i].length > 0 && !subject[i].data)
+            return UA_STATUSCODE_BADINVALIDARGUMENT;
+    }
+    for(size_t i = 0; i < subjectAltNameSize; i++) {
+        if(subjectAltName[i].length > 0 && !subjectAltName[i].data)
+            return UA_STATUSCODE_BADINVALIDARGUMENT;
+    }
 
     /* Use the maximum size */
     UA_UInt16 keySizeBits = 4096;
     /* Default to 1 year */
     UA_UInt16 expiresInDays = 365;
+    /* Key type: 0 = RSA (default), 1 = EC */
+    int keyTypeEC = 0;
+    UA_String eccCurve = UA_STRING_STATIC("prime256v1");
 
     if(params) {
         const UA_UInt16 *keySizeBitsValue = (const UA_UInt16 *)UA_KeyValueMap_getScalar(
@@ -77,45 +122,107 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
             params, UA_QUALIFIEDNAME(0, "expires-in-days"), &UA_TYPES[UA_TYPES_UINT16]);
         if(expiresInDaysValue)
             expiresInDays = *expiresInDaysValue;
+
+        const UA_String *keyTypeValue = (const UA_String *)UA_KeyValueMap_getScalar(
+            params, UA_QUALIFIEDNAME(0, "key-type"), &UA_TYPES[UA_TYPES_STRING]);
+        if(keyTypeValue && uaStringEqualsCI_mbedtls(keyTypeValue, "ec"))
+            keyTypeEC = 1;
+
+        const UA_String *eccCurveValue = (const UA_String *)UA_KeyValueMap_getScalar(
+            params, UA_QUALIFIEDNAME(0, "ecc-curve"), &UA_TYPES[UA_TYPES_STRING]);
+        if(eccCurveValue && eccCurveValue->length > 0)
+            eccCurve = *eccCurveValue;
     }
 
     UA_ByteString_init(outPrivateKey);
     UA_ByteString_init(outCertificate);
+    UA_ByteString privateKeyOutput = UA_BYTESTRING_NULL;
+    UA_ByteString certificateOutput = UA_BYTESTRING_NULL;
 
     mbedtls_pk_context key;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    mbedtls_entropy_context entropy;
-    const char *pers = "gen_key";
+    UA_mbedTLS_PsaKey generatedKey;
     mbedtls_x509write_cert crt;
 
     UA_StatusCode errRet = UA_STATUSCODE_GOOD;
 
     /* Set to sane values */
     mbedtls_pk_init(&key);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    mbedtls_entropy_init(&entropy);
+    UA_mbedTLS_PsaKey_init(&generatedKey);
     mbedtls_x509write_crt_init(&crt);
 
-    /* Seed the random number generator */
-    if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, (const unsigned char *)pers, strlen(pers)) != 0) {
+    if(UA_mbedTLS_PSA_Init() != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
-                     "Failed to initialize the random number generator.");
+                     "Failed to initialize PSA Crypto.");
         errRet = UA_STATUSCODE_BADINTERNALERROR;
         goto cleanup;
     }
 
-    /* Generate an RSA key pair */
-    if (mbedtls_pk_setup(&key, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA)) != 0 ||
-        mbedtls_rsa_gen_key(mbedtls_pk_rsa(key), mbedtls_ctr_drbg_random, &ctr_drbg, keySizeBits, 65537) != 0) {
+    /* Generate a key pair */
+    psa_key_attributes_t keyAttributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_algorithm_t hashAlgorithm = PSA_ALG_SHA_256;
+    if(keyTypeEC &&
+       (uaStringEqualsCI_mbedtls(&eccCurve, "secp384r1") ||
+        uaStringEqualsCI_mbedtls(&eccCurve, "nistp384") ||
+        uaStringEqualsCI_mbedtls(&eccCurve, "brainpoolp384r1")))
+        hashAlgorithm = PSA_ALG_SHA_384;
+
+    if(keyTypeEC) {
+        psa_ecc_family_t family = PSA_ECC_FAMILY_SECP_R1;
+        size_t keyBits = 256;
+        if(uaStringEqualsCI_mbedtls(&eccCurve, "prime256v1") ||
+           uaStringEqualsCI_mbedtls(&eccCurve, "nistp256")) {
+            /* Defaults already selected. */
+        } else if(uaStringEqualsCI_mbedtls(&eccCurve, "secp384r1") ||
+                  uaStringEqualsCI_mbedtls(&eccCurve, "nistp384")) {
+            keyBits = 384;
+        } else if(uaStringEqualsCI_mbedtls(&eccCurve, "brainpoolp256r1")) {
+            family = PSA_ECC_FAMILY_BRAINPOOL_P_R1;
+        } else if(uaStringEqualsCI_mbedtls(&eccCurve, "brainpoolp384r1")) {
+            family = PSA_ECC_FAMILY_BRAINPOOL_P_R1;
+            keyBits = 384;
+        } else if(uaStringEqualsCI_mbedtls(&eccCurve, "ed25519") ||
+                  uaStringEqualsCI_mbedtls(&eccCurve, "ed448")) {
+            UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
+                         "EdDSA certificate generation is not supported with mbedTLS.");
+            errRet = UA_STATUSCODE_BADNOTIMPLEMENTED;
+            goto cleanup;
+        } else {
+            UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
+                         "Create Certificate: Unsupported ECC curve for mbedTLS.");
+            errRet = UA_STATUSCODE_BADINVALIDARGUMENT;
+            goto cleanup;
+        }
+        psa_set_key_type(&keyAttributes, PSA_KEY_TYPE_ECC_KEY_PAIR(family));
+        psa_set_key_bits(&keyAttributes, keyBits);
+        psa_set_key_algorithm(&keyAttributes, PSA_ALG_ECDSA(hashAlgorithm));
+    } else {
+        psa_set_key_type(&keyAttributes, PSA_KEY_TYPE_RSA_KEY_PAIR);
+        psa_set_key_bits(&keyAttributes, keySizeBits);
+        psa_set_key_algorithm(&keyAttributes,
+                              PSA_ALG_RSA_PKCS1V15_SIGN(hashAlgorithm));
+    }
+    psa_set_key_usage_flags(&keyAttributes,
+                            PSA_KEY_USAGE_EXPORT | PSA_KEY_USAGE_SIGN_HASH);
+    psa_status_t psaStatus = psa_generate_key(&keyAttributes, &generatedKey.id);
+    psa_reset_key_attributes(&keyAttributes);
+    if(psaStatus != PSA_SUCCESS ||
+       mbedtls_pk_copy_from_psa(generatedKey.id, &key) != 0) {
         UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
-                     "Failed to generate RSA key pair.");
+                     "Failed to generate certificate key pair with PSA Crypto.");
         errRet = UA_STATUSCODE_BADINTERNALERROR;
         goto cleanup;
     }
 
     /* Setting certificate values */
     mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
-    mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
+    /* P-384 / brainpoolP384r1 use SHA-384; everything else uses SHA-256 */
+    if(keyTypeEC &&
+       (uaStringEqualsCI_mbedtls(&eccCurve, "secp384r1") ||
+        uaStringEqualsCI_mbedtls(&eccCurve, "nistp384") ||
+        uaStringEqualsCI_mbedtls(&eccCurve, "brainpoolp384r1")))
+        mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA384);
+    else
+        mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
 
     size_t subject_char_len = 0;
     for(size_t i = 0; i < subjectSize; i++) {
@@ -131,7 +238,6 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
 
     size_t pos = 0;
     for(size_t i = 0; i < subjectSize; i++) {
-        subject_char_len += subject[i].length;
         memcpy(subject_char + pos, subject[i].data, subject[i].length);
         pos += subject[i].length;
         if(i < subjectSize - 1)
@@ -162,50 +268,73 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
     mbedtls_write_san_list *cur_tmp = NULL;
     mbedtls_write_san_list *head = NULL;
     for(size_t i = 0; i < subjectAltNameSize; i++) {
-        char *sanType;
-        char *sanValue;
-        size_t sanValueLength;
+        /* Copy and null-terminate */
         char *subAlt = (char *)UA_malloc(subjectAltName[i].length + 1);
+        if(!subAlt) {
+            errRet = UA_STATUSCODE_BADOUTOFMEMORY;
+            clearSanList(head);
+            goto cleanup;
+        }
         memcpy(subAlt, subjectAltName[i].data, subjectAltName[i].length);
-
-        /* null-terminate the copied string */
         subAlt[subjectAltName[i].length] = 0;
+
         /* split into SAN type and value */
-        sanType = strtok(subAlt, ":");
-        sanValue = (char *)subjectAltName[i].data + strlen(sanType) + 1;
-        sanValueLength = strlen(sanValue);
+        char *sanType = NULL;
+        for(char *char_pos = subAlt; *char_pos != 0; char_pos++) {
+            if(*char_pos == ':') {
+                *char_pos = '\0';
+                sanType = subAlt;
+                break;
+            }
+        }
 
-        if(sanType) {
-            cur_tmp = (mbedtls_write_san_list*)mbedtls_calloc(1, sizeof(mbedtls_write_san_list));
-            cur_tmp->next = NULL;
-            cur_tmp->node.host = sanValue;
-            cur_tmp->node.hostlen = sanValueLength;
+        if(!sanType) {
+            UA_LOG_WARNING(logger, UA_LOGCATEGORY_SECURECHANNEL, "Invalid Input format");
+            UA_free(subAlt);
+            continue;
+        }
 
-            if(strcmp(sanType, "DNS") == 0) {
-                cur_tmp->node.type = MBEDTLS_X509_SAN_DNS_NAME;
-            } else if(strcmp(sanType, "URI") == 0) {
-                cur_tmp->node.type = MBEDTLS_X509_SAN_UNIFORM_RESOURCE_IDENTIFIER;
-            } else if(strcmp(sanType, "IP") == 0) {
-                uint8_t ip[4] = {0};
-                if(UA_inet_pton(AF_INET, sanValue, ip) <= 0) {
-                    UA_LOG_WARNING(logger, UA_LOGCATEGORY_SECURECHANNEL, "IP SAN preparation failed");
-                    mbedtls_free(cur_tmp);
-                    UA_free(subAlt);
-                    continue;
-                }
-                cur_tmp->node.type = MBEDTLS_X509_SAN_IP_ADDRESS;
-                cur_tmp->node.host = (char *)ip;
-                cur_tmp->node.hostlen = sizeof(ip);
-            } else if(strcmp(sanType, "RFC822") == 0) {
-                cur_tmp->node.type = MBEDTLS_X509_SAN_RFC822_NAME;
-            } else {
-                UA_LOG_WARNING(logger, UA_LOGCATEGORY_SECURECHANNEL, "Given an unsupported SAN");
+        char *sanValue = (char *)subjectAltName[i].data + strlen(sanType) + 1;
+        const char *sanValueTerminated = subAlt + strlen(sanType) + 1;
+        size_t sanValueLength = subjectAltName[i].length - strlen(sanType) - 1;
+
+        cur_tmp = (mbedtls_write_san_list*)mbedtls_calloc(1, sizeof(mbedtls_write_san_list));
+        if(!cur_tmp) {
+            UA_free(subAlt);
+            errRet = UA_STATUSCODE_BADOUTOFMEMORY;
+            clearSanList(head);
+            goto cleanup;
+        }
+        cur_tmp->next = NULL;
+        cur_tmp->node.host = sanValue;
+        cur_tmp->node.hostlen = sanValueLength;
+
+        if(strcmp(sanType, "DNS") == 0) {
+            cur_tmp->node.type = MBEDTLS_X509_SAN_DNS_NAME;
+        } else if(strcmp(sanType, "URI") == 0) {
+            cur_tmp->node.type = MBEDTLS_X509_SAN_UNIFORM_RESOURCE_IDENTIFIER;
+        } else if(strcmp(sanType, "IP") == 0) {
+            uint8_t *ip = (uint8_t *)mbedtls_calloc(1, 4);
+            if(!ip) {
                 mbedtls_free(cur_tmp);
                 UA_free(subAlt);
                 continue;
             }
+            if(musl_inet_pton(AF_INET, sanValueTerminated, ip) <= 0) {
+                UA_LOG_WARNING(logger, UA_LOGCATEGORY_SECURECHANNEL, "IP SAN preparation failed");
+                mbedtls_free(ip);
+                mbedtls_free(cur_tmp);
+                UA_free(subAlt);
+                continue;
+            }
+            cur_tmp->node.type = MBEDTLS_X509_SAN_IP_ADDRESS;
+            cur_tmp->node.host = (char *)ip;
+            cur_tmp->node.hostlen = 4;
+        } else if(strcmp(sanType, "RFC822") == 0) {
+            cur_tmp->node.type = MBEDTLS_X509_SAN_RFC822_NAME;
         } else {
-            UA_LOG_WARNING(logger, UA_LOGCATEGORY_SECURECHANNEL, "Invalid Input format");
+            UA_LOG_WARNING(logger, UA_LOGCATEGORY_SECURECHANNEL, "Given an unsupported SAN");
+            mbedtls_free(cur_tmp);
             UA_free(subAlt);
             continue;
         }
@@ -225,49 +354,48 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
         UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
                      "Setting subject alternative name failed.");
         errRet = UA_STATUSCODE_BADINTERNALERROR;
-        while(head != NULL) {
-            cur_tmp = head->next;
-            mbedtls_free(head);
-            head = cur_tmp;
-        }
+        clearSanList(head);
         goto cleanup;
     }
 
-    while(head != NULL) {
-        cur_tmp = head->next;
-        mbedtls_free(head);
-        head = cur_tmp;
+    clearSanList(head);
+
+    /* RFC 5280 requires a positive serial number that is unique per issuer. */
+    unsigned char serial[16];
+    UA_ByteString serialBytes = {sizeof(serial), serial};
+    if(UA_mbedTLS_PsaRandom(&serialBytes) != UA_STATUSCODE_GOOD) {
+        UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
+                     "Generating the certificate serial number failed.");
+        errRet = UA_STATUSCODE_BADINTERNALERROR;
+        goto cleanup;
+    }
+    serial[0] &= 0x7f; /* Keep the ASN.1 INTEGER positive. */
+    UA_Boolean serialIsZero = true;
+    for(size_t i = 0; i < sizeof(serial); i++)
+        serialIsZero &= (serial[i] == 0);
+    if(serialIsZero)
+        serial[sizeof(serial) - 1] = 1;
+    if(mbedtls_x509write_crt_set_serial_raw(&crt, serial, sizeof(serial)) != 0) {
+        UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
+                     "Setting the certificate serial number failed.");
+        errRet = UA_STATUSCODE_BADINTERNALERROR;
+        goto cleanup;
     }
 
-#if MBEDTLS_VERSION_NUMBER >= 0x03040000
-    unsigned char *serial = (unsigned char *)"1";
-    size_t serial_len = 1;
-    mbedtls_x509write_crt_set_serial_raw(&crt, serial, serial_len);
-#else
-    mbedtls_mpi serial_mpi;
-    mbedtls_mpi_init(&serial_mpi);
-    mbedtls_mpi_lset(&serial_mpi, 1);
-    mbedtls_x509write_crt_set_serial(&crt, &serial_mpi);
-    mbedtls_mpi_free(&serial_mpi);
-#endif
-
-    /* Get the current time */
-    time_t rawTime;
-    struct tm *timeInfo;
-    time(&rawTime);
-    timeInfo = gmtime(&rawTime);
-
-    /* Format the current timestamp */
-    char current_timestamp[15];  // YYYYMMDDhhmmss + '\0'
-    strftime(current_timestamp, sizeof(current_timestamp), "%Y%m%d%H%M%S", timeInfo);
-
-    /* Calculate the future timestamp */
-    timeInfo->tm_mday += expiresInDays;
-    time_t future_time = mktime(timeInfo);
-
-    /* Format the future timestamp */
-    char future_timestamp[15];  // YYYYMMDDhhmmss + '\0'
-    strftime(future_timestamp, sizeof(future_timestamp), "%Y%m%d%H%M%S", gmtime(&future_time));
+    /* Use the open62541 UTC conversion. Unlike gmtime, this is reentrant. */
+    UA_DateTime currentTime = UA_DateTime_now();
+    UA_DateTime futureTime = currentTime +
+        (UA_DateTime)expiresInDays * 24 * 60 * 60 * UA_DATETIME_SEC;
+    char current_timestamp[15]; /* YYYYMMDDhhmmss + '\0' */
+    if(!formatCertificateTime(currentTime, current_timestamp)) {
+        errRet = UA_STATUSCODE_BADINTERNALERROR;
+        goto cleanup;
+    }
+    char future_timestamp[15]; /* YYYYMMDDhhmmss + '\0' */
+    if(!formatCertificateTime(futureTime, future_timestamp)) {
+        errRet = UA_STATUSCODE_BADINTERNALERROR;
+        goto cleanup;
+    }
 
     if(mbedtls_x509write_crt_set_validity(&crt, current_timestamp, future_timestamp) != 0) {
         UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
@@ -283,9 +411,13 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
         goto cleanup;
     }
 
-    if(mbedtls_x509write_crt_set_key_usage(&crt, MBEDTLS_X509_KU_DIGITAL_SIGNATURE | MBEDTLS_X509_KU_NON_REPUDIATION
-                                            | MBEDTLS_X509_KU_KEY_ENCIPHERMENT | MBEDTLS_X509_KU_DATA_ENCIPHERMENT
-                                            | MBEDTLS_X509_KU_KEY_CERT_SIGN | MBEDTLS_X509_KU_CRL_SIGN) != 0) {
+    /* ECC certificates need keyAgreement for ECDH instead of keyEncipherment */
+    unsigned int keyUsageFlags = keyTypeEC
+        ? (MBEDTLS_X509_KU_DIGITAL_SIGNATURE | MBEDTLS_X509_KU_NON_REPUDIATION |
+           MBEDTLS_X509_KU_KEY_AGREEMENT)
+        : (MBEDTLS_X509_KU_DIGITAL_SIGNATURE | MBEDTLS_X509_KU_NON_REPUDIATION |
+           MBEDTLS_X509_KU_KEY_ENCIPHERMENT | MBEDTLS_X509_KU_DATA_ENCIPHERMENT);
+    if(mbedtls_x509write_crt_set_key_usage(&crt, keyUsageFlags) != 0) {
         UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
                      "Setting key usage failed.");
         errRet = UA_STATUSCODE_BADINTERNALERROR;
@@ -294,9 +426,18 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
 
     mbedtls_asn1_sequence *ext_key_usage;
     ext_key_usage = (mbedtls_asn1_sequence *)mbedtls_calloc(1, sizeof(mbedtls_asn1_sequence));
+    if(!ext_key_usage) {
+        errRet = UA_STATUSCODE_BADOUTOFMEMORY;
+        goto cleanup;
+    }
     ext_key_usage->buf.tag = MBEDTLS_ASN1_OID;
     SET_OID(ext_key_usage->buf, MBEDTLS_OID_SERVER_AUTH);
     ext_key_usage->next = (mbedtls_asn1_sequence *)mbedtls_calloc(1, sizeof(mbedtls_asn1_sequence));
+    if(!ext_key_usage->next) {
+        mbedtls_free(ext_key_usage);
+        errRet = UA_STATUSCODE_BADOUTOFMEMORY;
+        goto cleanup;
+    }
     ext_key_usage->next->buf.tag = MBEDTLS_ASN1_OID;
     SET_OID(ext_key_usage->next->buf, MBEDTLS_OID_CLIENT_AUTH);
 
@@ -317,7 +458,7 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
 
 
     /* Write private key */
-    if ((write_private_key(&key, certFormat, outPrivateKey)) != 0) {
+    if((write_private_key(&key, certFormat, &privateKeyOutput)) != 0) {
         UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
                      "Create Certificate: Writing private key failed.");
         errRet = UA_STATUSCODE_BADINTERNALERROR;
@@ -325,135 +466,109 @@ UA_CreateCertificate(const UA_Logger *logger, const UA_String *subject,
     }
 
     /* Write Certificate */
-    if ((write_certificate(&crt, certFormat, outCertificate,
-                                 mbedtls_ctr_drbg_random, &ctr_drbg)) != 0) {
+    if(write_certificate(&crt, certFormat, &certificateOutput) != 0) {
         UA_LOG_ERROR(logger, UA_LOGCATEGORY_SECURECHANNEL,
                      "Create Certificate: Writing certificate failed.");
         errRet = UA_STATUSCODE_BADINTERNALERROR;
         goto cleanup;
     }
 
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
-    mbedtls_x509write_crt_free(&crt);
-    mbedtls_pk_free(&key);
+    *outPrivateKey = privateKeyOutput;
+    UA_ByteString_init(&privateKeyOutput);
+    *outCertificate = certificateOutput;
+    UA_ByteString_init(&certificateOutput);
 
 cleanup:
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
+    UA_mbedTLS_clearSensitiveByteString(&privateKeyOutput);
+    UA_ByteString_clear(&certificateOutput);
+    UA_mbedTLS_PsaKey_clear(&generatedKey);
     mbedtls_x509write_crt_free(&crt);
     mbedtls_pk_free(&key);
     return errRet;
 }
 
 static int write_private_key(mbedtls_pk_context *key, UA_CertificateFormat keyFormat, UA_ByteString *outPrivateKey) {
-    int ret;
-    unsigned char output_buf[16000];
+    if(!key || !outPrivateKey)
+        return -1;
+
+    int ret = -1;
+    UA_ByteString_init(outPrivateKey);
+    unsigned char output_buf[16000] = {0};
     unsigned char *c = output_buf;
     size_t len = 0;
 
-    memset(output_buf, 0, 16000);
     switch(keyFormat) {
     case UA_CERTIFICATEFORMAT_DER: {
-        if((ret = mbedtls_pk_write_key_pem(key, output_buf, 16000)) != 0) {
-            return ret;
-        }
+        ret = mbedtls_pk_write_key_der(key, output_buf, sizeof(output_buf));
+        if(ret <= 0)
+            goto cleanup;
 
-        len = strlen((char *) output_buf);
-        break;
-    }
-    case UA_CERTIFICATEFORMAT_PEM: {
-        if((ret = mbedtls_pk_write_key_der(key, output_buf, 16000)) < 0) {
-            return ret;
-        }
-
-        len = ret;
+        len = (size_t)ret;
         c = output_buf + sizeof(output_buf) - len;
         break;
     }
+    case UA_CERTIFICATEFORMAT_PEM: {
+        ret = mbedtls_pk_write_key_pem(key, output_buf, sizeof(output_buf));
+        if(ret != 0)
+            goto cleanup;
+
+        len = strlen((char *)output_buf);
+        break;
+    }
+    default:
+        goto cleanup;
     }
 
-    outPrivateKey->length = len;
-    UA_ByteString_allocBuffer(outPrivateKey, outPrivateKey->length);
-    memcpy(outPrivateKey->data, c, outPrivateKey->length);
+    if(UA_ByteString_allocBuffer(outPrivateKey, len) != UA_STATUSCODE_GOOD) {
+        ret = -1;
+        goto cleanup;
+    }
+    memcpy(outPrivateKey->data, c, len);
+    ret = 0;
 
-    return 0;
+cleanup:
+    mbedtls_platform_zeroize(output_buf, sizeof(output_buf));
+    if(ret != 0)
+        UA_mbedTLS_clearSensitiveByteString(outPrivateKey);
+    return ret;
 }
 
 static int write_certificate(mbedtls_x509write_cert *crt, UA_CertificateFormat certFormat,
-                      UA_ByteString *outCertificate, int (*f_rng)(void *, unsigned char *, size_t),
-                      void *p_rng) {
+                             UA_ByteString *outCertificate) {
     int ret;
     unsigned char output_buf[4096];
     unsigned char *c = output_buf;
     size_t len = 0;
 
-    memset(output_buf, 0, 4096);
+    memset(output_buf, 0, sizeof(output_buf));
     switch(certFormat) {
     case UA_CERTIFICATEFORMAT_DER: {
-        if((ret = mbedtls_x509write_crt_der(crt, output_buf, 4096, f_rng, p_rng)) < 0) {
+        ret = UA_mbedTLS_compat_writeCertificateDer(
+            crt, output_buf, sizeof(output_buf));
+        if(ret < 0)
             return ret;
-        }
 
-        len = ret;
-        c = output_buf + 4096 - len;
+        len = (size_t)ret;
+        c = output_buf + sizeof(output_buf) - len;
         break;
     }
     case UA_CERTIFICATEFORMAT_PEM: {
-        if((ret = mbedtls_x509write_crt_pem(crt, output_buf, 4096, f_rng, p_rng)) < 0) {
+        ret = UA_mbedTLS_compat_writeCertificatePem(
+            crt, output_buf, sizeof(output_buf));
+        if(ret < 0)
             return ret;
-        }
 
         len = strlen((char *)output_buf);
         break;
     }
     }
 
-    outCertificate->length = len;
-    UA_ByteString_allocBuffer(outCertificate, outCertificate->length);
-    memcpy(outCertificate->data, c, outCertificate->length);
+    if(UA_ByteString_allocBuffer(outCertificate, len) != UA_STATUSCODE_GOOD)
+        return -1;
+    memcpy(outCertificate->data, c, len);
 
     return 0;
 }
-
-#if MBEDTLS_VERSION_NUMBER < 0x03030000
-int mbedtls_x509write_crt_set_ext_key_usage(mbedtls_x509write_cert *ctx,
-                                            const mbedtls_asn1_sequence *exts) {
-    unsigned char buf[256];
-    unsigned char *c = buf + sizeof(buf);
-    int ret;
-    size_t len = 0;
-    const mbedtls_asn1_sequence *last_ext = NULL;
-    const mbedtls_asn1_sequence *ext;
-
-    memset(buf, 0, sizeof(buf));
-
-    /* We need at least one extension: SEQUENCE SIZE (1..MAX) OF KeyPurposeId */
-    if(!exts) {
-        return MBEDTLS_ERR_X509_BAD_INPUT_DATA;
-    }
-
-    /* Iterate over exts backwards, so we write them out in the requested order */
-    while(last_ext != exts) {
-        for(ext = exts; ext->next != last_ext; ext = ext->next) {
-        }
-        if(ext->buf.tag != MBEDTLS_ASN1_OID) {
-            return MBEDTLS_ERR_X509_BAD_INPUT_DATA;
-        }
-        MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_raw_buffer(&c, buf, ext->buf.p, ext->buf.len));
-        MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_len(&c, buf, ext->buf.len));
-        MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_tag(&c, buf, MBEDTLS_ASN1_OID));
-        last_ext = ext;
-    }
-
-    MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_len(&c, buf, len));
-    MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_tag(&c, buf, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
-
-    return mbedtls_x509write_crt_set_extension(ctx, MBEDTLS_OID_EXTENDED_KEY_USAGE,
-                                               MBEDTLS_OID_SIZE(MBEDTLS_OID_EXTENDED_KEY_USAGE), 1, c, len);
-}
-
-#endif
 
 static size_t mbedtls_get_san_list_deep(const mbedtls_write_san_list* sanlist) {
     size_t ret = 0;

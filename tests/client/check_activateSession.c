@@ -21,7 +21,7 @@
 #include "thread_wrapper.h"
 
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 THREAD_HANDLE server_thread;
 
 static void
@@ -55,7 +55,7 @@ addVariable(size_t size) {
 }
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
         UA_Server_run_iterate(server, true);
     return 0;
 }
@@ -68,7 +68,7 @@ static UA_UsernamePasswordLogin usernamePasswords[2] = {
     {UA_STRING_STATIC("user2"), UA_STRING_STATIC("password1")}};
 
 static void setup(void) {
-    running = true;
+    UA_atomic_store(&running, true);
     server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
 
@@ -83,7 +83,7 @@ static void setup(void) {
 }
 
 static void teardown(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
@@ -167,6 +167,9 @@ START_TEST(Client_activateSession) {
 END_TEST
 
 START_TEST(Client_activateSession_username) {
+    UA_ServerConfig *sc = UA_Server_getConfig(server);
+    sc->allowNonePolicyPassword = true;
+
     UA_Client *client = UA_Client_newForUnitTest();
     UA_ClientConfig *config = UA_Client_getConfig(client);
     config->sessionLocaleIdsSize = 2;
@@ -178,6 +181,123 @@ START_TEST(Client_activateSession_username) {
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     changeLocale(client);
+    UA_Client_delete(client);
+}
+END_TEST
+
+static UA_StatusCode
+activateSessionDirect(UA_Client *client, UA_ExtensionObject *identityToken) {
+    UA_NodeId authenticationToken = UA_NODEID_NULL;
+    UA_ByteString serverNonce = UA_BYTESTRING_NULL;
+    UA_StatusCode res = UA_Client_getSessionAuthenticationToken(
+        client, &authenticationToken, &serverNonce);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+
+    UA_ActivateSessionRequest request;
+    UA_ActivateSessionRequest_init(&request);
+    request.requestHeader.authenticationToken = authenticationToken;
+    request.userIdentityToken = *identityToken;
+    UA_ActivateSessionResponse response;
+    UA_ActivateSessionResponse_init(&response);
+
+    lockServer(server);
+    UA_Session *session = getSessionByToken(server, &authenticationToken);
+    ck_assert(session != NULL);
+    Service_ActivateSession(server, session->channel, &request, &response);
+    unlockServer(server);
+
+    res = response.responseHeader.serviceResult;
+    UA_ActivateSessionResponse_clear(&response);
+    UA_NodeId_clear(&authenticationToken);
+    UA_ByteString_clear(&serverNonce);
+    return res;
+}
+
+START_TEST(Client_activateSession_sameUserAllowed) {
+    UA_ServerConfig *sc = UA_Server_getConfig(server);
+    sc->allowNonePolicyPassword = true;
+
+    UA_Client *client = UA_Client_new();
+    UA_ClientConfig *config = UA_Client_getConfig(client);
+    UA_ClientConfig_setDefault(config);
+    config->allowNonePolicyPassword = true;
+    UA_StatusCode retval = UA_ClientConfig_setAuthenticationUsername(
+        config, "user1", "password");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Client_activateCurrentSession(client);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_delete(client);
+}
+END_TEST
+
+START_TEST(Client_activateSession_userChangeRejected) {
+    UA_ServerConfig *sc = UA_Server_getConfig(server);
+    sc->allowNonePolicyPassword = true;
+
+    UA_Client *client = UA_Client_new();
+    UA_ClientConfig *config = UA_Client_getConfig(client);
+    UA_ClientConfig_setDefault(config);
+    config->allowNonePolicyPassword = true;
+    UA_StatusCode retval = UA_ClientConfig_setAuthenticationUsername(
+        config, "user1", "password");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_UserNameIdentityToken changedUser;
+    UA_UserNameIdentityToken_init(&changedUser);
+    changedUser.policyId = UA_STRING("open62541-username-policy-none#None");
+    changedUser.userName = UA_STRING("user2");
+    changedUser.password = UA_BYTESTRING("password1");
+    UA_ExtensionObject identityToken;
+    UA_ExtensionObject_init(&identityToken);
+    UA_ExtensionObject_setValueNoDelete(
+        &identityToken, &changedUser, &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]);
+    retval = activateSessionDirect(client, &identityToken);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADIDENTITYCHANGENOTSUPPORTED);
+
+    /* The rejected activation does not damage the original Session. */
+    UA_Variant value;
+    UA_Variant_init(&value);
+    retval = UA_Client_readValueAttribute(
+        client, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE),
+        &value);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&value);
+
+    UA_Client_delete(client);
+}
+END_TEST
+
+START_TEST(Client_activateSession_anonymousUserChangeRejected) {
+    UA_ServerConfig *sc = UA_Server_getConfig(server);
+    sc->allowNonePolicyPassword = true;
+
+    UA_Client *client = UA_Client_new();
+    UA_ClientConfig *config = UA_Client_getConfig(client);
+    UA_ClientConfig_setDefault(config);
+    UA_StatusCode retval =
+        UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_UserNameIdentityToken changedUser;
+    UA_UserNameIdentityToken_init(&changedUser);
+    changedUser.policyId = UA_STRING("open62541-username-policy-none#None");
+    changedUser.userName = UA_STRING("user1");
+    changedUser.password = UA_BYTESTRING("password");
+    UA_ExtensionObject identityToken;
+    UA_ExtensionObject_init(&identityToken);
+    UA_ExtensionObject_setValueNoDelete(
+        &identityToken, &changedUser, &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]);
+    retval = activateSessionDirect(client, &identityToken);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADIDENTITYCHANGENOTSUPPORTED);
+
     UA_Client_delete(client);
 }
 END_TEST
@@ -267,7 +387,7 @@ START_TEST(Client_renewSecureChannelWithActiveSubscription) {
     changeLocale(client);
 
     /* manually control the server thread */
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
 
     for(int i = 0; i < 15; ++i) {
@@ -278,7 +398,7 @@ START_TEST(Client_renewSecureChannelWithActiveSubscription) {
     }
 
     /* run the server in an independent thread again */
-    running = true;
+    UA_atomic_store(&running, true);
     THREAD_CREATE(server_thread, serverloop);
 
  //   UA_Client_disconnect(client);
@@ -328,6 +448,85 @@ START_TEST(Client_switch) {
 
     UA_Client_delete(client);
     UA_Client_delete(client2);
+}
+END_TEST
+
+START_TEST(Client_activateSession_alreadyActiveSession_returnsInternalError) {
+    /* src/client/ua_client_connect.c:2397-2402 (switchSession):
+     *   if(client->sessionState != UA_SESSIONSTATE_CLOSED) {
+     *     UA_LOG_ERROR(..., "Cannot activate a session with a
+     *                       different AuthenticationToken when the
+     *                       client already has a Session.");
+     *     return UA_STATUSCODE_BADINTERNALERROR;
+     *   }
+     * UA_Client_activateSession calls switchSession. The existing
+     * Client_switch exercises the GOOD path (client2 starts with
+     * CLOSED state). The "already active" branch is not covered. */
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Verify the session is now ACTIVATED */
+    UA_SessionState ss;
+    UA_Client_getState(client, NULL, &ss, NULL);
+    ck_assert_uint_eq(ss, UA_SESSIONSTATE_ACTIVATED);
+
+    /* Calling activateSession again with a different token must
+     * return BADINTERNALERROR because the session is already active. */
+    UA_NodeId dummyToken = UA_NODEID_NUMERIC(1, 12345);
+    UA_ByteString dummyNonce = UA_BYTESTRING_NULL;
+    retval = UA_Client_activateSession(client, dummyToken, dummyNonce);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADINTERNALERROR);
+
+    /* The async variant hits the same dispatch. */
+    retval = UA_Client_activateSessionAsync(client, dummyToken, dummyNonce);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADINTERNALERROR);
+
+    /* The session state must still be ACTIVATED after the failed call. */
+    UA_Client_getState(client, NULL, &ss, NULL);
+    ck_assert_uint_eq(ss, UA_SESSIONSTATE_ACTIVATED);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+}
+END_TEST
+
+/* Issue #14: A NULL or empty UserIdentityToken should be treated as Anonymous
+ * (OPC UA Part 4, Section 5.6.3.2, Table 17) */
+START_TEST(Client_activateSession_nullToken) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Send ActivateSession with a NULL (default-initialized) UserIdentityToken.
+     * The encoding is UA_EXTENSIONOBJECT_ENCODED_NOBODY. Per spec, the server
+     * must interpret this as an Anonymous login. */
+    UA_ActivateSessionRequest req;
+    UA_ActivateSessionRequest_init(&req);
+    /* userIdentityToken left as default (ENCODED_NOBODY / NULL) */
+
+    UA_ActivateSessionResponse resp;
+    UA_ActivateSessionResponse_init(&resp);
+
+    __UA_Client_Service(client, &req,
+                        &UA_TYPES[UA_TYPES_ACTIVATESESSIONREQUEST],
+                        &resp,
+                        &UA_TYPES[UA_TYPES_ACTIVATESESSIONRESPONSE]);
+
+    ck_assert_uint_eq(resp.responseHeader.serviceResult, UA_STATUSCODE_GOOD);
+
+    UA_ActivateSessionRequest_clear(&req);
+    UA_ActivateSessionResponse_clear(&resp);
+
+    /* Verify the session is still functional after re-activation */
+    UA_Variant val;
+    UA_Variant_init(&val);
+    UA_NodeId nodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
+    retval = UA_Client_readValueAttribute(client, nodeId, &val);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&val);
+
+    UA_Client_delete(client);
 }
 END_TEST
 
@@ -461,12 +660,16 @@ static Suite* testSuite_Client(void) {
     tcase_add_checked_fixture(tc_client, setup, teardown);
     tcase_add_test(tc_client, Client_activateSession);
     tcase_add_test(tc_client, Client_activateSession_username);
+    tcase_add_test(tc_client, Client_activateSession_sameUserAllowed);
+    tcase_add_test(tc_client, Client_activateSession_userChangeRejected);
+    tcase_add_test(tc_client, Client_activateSession_anonymousUserChangeRejected);
     tcase_add_test(tc_client, Client_read);
     tcase_add_test(tc_client, Client_renewSecureChannel);
 #ifdef UA_ENABLE_SUBSCRIPTIONS
     tcase_add_test(tc_client, Client_renewSecureChannelWithActiveSubscription);
 #endif
 
+    tcase_add_test(tc_client, Client_activateSession_nullToken);
     tcase_add_test(tc_client, Client_activateSessionClose);
     tcase_add_test(tc_client, Client_activateSessionTimeout);
     tcase_add_test(tc_client, Client_activateSessionLocaleIds);
@@ -475,6 +678,7 @@ static Suite* testSuite_Client(void) {
     TCase *tc_client_reconnect = tcase_create("Client Session Switch");
     tcase_add_checked_fixture(tc_client_reconnect, setup, teardown);
     tcase_add_test(tc_client_reconnect, Client_switch);
+    tcase_add_test(tc_client_reconnect, Client_activateSession_alreadyActiveSession_returnsInternalError);
     suite_add_tcase(s,tc_client_reconnect);
     return s;
 }

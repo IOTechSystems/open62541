@@ -10,7 +10,7 @@
 static UA_StatusCode
 verifyCertificateAllowAll(UA_CertificateGroup *certGroup,
                           const UA_ByteString *certificate) {
-    UA_LOG_WARNING(certGroup->logging, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_WARNING(certGroup->logging, UA_LOGCATEGORY_APPLICATION,
                    "No certificate store configured. Accepting the certificate.");
     return UA_STATUSCODE_GOOD;
 }
@@ -38,9 +38,8 @@ void UA_CertificateGroup_AcceptAll(UA_CertificateGroup *certGroup) {
 
 #ifndef UA_ENABLE_ENCRYPTION
 UA_StatusCode
-UA_CertificateUtils_verifyApplicationURI(UA_RuleHandling ruleHandling,
-                                         const UA_ByteString *certificate,
-                                         const UA_String *applicationURI){
+UA_CertificateUtils_verifyApplicationUri(const UA_ByteString *certificate,
+                                         const UA_String *applicationURI) {
     return UA_STATUSCODE_GOOD;
 }
 
@@ -63,14 +62,27 @@ UA_CertificateUtils_getThumbprint(UA_ByteString *certificate,
 }
 
 UA_StatusCode
+UA_CertificateUtils_getExtendedKeyUsage(const UA_ByteString *certificate,
+                                        UA_CertificateEku *extendedKeyUsage) {
+    if(extendedKeyUsage)
+        *extendedKeyUsage = UA_CERTIFICATEEKU_NONE;
+    return UA_STATUSCODE_BADNOTSUPPORTED;
+}
+
+UA_StatusCode
 UA_CertificateUtils_comparePublicKeys(const UA_ByteString *certificate1,
                                       const UA_ByteString *certificate2) {
     return UA_STATUSCODE_BADNOTSUPPORTED;
 }
 
 UA_StatusCode
-UA_CertificateUtils_ckeckKeyPair(const UA_ByteString *certificate,
+UA_CertificateUtils_checkKeyPair(const UA_ByteString *certificate,
                                  const UA_ByteString *privateKey) {
+    return UA_STATUSCODE_BADNOTSUPPORTED;
+}
+
+UA_StatusCode
+UA_CertificateUtils_checkCA(const UA_ByteString *certificate) {
     return UA_STATUSCODE_BADNOTSUPPORTED;
 }
 #endif

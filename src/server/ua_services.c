@@ -14,6 +14,7 @@
  *    Copyright 2017 (c) Mark Giraud, Fraunhofer IOSB
  *    Copyright 2019 (c) Kalycito Infotech Private Limited
  *    Copyright 2023 (c) Hilscher Gesellschaft für Systemautomation mbH (Author: Phuong Nguyen)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 /* This file contains the service invocation logic that is called from all
@@ -21,6 +22,7 @@
 
 #include "ua_server_internal.h"
 #include "ua_services.h"
+#include "../ua_types_encoding_binary.h"
 
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
 /* store the authentication token and session ID so we can help fuzzing by
@@ -39,122 +41,120 @@ UA_NodeId unsafe_fuzz_authenticationToken = {0, UA_NODEIDTYPE_NUMERIC, {0}};
 # define UA_SERVICECOUNTER_OFFSET(X, requiresSession) requiresSession
 #endif
 
-UA_ServiceDescription serviceDescriptions[] = {
+static UA_ServiceDescription serviceDescriptions[] = {
     {UA_NS0ID_GETENDPOINTSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(false), (UA_Service)Service_GetEndpoints,
+     UA_SERVICECOUNTER_OFFSET_NONE(false), Service_GetEndpoints,
      &UA_TYPES[UA_TYPES_GETENDPOINTSREQUEST], &UA_TYPES[UA_TYPES_GETENDPOINTSRESPONSE]},
     {UA_NS0ID_FINDSERVERSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(false), (UA_Service)Service_FindServers,
+     UA_SERVICECOUNTER_OFFSET_NONE(false), Service_FindServers,
      &UA_TYPES[UA_TYPES_FINDSERVERSREQUEST], &UA_TYPES[UA_TYPES_FINDSERVERSRESPONSE]},
 #ifdef UA_ENABLE_DISCOVERY
     {UA_NS0ID_REGISTERSERVERREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(false), (UA_Service)Service_RegisterServer,
+     UA_SERVICECOUNTER_OFFSET_NONE(false), Service_RegisterServer,
      &UA_TYPES[UA_TYPES_REGISTERSERVERREQUEST], &UA_TYPES[UA_TYPES_REGISTERSERVERRESPONSE]},
     {UA_NS0ID_REGISTERSERVER2REQUEST_ENCODING_DEFAULTBINARY,
-    UA_SERVICECOUNTER_OFFSET_NONE(false), (UA_Service)Service_RegisterServer2,
+    UA_SERVICECOUNTER_OFFSET_NONE(false), Service_RegisterServer2,
     &UA_TYPES[UA_TYPES_REGISTERSERVER2REQUEST], &UA_TYPES[UA_TYPES_REGISTERSERVER2RESPONSE]},
-# ifdef UA_ENABLE_DISCOVERY_MULTICAST
     {UA_NS0ID_FINDSERVERSONNETWORKREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(false), (UA_Service)Service_FindServersOnNetwork,
+     UA_SERVICECOUNTER_OFFSET_NONE(false), Service_FindServersOnNetwork,
      &UA_TYPES[UA_TYPES_FINDSERVERSONNETWORKREQUEST], &UA_TYPES[UA_TYPES_FINDSERVERSONNETWORKRESPONSE]},
-# endif
 #endif
     {UA_NS0ID_CREATESESSIONREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(false), (UA_Service)Service_CreateSession,
+     UA_SERVICECOUNTER_OFFSET_NONE(false), NULL,
      &UA_TYPES[UA_TYPES_CREATESESSIONREQUEST], &UA_TYPES[UA_TYPES_CREATESESSIONRESPONSE]},
     {UA_NS0ID_ACTIVATESESSIONREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(false), (UA_Service)Service_ActivateSession,
+     UA_SERVICECOUNTER_OFFSET_NONE(false), NULL,
      &UA_TYPES[UA_TYPES_ACTIVATESESSIONREQUEST],  &UA_TYPES[UA_TYPES_ACTIVATESESSIONRESPONSE]},
     {UA_NS0ID_CLOSESESSIONREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(true), (UA_Service)Service_CloseSession,
+     UA_SERVICECOUNTER_OFFSET_NONE(true), NULL,
      &UA_TYPES[UA_TYPES_CLOSESESSIONREQUEST], &UA_TYPES[UA_TYPES_CLOSESESSIONRESPONSE]},
     {UA_NS0ID_CANCELREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET_NONE(true), (UA_Service)Service_Cancel,
+     UA_SERVICECOUNTER_OFFSET_NONE(true), Service_Cancel,
      &UA_TYPES[UA_TYPES_CANCELREQUEST], &UA_TYPES[UA_TYPES_CANCELRESPONSE]},
     {UA_NS0ID_READREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(readCount, true), (UA_Service)Service_Read,
+     UA_SERVICECOUNTER_OFFSET(readCount, true), Service_Read,
      &UA_TYPES[UA_TYPES_READREQUEST], &UA_TYPES[UA_TYPES_READRESPONSE]},
     {UA_NS0ID_WRITEREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(writeCount, true), (UA_Service)Service_Write,
+     UA_SERVICECOUNTER_OFFSET(writeCount, true), Service_Write,
      &UA_TYPES[UA_TYPES_WRITEREQUEST], &UA_TYPES[UA_TYPES_WRITERESPONSE]},
     {UA_NS0ID_BROWSEREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(browseCount, true), (UA_Service)Service_Browse,
+     UA_SERVICECOUNTER_OFFSET(browseCount, true), Service_Browse,
      &UA_TYPES[UA_TYPES_BROWSEREQUEST], &UA_TYPES[UA_TYPES_BROWSERESPONSE]},
     {UA_NS0ID_BROWSENEXTREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(browseNextCount, true), (UA_Service)Service_BrowseNext,
+     UA_SERVICECOUNTER_OFFSET(browseNextCount, true), Service_BrowseNext,
      &UA_TYPES[UA_TYPES_BROWSENEXTREQUEST], &UA_TYPES[UA_TYPES_BROWSENEXTRESPONSE]},
     {UA_NS0ID_REGISTERNODESREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(registerNodesCount, true), (UA_Service)Service_RegisterNodes,
+     UA_SERVICECOUNTER_OFFSET(registerNodesCount, true), Service_RegisterNodes,
      &UA_TYPES[UA_TYPES_REGISTERNODESREQUEST], &UA_TYPES[UA_TYPES_REGISTERNODESRESPONSE]},
     {UA_NS0ID_UNREGISTERNODESREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(unregisterNodesCount, true), (UA_Service)Service_UnregisterNodes,
+     UA_SERVICECOUNTER_OFFSET(unregisterNodesCount, true), Service_UnregisterNodes,
      &UA_TYPES[UA_TYPES_UNREGISTERNODESREQUEST], &UA_TYPES[UA_TYPES_UNREGISTERNODESRESPONSE]},
     {UA_NS0ID_TRANSLATEBROWSEPATHSTONODEIDSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(translateBrowsePathsToNodeIdsCount, true), (UA_Service)Service_TranslateBrowsePathsToNodeIds,
+     UA_SERVICECOUNTER_OFFSET(translateBrowsePathsToNodeIdsCount, true), Service_TranslateBrowsePathsToNodeIds,
      &UA_TYPES[UA_TYPES_TRANSLATEBROWSEPATHSTONODEIDSREQUEST], &UA_TYPES[UA_TYPES_TRANSLATEBROWSEPATHSTONODEIDSRESPONSE]},
 #ifdef UA_ENABLE_SUBSCRIPTIONS
     {UA_NS0ID_CREATESUBSCRIPTIONREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(createSubscriptionCount, true), (UA_Service)Service_CreateSubscription,
+     UA_SERVICECOUNTER_OFFSET(createSubscriptionCount, true), Service_CreateSubscription,
      &UA_TYPES[UA_TYPES_CREATESUBSCRIPTIONREQUEST], &UA_TYPES[UA_TYPES_CREATESUBSCRIPTIONRESPONSE]},
     {UA_NS0ID_PUBLISHREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(publishCount, true), NULL,
+     UA_SERVICECOUNTER_OFFSET(publishCount, true), Service_Publish,
      &UA_TYPES[UA_TYPES_PUBLISHREQUEST], &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]},
     {UA_NS0ID_REPUBLISHREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(republishCount, true), (UA_Service)Service_Republish,
+     UA_SERVICECOUNTER_OFFSET(republishCount, true), Service_Republish,
      &UA_TYPES[UA_TYPES_REPUBLISHREQUEST], &UA_TYPES[UA_TYPES_REPUBLISHRESPONSE]},
     {UA_NS0ID_MODIFYSUBSCRIPTIONREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(modifySubscriptionCount, true), (UA_Service)Service_ModifySubscription,
+     UA_SERVICECOUNTER_OFFSET(modifySubscriptionCount, true), Service_ModifySubscription,
      &UA_TYPES[UA_TYPES_MODIFYSUBSCRIPTIONREQUEST], &UA_TYPES[UA_TYPES_MODIFYSUBSCRIPTIONRESPONSE]},
     {UA_NS0ID_SETPUBLISHINGMODEREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(setPublishingModeCount, true), (UA_Service)Service_SetPublishingMode,
+     UA_SERVICECOUNTER_OFFSET(setPublishingModeCount, true), Service_SetPublishingMode,
      &UA_TYPES[UA_TYPES_SETPUBLISHINGMODEREQUEST], &UA_TYPES[UA_TYPES_SETPUBLISHINGMODERESPONSE]},
     {UA_NS0ID_DELETESUBSCRIPTIONSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(deleteSubscriptionsCount, true), (UA_Service)Service_DeleteSubscriptions,
+     UA_SERVICECOUNTER_OFFSET(deleteSubscriptionsCount, true), Service_DeleteSubscriptions,
      &UA_TYPES[UA_TYPES_DELETESUBSCRIPTIONSREQUEST], &UA_TYPES[UA_TYPES_DELETESUBSCRIPTIONSRESPONSE]},
     {UA_NS0ID_TRANSFERSUBSCRIPTIONSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(transferSubscriptionsCount, true), (UA_Service)Service_TransferSubscriptions,
+     UA_SERVICECOUNTER_OFFSET(transferSubscriptionsCount, true), Service_TransferSubscriptions,
      &UA_TYPES[UA_TYPES_TRANSFERSUBSCRIPTIONSREQUEST], &UA_TYPES[UA_TYPES_TRANSFERSUBSCRIPTIONSRESPONSE]},
     {UA_NS0ID_CREATEMONITOREDITEMSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(createMonitoredItemsCount, true), (UA_Service)Service_CreateMonitoredItems,
+     UA_SERVICECOUNTER_OFFSET(createMonitoredItemsCount, true), Service_CreateMonitoredItems,
      &UA_TYPES[UA_TYPES_CREATEMONITOREDITEMSREQUEST], &UA_TYPES[UA_TYPES_CREATEMONITOREDITEMSRESPONSE]},
     {UA_NS0ID_DELETEMONITOREDITEMSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(deleteMonitoredItemsCount, true), (UA_Service)Service_DeleteMonitoredItems,
+     UA_SERVICECOUNTER_OFFSET(deleteMonitoredItemsCount, true), Service_DeleteMonitoredItems,
      &UA_TYPES[UA_TYPES_DELETEMONITOREDITEMSREQUEST], &UA_TYPES[UA_TYPES_DELETEMONITOREDITEMSRESPONSE]},
     {UA_NS0ID_MODIFYMONITOREDITEMSREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(modifyMonitoredItemsCount, true), (UA_Service)Service_ModifyMonitoredItems,
+     UA_SERVICECOUNTER_OFFSET(modifyMonitoredItemsCount, true), Service_ModifyMonitoredItems,
      &UA_TYPES[UA_TYPES_MODIFYMONITOREDITEMSREQUEST], &UA_TYPES[UA_TYPES_MODIFYMONITOREDITEMSRESPONSE]},
     {UA_NS0ID_SETMONITORINGMODEREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(setMonitoringModeCount, true), (UA_Service)Service_SetMonitoringMode,
+     UA_SERVICECOUNTER_OFFSET(setMonitoringModeCount, true), Service_SetMonitoringMode,
      &UA_TYPES[UA_TYPES_SETMONITORINGMODEREQUEST], &UA_TYPES[UA_TYPES_SETMONITORINGMODERESPONSE]},
     {UA_NS0ID_SETTRIGGERINGREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(setTriggeringCount, true), (UA_Service)Service_SetTriggering,
+     UA_SERVICECOUNTER_OFFSET(setTriggeringCount, true), Service_SetTriggering,
      &UA_TYPES[UA_TYPES_SETTRIGGERINGREQUEST], &UA_TYPES[UA_TYPES_SETTRIGGERINGRESPONSE]},
 #endif
 #ifdef UA_ENABLE_HISTORIZING
     {UA_NS0ID_HISTORYREADREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(historyReadCount, true), (UA_Service)Service_HistoryRead,
+     UA_SERVICECOUNTER_OFFSET(historyReadCount, true), Service_HistoryRead,
      &UA_TYPES[UA_TYPES_HISTORYREADREQUEST], &UA_TYPES[UA_TYPES_HISTORYREADRESPONSE]},
     {UA_NS0ID_HISTORYUPDATEREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(historyUpdateCount, true), (UA_Service)Service_HistoryUpdate,
+     UA_SERVICECOUNTER_OFFSET(historyUpdateCount, true), Service_HistoryUpdate,
      &UA_TYPES[UA_TYPES_HISTORYUPDATEREQUEST], &UA_TYPES[UA_TYPES_HISTORYUPDATERESPONSE]},
 #endif
 #ifdef UA_ENABLE_METHODCALLS
     {UA_NS0ID_CALLREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(callCount, true), (UA_Service)Service_Call,
+     UA_SERVICECOUNTER_OFFSET(callCount, true), Service_Call,
      &UA_TYPES[UA_TYPES_CALLREQUEST], &UA_TYPES[UA_TYPES_CALLRESPONSE]},
 #endif
 #ifdef UA_ENABLE_NODEMANAGEMENT
     {UA_NS0ID_ADDNODESREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(addNodesCount, true), (UA_Service)Service_AddNodes,
+     UA_SERVICECOUNTER_OFFSET(addNodesCount, true), Service_AddNodes,
      &UA_TYPES[UA_TYPES_ADDNODESREQUEST], &UA_TYPES[UA_TYPES_ADDNODESRESPONSE]},
     {UA_NS0ID_ADDREFERENCESREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(addReferencesCount, true), (UA_Service)Service_AddReferences,
+     UA_SERVICECOUNTER_OFFSET(addReferencesCount, true), Service_AddReferences,
      &UA_TYPES[UA_TYPES_ADDREFERENCESREQUEST], &UA_TYPES[UA_TYPES_ADDREFERENCESRESPONSE]},
     {UA_NS0ID_DELETENODESREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(deleteNodesCount, true), (UA_Service)Service_DeleteNodes,
+     UA_SERVICECOUNTER_OFFSET(deleteNodesCount, true), Service_DeleteNodes,
      &UA_TYPES[UA_TYPES_DELETENODESREQUEST], &UA_TYPES[UA_TYPES_DELETENODESRESPONSE]},
     {UA_NS0ID_DELETEREFERENCESREQUEST_ENCODING_DEFAULTBINARY,
-     UA_SERVICECOUNTER_OFFSET(deleteReferencesCount, true), (UA_Service)Service_DeleteReferences,
+     UA_SERVICECOUNTER_OFFSET(deleteReferencesCount, true), Service_DeleteReferences,
      &UA_TYPES[UA_TYPES_DELETEREFERENCESREQUEST], &UA_TYPES[UA_TYPES_DELETEREFERENCESRESPONSE]},
 #endif
     {0, UA_SERVICECOUNTER_OFFSET_NONE(false), NULL, NULL, NULL}
@@ -169,14 +169,99 @@ getServiceDescription(UA_UInt32 requestTypeId) {
     return NULL;
 }
 
-static const UA_String securityPolicyNone =
-    UA_STRING_STATIC("http://opcfoundation.org/UA/SecurityPolicy#None");
+UA_StatusCode
+decodeBinaryServiceRequest(UA_Server *server, const UA_ByteString *message,
+                           UA_ServiceDescription **description,
+                           UA_Request *request, size_t *requestOffset,
+                           UA_UInt32 *requestTypeId) {
+    *description = NULL;
+    size_t offset = 0;
+    UA_NodeId typeId;
+    UA_NodeId_init(&typeId);
+    UA_StatusCode res = UA_NodeId_decodeBinary(message, &offset, &typeId);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(requestOffset)
+        *requestOffset = offset;
+    if(typeId.namespaceIndex != 0 ||
+       typeId.identifierType != UA_NODEIDTYPE_NUMERIC) {
+        UA_NodeId_clear(&typeId);
+        return UA_STATUSCODE_BADSERVICEUNSUPPORTED;
+    }
+
+    UA_UInt32 numericTypeId = typeId.identifier.numeric;
+    UA_NodeId_clear(&typeId);
+    if(requestTypeId)
+        *requestTypeId = numericTypeId;
+    *description = getServiceDescription(numericTypeId);
+    if(!*description)
+        return UA_STATUSCODE_BADSERVICEUNSUPPORTED;
+
+    memset(request, 0, sizeof(*request));
+    UA_DecodeBinaryOptions options;
+    memset(&options, 0, sizeof(options));
+    options.customTypes = serverCustomTypes(server);
+    res = UA_decodeBinaryInternal(message, &offset, request,
+                                  (*description)->requestType, &options);
+    if(res == UA_STATUSCODE_GOOD && offset != message->length)
+        res = UA_STATUSCODE_BADDECODINGERROR;
+    if(res != UA_STATUSCODE_GOOD)
+        UA_clear(request, (*description)->requestType);
+    return res;
+}
+
+/* Allocates the results array and iterates over it to execute the operations
+ * within a request */
+UA_StatusCode
+allocProcessServiceOperations(UA_Server *server, UA_Session *session,
+                              UA_ServiceOperation operationCallback,
+                              const void *context, const size_t *requestOperations,
+                              const UA_DataType *requestOperationsType,
+                              size_t *responseOperations,
+                              const UA_DataType *responseOperationsType) {
+    size_t ops = *requestOperations;
+    if(ops == 0)
+        return UA_STATUSCODE_BADNOTHINGTODO;
+
+    /* No padding after size_t */
+    void **respPos = (void**)((uintptr_t)responseOperations + sizeof(size_t));
+    *respPos = UA_Array_new(ops, responseOperationsType);
+    if(!(*respPos))
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+
+    *responseOperations = ops;
+    uintptr_t respOp = (uintptr_t)*respPos;
+    /* No padding after size_t */
+    uintptr_t reqOp = *(uintptr_t*)((uintptr_t)requestOperations + sizeof(size_t));
+    for(size_t i = 0; i < ops; i++) {
+        operationCallback(server, session, context, (void*)reqOp, (void*)respOp);
+        if(session && session->state == UA_SESSIONSTATE_CLOSED)
+            return UA_STATUSCODE_BADSESSIONCLOSED;
+        reqOp += requestOperationsType->memSize;
+        respOp += responseOperationsType->memSize;
+    }
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_UInt32
+getUacpRequestId(const UA_SecureChannel *channel, UA_UInt64 responseToken) {
+    if(channel->transport != UA_SECURECHANNEL_TRANSPORT_UACP)
+        return 0;
+    UA_assert(responseToken <= UINT32_MAX);
+    return (UA_UInt32)responseToken;
+}
 
 static UA_Boolean
 processServiceInternal(UA_Server *server, UA_SecureChannel *channel, UA_Session *session,
-                       UA_UInt32 requestId, UA_ServiceDescription *sd,
+                       UA_UInt64 responseToken, UA_ServiceDescription *sd,
                        const UA_Request *request, UA_Response *response) {
     UA_ResponseHeader *rh = &response->responseHeader;
+
+    /* A callback before service execution can close the resolved Session. */
+    if(session && session->state == UA_SESSIONSTATE_CLOSED) {
+        rh->serviceResult = UA_STATUSCODE_BADSESSIONCLOSED;
+        return true;
+    }
 
     /* Check timestamp in the request header */
     if(request->requestHeader.timestamp == 0 &&
@@ -186,28 +271,33 @@ processServiceInternal(UA_Server *server, UA_SecureChannel *channel, UA_Session 
                                "See the 'verifyRequestTimestamp' setting.");
         if(server->config.verifyRequestTimestamp <= UA_RULEHANDLING_ABORT) {
             rh->serviceResult = UA_STATUSCODE_BADINVALIDTIMESTAMP;
-            return false;
+            return true;
         }
     }
 
     /* If it is an unencrypted (#None) channel, only allow the discovery services */
     if(server->config.securityPolicyNoneDiscoveryOnly &&
-       UA_String_equal(&channel->securityPolicy->policyUri, &securityPolicyNone ) &&
+       channel->securityPolicy->policyType == UA_SECURITYPOLICYTYPE_NONE &&
        sd->requestType != &UA_TYPES[UA_TYPES_GETENDPOINTSREQUEST] &&
        sd->requestType != &UA_TYPES[UA_TYPES_FINDSERVERSREQUEST]
-#if defined(UA_ENABLE_DISCOVERY) && defined(UA_ENABLE_DISCOVERY_MULTICAST)
+#if defined(UA_ENABLE_DISCOVERY)
        && sd->requestType != &UA_TYPES[UA_TYPES_FINDSERVERSONNETWORKREQUEST]
 #endif
        ) {
         rh->serviceResult = UA_STATUSCODE_BADSECURITYPOLICYREJECTED;
-        return false;
+        return true;
     }
 
     /* Session lifecycle services */
     if(sd->requestType == &UA_TYPES[UA_TYPES_CREATESESSIONREQUEST] ||
        sd->requestType == &UA_TYPES[UA_TYPES_ACTIVATESESSIONREQUEST] ||
        sd->requestType == &UA_TYPES[UA_TYPES_CLOSESESSIONREQUEST]) {
-        ((UA_ChannelService)sd->serviceCallback)(server, channel, request, response);
+        if(sd->requestType == &UA_TYPES[UA_TYPES_CREATESESSIONREQUEST])
+            Service_CreateSession(server, channel, request, response);
+        else if(sd->requestType == &UA_TYPES[UA_TYPES_ACTIVATESESSIONREQUEST])
+            Service_ActivateSession(server, channel, request, response);
+        else
+            Service_CloseSession(server, channel, request, response);
         /* Store the authentication token created during CreateSession to help
          * fuzzing cover more lines */
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
@@ -217,7 +307,7 @@ processServiceInternal(UA_Server *server, UA_SecureChannel *channel, UA_Session 
             UA_NodeId_copy(&res->authenticationToken, &unsafe_fuzz_authenticationToken);
         }
 #endif
-        return false;
+        return true;
     }
 
     /* Set an anonymous, inactive session for services that need no session */
@@ -231,7 +321,8 @@ processServiceInternal(UA_Server *server, UA_SecureChannel *channel, UA_Session 
     }
 
     /* Trying to use a non-activated session? */
-    if(sd->sessionRequired && !session->activated) {
+    if(sd->sessionRequired &&
+       session->state != UA_SESSIONSTATE_ACTIVATED) {
         UA_assert(session != &anonymousSession); /* because sd->sessionRequired */
 #ifdef UA_ENABLE_TYPEDESCRIPTION
         UA_LOG_WARNING_SESSION(server->config.logging, session,
@@ -242,10 +333,9 @@ processServiceInternal(UA_Server *server, UA_SecureChannel *channel, UA_Session 
                                "Service %" PRIu32 " refused on a non-activated session",
                                sd->requestType->binaryEncodingId.identifier.numeric);
 #endif
-        UA_Server_removeSessionByToken(server, &session->authenticationToken,
-                                       UA_SHUTDOWNREASON_ABORT);
+        UA_Session_remove(server, session, UA_SHUTDOWNREASON_ABORT);
         rh->serviceResult = UA_STATUSCODE_BADSESSIONNOTACTIVATED;
-        return false;
+        return true;
     }
 
     /* Update the session lifetime */
@@ -254,33 +344,25 @@ processServiceInternal(UA_Server *server, UA_SecureChannel *channel, UA_Session 
     UA_DateTime now = el->dateTime_now(el);
     UA_Session_updateLifetime(session, now, nowMonotonic);
 
-    /* The publish request is not answered immediately */
-#ifdef UA_ENABLE_SUBSCRIPTIONS
-    if(sd->requestType == &UA_TYPES[UA_TYPES_PUBLISHREQUEST]) {
-        rh->serviceResult = Service_Publish(server, session, &request->publishRequest, requestId);
-        return (rh->serviceResult == UA_STATUSCODE_GOOD);
-    }
-#endif
+    /* Store the response token -- will be used to create async responses */
+    server->asyncManager.currentResponseToken = responseToken;
+    server->asyncManager.currentUacpRequestId =
+        getUacpRequestId(channel, responseToken);
+    server->asyncManager.currentRequestHandle = request->requestHeader.requestHandle;
 
-    /* An async call request might not be answered immediately */
-#if UA_MULTITHREADING >= 100 && defined(UA_ENABLE_METHODCALLS)
-    if(sd->requestType == &UA_TYPES[UA_TYPES_CALLREQUEST]) {
-        UA_Boolean finished = true;
-        Service_CallAsync(server, session, requestId, &request->callRequest,
-                          &response->callResponse, &finished);
-        return !finished;
-    }
-#endif
-
-    /* Execute the synchronous service call */
-    sd->serviceCallback(server, session, request, response);
-    return false;
+    /* Execute the service. A user callback inside the service can close the
+     * Session. For synchronous services, do not return a successful response
+     * for a Session that became closed during the operation. */
+    UA_Boolean done = sd->serviceCallback(server, session, request, response);
+    if(done && session->state == UA_SESSIONSTATE_CLOSED)
+        rh->serviceResult = UA_STATUSCODE_BADSESSIONCLOSED;
+    return done;
 }
 
 UA_Boolean
-UA_Server_processRequest(UA_Server *server, UA_SecureChannel *channel,
-                         UA_UInt32 requestId, UA_ServiceDescription *sd,
-                         const UA_Request *request, UA_Response *response) {
+processRequest(UA_Server *server, UA_SecureChannel *channel,
+               UA_UInt64 responseToken, UA_ServiceDescription *sd,
+               const UA_Request *request, UA_Response *response) {
     UA_LOCK_ASSERT(&server->serviceMutex);
 
     /* Set the authenticationToken from the create session request to help
@@ -300,14 +382,49 @@ UA_Server_processRequest(UA_Server *server, UA_SecureChannel *channel,
     response->responseHeader.serviceResult =
         getBoundSession(server, channel, &request->requestHeader.authenticationToken, &session);
     if(!session && sd->sessionRequired)
-        return false;
+        return true;
 
     /* The session can be NULL if not required */
     response->responseHeader.serviceResult = UA_STATUSCODE_GOOD;
+    UA_NodeId sessionId = (session) ? session->sessionId : UA_NODEID_NULL;
+    UA_UInt32 uacpRequestId = getUacpRequestId(channel, responseToken);
+
+    /* Notify with UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_BEGIN */
+    UA_STATIC_THREAD_LOCAL UA_KeyValuePair notifyPayload[4] = {
+        {{0, UA_STRING_STATIC("securechannel-id")}, {0}},
+        {{0, UA_STRING_STATIC("session-id")}, {0}},
+        {{0, UA_STRING_STATIC("request-id")}, {0}},
+        {{0, UA_STRING_STATIC("service-type")}, {0}}
+    };
+    UA_KeyValueMap notifyPayloadMap = {4, notifyPayload};
+    UA_Variant_setScalar(&notifyPayload[0].value, &channel->securityToken.channelId,
+                         &UA_TYPES[UA_TYPES_UINT32]);
+    UA_Variant_setScalar(&notifyPayload[1].value, &sessionId,
+                         &UA_TYPES[UA_TYPES_NODEID]);
+    UA_Variant_setScalar(&notifyPayload[2].value, &uacpRequestId,
+                         &UA_TYPES[UA_TYPES_UINT32]);
+    UA_Variant_setScalar(&notifyPayload[3].value,
+                         (void *)(uintptr_t)&sd->requestType->typeId,
+                         &UA_TYPES[UA_TYPES_NODEID]);
+    UA_ApplicationNotificationType nt = UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_BEGIN;
+    notifyApplication(server, nt, notifyPayloadMap);
 
     /* Process the service */
-    UA_Boolean async =
-        processServiceInternal(server, channel, session, requestId, sd, request, response);
+    beginModelChange(server);
+    UA_Boolean done = processServiceInternal(server, channel, session,
+                                             responseToken, sd, request,
+                                             response);
+    endModelChange(server);
+#ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
+    UA_assert(server->modelChangeDepth == 0);
+#endif
+
+    /* Notify with UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_END if the service was
+     * completed synchronously. For async completion of a service, this gets
+     * called eventually in ua_server_async.c. */
+    nt = (done) ? UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_END :
+        UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_ASYNC;
+    notifyApplication(server, nt, notifyPayloadMap);
 
     /* Update the service statistics */
 #ifdef UA_ENABLE_DIAGNOSTICS
@@ -325,5 +442,49 @@ UA_Server_processRequest(UA_Server *server, UA_SecureChannel *channel,
     }
 #endif
 
-    return async;
+    return done;
+}
+
+UA_Boolean
+processDecodedServiceRequest(UA_Server *server, UA_SecureChannel *channel,
+                             UA_UInt64 responseToken,
+                             UA_ServiceDescription *sd,
+                             const UA_Request *request, UA_Response *response) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_init(response, sd->responseType);
+    response->responseHeader.requestHandle =
+        request->requestHeader.requestHandle;
+    return processRequest(server, channel, responseToken, sd, request,
+                          response);
+}
+
+void
+abandonServiceRequest(UA_Server *server, UA_SecureChannel *channel,
+                      UA_UInt64 responseToken) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+    for(UA_Session *session = channel->sessions; session;
+        session = session->next) {
+        UA_PublishResponseEntry *pre, *next, *previous = NULL;
+        SIMPLEQ_FOREACH_SAFE(pre, &session->responseQueue, listEntry, next) {
+            if(pre->responseToken != responseToken) {
+                previous = pre;
+                continue;
+            }
+            if(previous)
+                SIMPLEQ_REMOVE_AFTER(&session->responseQueue, previous,
+                                     listEntry);
+            else
+                SIMPLEQ_REMOVE_HEAD(&session->responseQueue, listEntry);
+            session->responseQueueSize--;
+            UA_PublishResponse_clear(&pre->response);
+            UA_free(pre);
+            UA_LOG_DEBUG_SESSION(server->config.logging, session,
+                                 "Removed abandoned Publish response token %"
+                                 PRIu64, responseToken);
+            break;
+        }
+    }
+#endif
+    UA_AsyncManager_abandon(server, channel, responseToken);
 }

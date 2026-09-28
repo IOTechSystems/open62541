@@ -4,6 +4,7 @@
  *
  *    Copyright 2014-2017 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2018 (c) Fraunhofer IOSB (Author: Lukas Meling)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_TYPES_ENCODING_JSON_H_
@@ -25,19 +26,17 @@ typedef struct {
     const uint8_t *end;
 
     uint16_t depth; /* How often did we en-/decoding recurse? */
-    UA_Boolean commaNeeded[UA_JSON_ENCODING_MAX_RECURSION];
-    UA_Boolean useReversible;
+    UA_Boolean commaNeeded[UA_JSON_ENCODING_MAX_RECURSION + 1];
     UA_Boolean calcOnly; /* Only compute the length of the decoding */
 
-    size_t namespacesSize;
-    const UA_String *namespaces;
+    UA_NamespaceMapping *namespaceMapping;
 
     size_t serverUrisSize;
     const UA_String *serverUris;
 
+    UA_Boolean useCompactEncoding;
     UA_Boolean prettyPrint;
     UA_Boolean unquotedKeys;
-    UA_Boolean stringNodeIds;
 } CtxJson;
 
 UA_StatusCode writeJsonObjStart(CtxJson *ctx);
@@ -48,7 +47,7 @@ UA_StatusCode writeJsonObjEnd(CtxJson *ctx);
 UA_StatusCode writeJsonArrStart(CtxJson *ctx);
 UA_StatusCode writeJsonArrElm(CtxJson *ctx, const void *value,
                               const UA_DataType *type);
-UA_StatusCode writeJsonArrEnd(CtxJson *ctx);
+UA_StatusCode writeJsonArrEnd(CtxJson *ctx, const UA_DataType *type);
 
 UA_StatusCode writeJsonKey(CtxJson *ctx, const char* key);
 
@@ -63,19 +62,12 @@ typedef struct {
     size_t index;
     UA_Byte depth;
 
-    size_t namespacesSize;
-    const UA_String *namespaces;
+    UA_NamespaceMapping *namespaceMapping;
 
     size_t serverUrisSize;
     const UA_String *serverUris;
 
     const UA_DataTypeArray *customTypes;
-
-    /* Additonal data for special cases such as networkmessage/datasetmessage
-     * Currently only used for dataSetWriterIds */
-    size_t numCustom;
-    void * custom;
-    size_t currentCustomIndex;
 } ParseCtx;
 
 typedef UA_StatusCode
@@ -99,6 +91,8 @@ typedef struct {
 } DecodeEntry;
 
 UA_StatusCode decodeFields(ParseCtx *ctx, DecodeEntry *entries, size_t entryCount);
+UA_StatusCode decodeFieldsAllowUnknown(ParseCtx *ctx, DecodeEntry *entries,
+                                       size_t entryCount);
 
 /* Expose the jump tables and some methods for PubSub JSON decoding */
 extern const encodeJsonSignature encodeJsonJumpTable[UA_DATATYPEKINDS];

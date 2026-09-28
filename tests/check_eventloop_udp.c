@@ -12,7 +12,25 @@
 #include <stdlib.h>
 #include <check.h>
 
+#ifdef UA_ARCHITECTURE_WIN32
+# define UA_TEST_EVENTLOOP_NEW UA_EventLoop_new_WIN32
+# define UA_TEST_UDP_MANAGER_NEW UA_ConnectionManager_new_WIN32_UDP
+#else
+# define UA_TEST_EVENTLOOP_NEW UA_EventLoop_new_POSIX
+# define UA_TEST_UDP_MANAGER_NEW UA_ConnectionManager_new_POSIX_UDP
+#endif
+
+#if defined(UA_ARCHITECTURE_LWIP)
+#include <lwip/netif.h>
+#include <lwip/tcpip.h>
+#endif
+
 static UA_EventLoop *el;
+static UA_ConnectionManager *cm;
+static UA_EventLoop *elListener;
+static UA_ConnectionManager *cmListener;
+static UA_EventLoop *elTalker;
+static UA_ConnectionManager *cmTalker;
 static char *testMsg = "open62541";
 static uintptr_t clientId;
 static UA_Boolean received;
@@ -20,6 +38,42 @@ static UA_Boolean received;
 typedef struct TestContext {
     unsigned connCount;
 } TestContext;
+
+static void setupEL(void) {
+#if defined(UA_ARCHITECTURE_LWIP)
+    el = UA_EventLoop_new_LWIP(UA_Log_Stdout, NULL);
+    cm = UA_ConnectionManager_new_LWIP_UDP(UA_STRING("udpCM"));
+    el->registerEventSource(el, &cm->eventSource);
+#elif defined(UA_ARCHITECTURE_POSIX) || defined(UA_ARCHITECTURE_WIN32)
+    el = UA_TEST_EVENTLOOP_NEW(UA_Log_Stdout);
+    cm = UA_TEST_UDP_MANAGER_NEW(UA_STRING("udpCM"));
+    el->registerEventSource(el, &cm->eventSource);
+#else
+#error Add other EventLoop implementations here
+#endif
+}
+
+static void setupELTalkerAndListener(void) {
+#if defined(UA_ARCHITECTURE_LWIP)
+    elListener = UA_EventLoop_new_LWIP(UA_Log_Stdout, NULL);
+    cmListener = UA_ConnectionManager_new_LWIP_UDP(UA_STRING("udpCM"));
+    elListener->registerEventSource(elListener, &cmListener->eventSource);
+
+    elTalker = UA_EventLoop_new_LWIP(UA_Log_Stdout, NULL);
+    cmTalker = UA_ConnectionManager_new_LWIP_UDP(UA_STRING("udpCM"));
+    elTalker->registerEventSource(elTalker, &cmTalker->eventSource);
+#elif defined(UA_ARCHITECTURE_POSIX) || defined(UA_ARCHITECTURE_WIN32)
+    elListener = UA_TEST_EVENTLOOP_NEW(UA_Log_Stdout);
+    cmListener = UA_TEST_UDP_MANAGER_NEW(UA_STRING("udpCM"));
+    elListener->registerEventSource(elListener, &cmListener->eventSource);
+
+    elTalker = UA_TEST_EVENTLOOP_NEW(UA_Log_Stdout);
+    cmTalker = UA_TEST_UDP_MANAGER_NEW(UA_STRING("udpCM"));
+    elTalker->registerEventSource(elTalker, &cmTalker->eventSource);
+#else
+#error Add other EventLoop implementations here
+#endif
+}
 
 static void
 connectionCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
@@ -29,14 +83,14 @@ connectionCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
                    UA_ByteString msg) {
     TestContext *ctx = (TestContext*) *connectionContext;
     if(status == UA_CONNECTIONSTATE_CLOSING) {
-        UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Closing connection %u", (unsigned)connectionId);
     } else {
         if(msg.length == 0) {
-            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Opening connection %u", (unsigned)connectionId);
         } else {
-            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Received a message of length %u", (unsigned)msg.length);
         }
     }
@@ -66,9 +120,7 @@ connectionCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
 }
 
 START_TEST(listenUDP) {
-    UA_ConnectionManager *cm = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    el = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    el->registerEventSource(el, &cm->eventSource);
+    setupEL();
     el->start(el);
 
     TestContext testContext = {0};
@@ -108,10 +160,48 @@ START_TEST(listenUDP) {
     ck_assert_uint_eq(testContext.connCount, 0);
 } END_TEST
 
+START_TEST(listenUDPAddressArrayUsesPerElementLength) {
+    setupEL();
+    el->start(el);
+
+    UA_UInt16 port = 0;
+    UA_Boolean listen = true;
+    UA_Boolean validate = true;
+    char tooLong[600];
+    char shortAddressBacking[600] = "127.0.0.1";
+    memset(tooLong, 'A', sizeof(tooLong));
+    UA_String addresses[2] = {
+        {sizeof(tooLong), (UA_Byte*)tooLong},
+        {strlen(shortAddressBacking), (UA_Byte*)shortAddressBacking}
+    };
+
+    UA_KeyValuePair params[4];
+    params[0].key = UA_QUALIFIEDNAME(0, "port");
+    UA_Variant_setScalar(&params[0].value, &port, &UA_TYPES[UA_TYPES_UINT16]);
+    params[1].key = UA_QUALIFIEDNAME(0, "listen");
+    UA_Variant_setScalar(&params[1].value, &listen, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    params[2].key = UA_QUALIFIEDNAME(0, "validate");
+    UA_Variant_setScalar(&params[2].value, &validate, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    params[3].key = UA_QUALIFIEDNAME(0, "address");
+    UA_Variant_setArray(&params[3].value, addresses, 2,
+                        &UA_TYPES[UA_TYPES_STRING]);
+    UA_KeyValueMap paramsMap = {4, params};
+    TestContext testContext = {0};
+
+    UA_StatusCode retval =
+        cm->openConnection(cm, &paramsMap, NULL, &testContext,
+                           connectionCallback);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    el->stop(el);
+    while(el->state != UA_EVENTLOOPSTATE_STOPPED)
+        el->run(el, 1);
+    el->free(el);
+    el = NULL;
+} END_TEST
+
 START_TEST(connectUDPValidationSucceeds) {
-    UA_ConnectionManager *cm = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    el = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    el->registerEventSource(el, &cm->eventSource);
+    setupEL();
     el->start(el);
 
     UA_UInt16 port = 30000;
@@ -160,9 +250,7 @@ START_TEST(connectUDPValidationSucceeds) {
 END_TEST
 
 START_TEST(connectUDPValidationFails) {
-    UA_ConnectionManager *cm = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    el = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    el->registerEventSource(el, &cm->eventSource);
+    setupEL();
     el->start(el);
 
     UA_UInt16 port = 30000;
@@ -205,10 +293,79 @@ START_TEST(connectUDPValidationFails) {
 }
 END_TEST
 
+#if defined(UA_ARCHITECTURE_LWIP)
+static UA_StatusCode
+validateMulticastInterfaceWithLength(const char *interfaceName,
+                                     size_t interfaceNameLength) {
+    UA_UInt16 port = 4840;
+    UA_Boolean validate = true;
+    UA_String address = UA_STRING("224.0.0.22");
+    UA_String interface = {interfaceNameLength,
+                           (UA_Byte*)(uintptr_t)interfaceName};
+
+    UA_KeyValuePair params[4];
+    params[0].key = UA_QUALIFIEDNAME(0, "port");
+    UA_Variant_setScalar(&params[0].value, &port, &UA_TYPES[UA_TYPES_UINT16]);
+    params[1].key = UA_QUALIFIEDNAME(0, "address");
+    UA_Variant_setScalar(&params[1].value, &address, &UA_TYPES[UA_TYPES_STRING]);
+    params[2].key = UA_QUALIFIEDNAME(0, "interface");
+    UA_Variant_setScalar(&params[2].value, &interface, &UA_TYPES[UA_TYPES_STRING]);
+    params[3].key = UA_QUALIFIEDNAME(0, "validate");
+    UA_Variant_setScalar(&params[3].value, &validate, &UA_TYPES[UA_TYPES_BOOLEAN]);
+    UA_KeyValueMap paramsMap = {4, params};
+    TestContext testContext = {0};
+
+    return cm->openConnection(cm, &paramsMap, NULL, &testContext,
+                              connectionCallback);
+}
+
+static UA_StatusCode
+validateMulticastInterface(const char *interfaceName) {
+    return validateMulticastInterfaceWithLength(interfaceName,
+                                                strlen(interfaceName));
+}
+
+START_TEST(connectUDPMulticastInterfaceName) {
+    setupEL();
+    ck_assert(el != NULL);
+    ck_assert(cm != NULL);
+    ck_assert_uint_eq(el->start(el), UA_STATUSCODE_GOOD);
+
+    char interfaceName[NETIF_NAMESIZE];
+    char *result = NULL;
+    LOCK_TCPIP_CORE();
+    if(netif_default)
+        result = netif_index_to_name(netif_get_index(netif_default),
+                                     interfaceName);
+    UNLOCK_TCPIP_CORE();
+    ck_assert(result == interfaceName);
+
+    ck_assert_uint_eq(validateMulticastInterface(interfaceName),
+                      UA_STATUSCODE_GOOD);
+
+    char incompleteName[3] = {interfaceName[0], interfaceName[1], '\0'};
+    ck_assert_uint_eq(validateMulticastInterface(incompleteName),
+                      UA_STATUSCODE_BADINTERNALERROR);
+    ck_assert_uint_eq(validateMulticastInterface(""),
+                      UA_STATUSCODE_BADINTERNALERROR);
+
+    char oversizedInterface[256];
+    memset(oversizedInterface, 'A', sizeof(oversizedInterface));
+    ck_assert_uint_eq(validateMulticastInterfaceWithLength(
+                          oversizedInterface, sizeof(oversizedInterface)),
+                      UA_STATUSCODE_BADINTERNALERROR);
+
+    el->stop(el);
+    while(el->state != UA_EVENTLOOPSTATE_STOPPED)
+        el->run(el, 1);
+    ck_assert_uint_eq(el->free(el), UA_STATUSCODE_GOOD);
+    el = NULL;
+    cm = NULL;
+} END_TEST
+#endif
+
 START_TEST(connectUDP) {
-    UA_ConnectionManager *cm = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    el = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    el->registerEventSource(el, &cm->eventSource);
+    setupEL();
     el->start(el);
 
     UA_UInt16 port = 30000;
@@ -286,14 +443,8 @@ START_TEST(connectUDP) {
 
 START_TEST(udpTalkerAndListener) {
     /* create listener eventloop */
-    UA_EventLoop *elListener = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    UA_ConnectionManager *cmListener = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    elListener->registerEventSource(elListener, &cmListener->eventSource);
+    setupELTalkerAndListener();
     elListener->start(elListener);
-
-    UA_EventLoop *elTalker = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    UA_ConnectionManager *cmTalker = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    elTalker->registerEventSource(elTalker, &cmTalker->eventSource);
     elTalker->start(elTalker);
 
     /* Open a listener connection */
@@ -396,14 +547,8 @@ START_TEST(udpTalkerAndListener) {
 
 START_TEST(udpTalkerAndListenerDifferentDestination) {
     /* create listener eventloop */
-    UA_EventLoop *elListener = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    UA_ConnectionManager *cmListener = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    elListener->registerEventSource(elListener, &cmListener->eventSource);
+    setupELTalkerAndListener();
     elListener->start(elListener);
-
-    UA_EventLoop *elTalker = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    UA_ConnectionManager *cmTalker = UA_ConnectionManager_new_POSIX_UDP(UA_STRING("udpCM"));
-    elTalker->registerEventSource(elTalker, &cmTalker->eventSource);
     elTalker->start(elTalker);
 
     /* Open a listener connection */
@@ -521,9 +666,13 @@ int main(void) {
     Suite *s  = suite_create("Test UDP EventLoop");
     TCase *tc = tcase_create("test cases");
     tcase_add_test(tc, listenUDP);
+    tcase_add_test(tc, listenUDPAddressArrayUsesPerElementLength);
     tcase_add_test(tc, connectUDP);
     tcase_add_test(tc, connectUDPValidationFails);
     tcase_add_test(tc, connectUDPValidationSucceeds);
+#if defined(UA_ARCHITECTURE_LWIP)
+    tcase_add_test(tc, connectUDPMulticastInterfaceName);
+#endif
     tcase_add_test(tc, udpTalkerAndListener);
     tcase_add_test(tc, udpTalkerAndListenerDifferentDestination);
     suite_add_tcase(s, tc);

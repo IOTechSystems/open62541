@@ -3,6 +3,7 @@
  *
  *    Copyright 2017-2018 (c) Mark Giraud, Fraunhofer IOSB
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
+ *    Copyright 2025 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include <open62541/plugin/securitypolicy_default.h>
@@ -15,56 +16,76 @@
 #include "openssl/securitypolicy_common.h"
 #endif
 
+#ifndef UA_ENABLE_ENCRYPTION
+/* The URI-derived SecurityPolicy property helpers are normally provided by the
+ * crypto backend's securitypolicy_common.c. With no crypto backend the only
+ * SecurityPolicy is #None, so they reduce to constants. */
+UA_Boolean
+UA_SecurityPolicy_isEnhancedSecurity(const UA_SecurityPolicy *policy) {
+    (void)policy;
+    return false;
+}
+
+UA_Boolean
+UA_SecurityPolicy_useLegacySequenceNumbers(const UA_SecurityPolicy *policy) {
+    (void)policy;
+    return true;
+}
+#endif
+
 static UA_StatusCode
-verify_none(void *channelContext,
-            const UA_ByteString *message,
-            const UA_ByteString *signature) {
+verify_none(const UA_SecurityPolicy *policy, void *channelContext,
+            const UA_ByteString *message, const UA_ByteString *signature) {
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-sign_none(void *channelContext, const UA_ByteString *message,
-          UA_ByteString *signature) {
+sign_none(const UA_SecurityPolicy *policy, void *channelContext,
+          const UA_ByteString *message, UA_ByteString *signature) {
     return UA_STATUSCODE_GOOD;
 }
 
 static size_t
-length_none(const void *channelContext) {
+length_none(const UA_SecurityPolicy *policy, const void *channelContext) {
     return 0;
 }
 
 static UA_StatusCode
-encrypt_none(void *channelContext, UA_ByteString *data) {
+encrypt_none(const UA_SecurityPolicy *policy, void *channelContext,
+             UA_ByteString *data) {
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-decrypt_none(void *channelContext, UA_ByteString *data) {
+decrypt_none(const UA_SecurityPolicy *policy, void *channelContext,
+             UA_ByteString *data) {
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-makeThumbprint_none(const UA_SecurityPolicy *securityPolicy,
+makeThumbprint_none(const UA_SecurityPolicy *policy,
                     const UA_ByteString *certificate,
                     UA_ByteString *thumbprint) {
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-compareThumbprint_none(const UA_SecurityPolicy *securityPolicy,
-                       const UA_ByteString *certificateThumbprint) {
+compareThumbprint_none(const UA_SecurityPolicy *policy,
+                       const UA_ByteString *thumbprint) {
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-generateKey_none(void *policyContext, const UA_ByteString *secret,
+generateKey_none(const UA_SecurityPolicy *policy,
+                 void *channelContext, const UA_ByteString *secret,
                  const UA_ByteString *seed, UA_ByteString *out) {
     return UA_STATUSCODE_GOOD;
 }
 
 /* Use the non-cryptographic RNG to set the nonce */
 static UA_StatusCode
-generateNonce_none(void *policyContext, UA_ByteString *out) {
+generateNonce_none(const UA_SecurityPolicy *policy,
+                   void *channelContext, UA_ByteString *out) {
     if(out == NULL)
         return UA_STATUSCODE_BADINTERNALERROR;
 
@@ -94,28 +115,58 @@ newContext_none(const UA_SecurityPolicy *securityPolicy,
 }
 
 static void
-deleteContext_none(void *channelContext) {
+deleteContext_none(const UA_SecurityPolicy *policy, void *channelContext) {
 }
 
 static UA_StatusCode
-setContextValue_none(void *channelContext,
-                     const UA_ByteString *key) {
+setContextValue_none(const UA_SecurityPolicy *policy,
+                     void *channelContext,
+                     const UA_ByteString *iv) {
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-compareCertificate_none(const void *channelContext,
+compareCertificate_none(const UA_SecurityPolicy *policy,
+                        const void *channelContext,
                         const UA_ByteString *certificate) {
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-updateCertificateAndPrivateKey_none(UA_SecurityPolicy *policy,
-                                    const UA_ByteString newCertificate,
-                                    const UA_ByteString newPrivateKey) {
+setLocalCertificate_none(UA_SecurityPolicy *policy,
+                         const UA_ByteString certificate) {
     UA_ByteString_clear(&policy->localCertificate);
-    UA_ByteString_copy(&newCertificate, &policy->localCertificate);
-    return UA_STATUSCODE_GOOD;
+    /* #None does no crypto, so an empty certificate is valid and a no-op. */
+    if(certificate.length == 0)
+        return UA_STATUSCODE_GOOD;
+
+#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) || defined(UA_ENABLE_ENCRYPTION_OPENSSL) || \
+    defined(UA_ENABLE_ENCRYPTION_LIBRESSL)
+    /* Use the crypto backend to convert the certificate to DER for the wire */
+#ifdef UA_ENABLE_ENCRYPTION_MBEDTLS
+    UA_StatusCode retval =
+        UA_mbedTLS_LoadLocalCertificate(&certificate, &policy->localCertificate);
+#else
+    UA_StatusCode retval =
+        UA_OpenSSL_LoadLocalCertificate(&certificate, &policy->localCertificate,
+                                        EVP_PKEY_NONE);
+#endif
+    if(retval == UA_STATUSCODE_GOOD)
+        return retval;
+    /* #None never uses the certificate cryptographically. Store a certificate
+     * the backend cannot parse (e.g. EdDSA) verbatim instead of failing. */
+    UA_LOG_WARNING(policy->logger, UA_LOGCATEGORY_SECURITYPOLICY,
+                   "SecurityPolicy#None: The local certificate could not be "
+                   "parsed by the crypto backend. Storing it unmodified.");
+#endif
+    return UA_ByteString_copy(&certificate, &policy->localCertificate);
+}
+
+static UA_StatusCode
+updateCertificate_none(UA_SecurityPolicy *policy,
+                       const UA_ByteString certificate,
+                       const UA_ByteString privateKey) {
+    return setLocalCertificate_none(policy, certificate);
 }
 
 
@@ -125,68 +176,63 @@ policy_clear_none(UA_SecurityPolicy *policy) {
 }
 
 UA_StatusCode
-UA_SecurityPolicy_None(UA_SecurityPolicy *policy, const UA_ByteString localCertificate,
+UA_SecurityPolicy_None(UA_SecurityPolicy *sp, const UA_ByteString localCertificate,
                        const UA_Logger *logger) {
-    policy->policyContext = (void *)(uintptr_t)logger;
-    policy->policyUri = UA_STRING("http://opcfoundation.org/UA/SecurityPolicy#None");
-    policy->securityLevel = 0;
-    policy->logger = logger;
 
-    policy->certificateGroupId = UA_NODEID_NULL;
-    policy->certificateTypeId = UA_NODEID_NULL;
+    memset(sp, 0, sizeof(UA_SecurityPolicy));
+    sp->logger = logger;
+    sp->policyUri = UA_STRING("http://opcfoundation.org/UA/SecurityPolicy#None");
+    sp->certificateGroupId = UA_NODEID_NULL;
+    sp->certificateTypeId = UA_NODEID_NULL;
+    sp->securityLevel = 0;
+    sp->policyType = UA_SECURITYPOLICYTYPE_NONE;
 
-#ifdef UA_ENABLE_ENCRYPTION_MBEDTLS
-    UA_mbedTLS_LoadLocalCertificate(&localCertificate, &policy->localCertificate);
-#elif defined(UA_ENABLE_ENCRYPTION_OPENSSL) || defined(UA_ENABLE_ENCRYPTION_LIBRESSL)
-    UA_OpenSSL_LoadLocalCertificate(&localCertificate, &policy->localCertificate);
-#else
-    UA_ByteString_copy(&localCertificate, &policy->localCertificate);
-#endif
+    /* Symmetric Signature */
+    UA_SecurityPolicySignatureAlgorithm *symSig = &sp->symSignatureAlgorithm;
+    symSig->uri = UA_STRING_NULL;
+    symSig->verify = verify_none;
+    symSig->sign = sign_none;
+    symSig->getLocalSignatureSize = length_none;
+    symSig->getRemoteSignatureSize = length_none;
+    symSig->getLocalKeyLength = length_none;
+    symSig->getRemoteKeyLength = length_none;
 
-    policy->symmetricModule.generateKey = generateKey_none;
-    policy->symmetricModule.generateNonce = generateNonce_none;
+    /* Symmetric Encryption */
+    UA_SecurityPolicyEncryptionAlgorithm *symEnc = &sp->symEncryptionAlgorithm;
+    symEnc->uri = UA_STRING_NULL;
+    symEnc->encrypt = encrypt_none;
+    symEnc->decrypt = decrypt_none;
+    symEnc->getLocalKeyLength = length_none;
+    symEnc->getRemoteKeyLength = length_none;
+    symEnc->getRemoteBlockSize = length_none;
+    symEnc->getRemotePlainTextBlockSize = length_none;
 
-    UA_SecurityPolicySignatureAlgorithm *sym_signatureAlgorithm =
-        &policy->symmetricModule.cryptoModule.signatureAlgorithm;
-    sym_signatureAlgorithm->uri = UA_STRING_NULL;
-    sym_signatureAlgorithm->verify = verify_none;
-    sym_signatureAlgorithm->sign = sign_none;
-    sym_signatureAlgorithm->getLocalSignatureSize = length_none;
-    sym_signatureAlgorithm->getRemoteSignatureSize = length_none;
-    sym_signatureAlgorithm->getLocalKeyLength = length_none;
-    sym_signatureAlgorithm->getRemoteKeyLength = length_none;
+    /* This only works for none since symmetric and asymmetric crypto modules do
+     * the same i.e. nothing */
+    sp->asymSignatureAlgorithm = sp->symSignatureAlgorithm;
+    sp->asymEncryptionAlgorithm = sp->symEncryptionAlgorithm;
 
-    UA_SecurityPolicyEncryptionAlgorithm *sym_encryptionAlgorithm =
-        &policy->symmetricModule.cryptoModule.encryptionAlgorithm;
-    sym_encryptionAlgorithm->uri = UA_STRING_NULL;
-    sym_encryptionAlgorithm->encrypt = encrypt_none;
-    sym_encryptionAlgorithm->decrypt = decrypt_none;
-    sym_encryptionAlgorithm->getLocalKeyLength = length_none;
-    sym_encryptionAlgorithm->getRemoteKeyLength = length_none;
-    sym_encryptionAlgorithm->getRemoteBlockSize = length_none;
-    sym_encryptionAlgorithm->getRemotePlainTextBlockSize = length_none;
-    policy->symmetricModule.secureChannelNonceLength = 0;
+    /* Use the same signing algorithm as for asymmetric signing */
+    sp->certSignatureAlgorithm = sp->asymSignatureAlgorithm;
 
-    policy->asymmetricModule.makeCertificateThumbprint = makeThumbprint_none;
-    policy->asymmetricModule.compareCertificateThumbprint = compareThumbprint_none;
+    /* Direct Method Pointers */
+    sp->newChannelContext = newContext_none;
+    sp->deleteChannelContext = deleteContext_none;
+    sp->setLocalSymEncryptingKey = setContextValue_none;
+    sp->setLocalSymSigningKey = setContextValue_none;
+    sp->setLocalSymIv = setContextValue_none;
+    sp->setRemoteSymEncryptingKey = setContextValue_none;
+    sp->setRemoteSymSigningKey = setContextValue_none;
+    sp->setRemoteSymIv = setContextValue_none;
+    sp->compareCertificate = compareCertificate_none;
+    sp->generateKey = generateKey_none;
+    sp->generateNonce = generateNonce_none;
+    sp->nonceLength = 0;
+    sp->makeCertThumbprint = makeThumbprint_none;
+    sp->compareCertThumbprint = compareThumbprint_none;
+    sp->updateCertificate = updateCertificate_none;
+    sp->createSigningRequest = NULL;
+    sp->clear = policy_clear_none;
 
-    // This only works for none since symmetric and asymmetric crypto modules do the same i.e. nothing
-    policy->asymmetricModule.cryptoModule = policy->symmetricModule.cryptoModule;
-
-    // Use the same signing algorithm as for asymmetric signing
-    policy->certificateSigningAlgorithm = policy->asymmetricModule.cryptoModule.signatureAlgorithm;
-
-    policy->channelModule.newContext = newContext_none;
-    policy->channelModule.deleteContext = deleteContext_none;
-    policy->channelModule.setLocalSymEncryptingKey = setContextValue_none;
-    policy->channelModule.setLocalSymSigningKey = setContextValue_none;
-    policy->channelModule.setLocalSymIv = setContextValue_none;
-    policy->channelModule.setRemoteSymEncryptingKey = setContextValue_none;
-    policy->channelModule.setRemoteSymSigningKey = setContextValue_none;
-    policy->channelModule.setRemoteSymIv = setContextValue_none;
-    policy->channelModule.compareCertificate = compareCertificate_none;
-    policy->updateCertificateAndPrivateKey = updateCertificateAndPrivateKey_none;
-    policy->clear = policy_clear_none;
-
-    return UA_STATUSCODE_GOOD;
+    return setLocalCertificate_none(sp, localCertificate);
 }

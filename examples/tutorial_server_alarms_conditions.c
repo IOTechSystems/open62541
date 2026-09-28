@@ -2,7 +2,11 @@
  * See http://creativecommons.org/publicdomain/zero/1.0/ for more information. */
 
 #include <open62541/plugin/log_stdout.h>
+#include <open62541/driver/alarms_conditions.h>
 #include <open62541/server.h>
+
+#include <signal.h>
+#include <stdlib.h>
 
 /**
  * Using Alarms and Conditions Server
@@ -26,6 +30,14 @@
 static UA_NodeId conditionSource;
 static UA_NodeId conditionInstance_1;
 static UA_NodeId conditionInstance_2;
+static UA_AlarmConditionsDriver *acDriver;
+static UA_Boolean running = true;
+
+static void
+stopHandler(int sign) {
+    (void)sign;
+    running = false;
+}
 
 static UA_StatusCode
 addConditionSourceObject(UA_Server *server) {
@@ -40,7 +52,7 @@ addConditionSourceObject(UA_Server *server) {
                                       object_attr, NULL, &conditionSource);
 
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Creating Condition Source failed. StatusCode %s",
                      UA_StatusCode_name(retval));
     }
@@ -66,12 +78,12 @@ static UA_StatusCode
 addCondition_1(UA_Server *server) {
     UA_StatusCode retval = addConditionSourceObject(server);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "creating Condition Source failed. StatusCode %s",
                      UA_StatusCode_name(retval));
     }
 
-    retval = UA_Server_createCondition(server, UA_NODEID_NULL, UA_NS0ID(OFFNORMALALARMTYPE),
+    retval = acDriver->createCondition(acDriver, UA_NODEID_NULL, UA_NS0ID(OFFNORMALALARMTYPE),
                                        UA_QUALIFIEDNAME(0, "Condition 1"), conditionSource,
                                        UA_NS0ID(HASCOMPONENT), &conditionInstance_1);
 
@@ -84,7 +96,7 @@ addCondition_1(UA_Server *server) {
 static UA_StatusCode
 addCondition_2(UA_Server *server) {
     UA_StatusCode retval =
-        UA_Server_createCondition(server, UA_NODEID_NULL, UA_NS0ID(OFFNORMALALARMTYPE),
+        acDriver->createCondition(acDriver, UA_NODEID_NULL, UA_NS0ID(OFFNORMALALARMTYPE),
                                   UA_QUALIFIEDNAME(0, "Condition 2"), UA_NS0ID(SERVER),
                                   UA_NODEID_NULL, &conditionInstance_2);
 
@@ -167,11 +179,11 @@ afterWriteCallbackVariable_1(UA_Server *server, const UA_NodeId *sessionId,
          * notification. */
         UA_Boolean activeStateId = true;
         UA_Variant_setScalar(&value, &activeStateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
-        retval |= UA_Server_setConditionVariableFieldProperty(server, conditionInstance_1,
+        retval |= acDriver->setConditionVariableFieldProperty(acDriver, conditionInstance_1,
                                                               &value, activeStateField,
                                                               activeStateIdField);
         if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Setting ActiveState/Id Field failed. StatusCode %s",
                          UA_StatusCode_name(retval));
             return;
@@ -180,24 +192,24 @@ afterWriteCallbackVariable_1(UA_Server *server, const UA_NodeId *sessionId,
         /* By writing "false" in ActiveState/Id, the A&C server will set only
          * the ActiveState field automatically to the value "Inactive". The user
          * should trigger the event manually by calling
-         * UA_Server_triggerConditionEvent inside the application or call
+         * acDriver->triggerConditionEvent inside the application or call
          * ConditionRefresh method with client to update the event notification. */
         UA_Boolean activeStateId = false;
         UA_Variant_setScalar(&value, &activeStateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
-        retval = UA_Server_setConditionVariableFieldProperty(server, conditionInstance_1,
+        retval = acDriver->setConditionVariableFieldProperty(acDriver, conditionInstance_1,
                                                              &value, activeStateField,
                                                              activeStateIdField);
         if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Setting ActiveState/Id Field failed. StatusCode %s",
                          UA_StatusCode_name(retval));
             return;
         }
 
-        retval = UA_Server_triggerConditionEvent(server, conditionInstance_1,
+        retval = acDriver->triggerConditionEvent(acDriver, conditionInstance_1,
                                                  conditionSource, NULL);
         if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_WARNING(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_WARNING(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                            "Triggering condition event failed. StatusCode %s",
                            UA_StatusCode_name(retval));
             return;
@@ -252,31 +264,31 @@ afterWriteCallbackVariable_3(UA_Server *server,
     UA_Variant value;
     UA_Boolean idValue = false;
     UA_Variant_setScalar(&value, &idValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    retval |= UA_Server_setConditionVariableFieldProperty(server, conditionInstance_1,
+    retval |= acDriver->setConditionVariableFieldProperty(acDriver, conditionInstance_1,
                                                           &value, activeStateField,
                                                           idField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting ActiveState/Id Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return;
     }
 
-    retval = UA_Server_setConditionVariableFieldProperty(server, conditionInstance_1,
+    retval = acDriver->setConditionVariableFieldProperty(acDriver, conditionInstance_1,
                                                          &value, ackedStateField,
                                                          idField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting AckedState/Id Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return;
     }
 
-    retval = UA_Server_setConditionVariableFieldProperty(server, conditionInstance_1,
+    retval = acDriver->setConditionVariableFieldProperty(acDriver, conditionInstance_1,
                                                          &value, confirmedStateField,
                                                          idField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting ConfirmedState/Id Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return;
@@ -284,10 +296,10 @@ afterWriteCallbackVariable_3(UA_Server *server,
 
     UA_UInt16 severityValue = 100;
     UA_Variant_setScalar(&value, &severityValue, &UA_TYPES[UA_TYPES_UINT16]);
-    retval = UA_Server_setConditionField(server, conditionInstance_1,
+    retval = acDriver->setConditionField(acDriver, conditionInstance_1,
                                          &value, severityField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting Severity Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return;
@@ -296,10 +308,10 @@ afterWriteCallbackVariable_3(UA_Server *server,
     UA_LocalizedText messageValue =
         UA_LOCALIZEDTEXT("en", "Condition returned to normal state");
     UA_Variant_setScalar(&value, &messageValue, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, conditionInstance_1,
+    retval = acDriver->setConditionField(acDriver, conditionInstance_1,
                                          &value, messageField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting Message Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return;
@@ -307,10 +319,10 @@ afterWriteCallbackVariable_3(UA_Server *server,
 
     UA_LocalizedText commentValue = UA_LOCALIZEDTEXT("en", "Normal State");
     UA_Variant_setScalar(&value, &commentValue, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
-    retval = UA_Server_setConditionField(server, conditionInstance_1,
+    retval = acDriver->setConditionField(acDriver, conditionInstance_1,
                                          &value, commentField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting Comment Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return;
@@ -318,19 +330,19 @@ afterWriteCallbackVariable_3(UA_Server *server,
 
     UA_Boolean retainValue = false;
     UA_Variant_setScalar(&value, &retainValue, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    retval = UA_Server_setConditionField(server, conditionInstance_1,
+    retval = acDriver->setConditionField(acDriver, conditionInstance_1,
                                          &value, retainField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting Retain Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return;
     }
 
-    retval = UA_Server_triggerConditionEvent(server, conditionInstance_1,
+    retval = acDriver->triggerConditionEvent(acDriver, conditionInstance_1,
                                              conditionSource, NULL);
     if (retval != UA_STATUSCODE_GOOD) {
-     UA_LOG_WARNING(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+     UA_LOG_WARNING(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                     "Triggering condition event failed. StatusCode %s",
                     UA_StatusCode_name(retval));
      return;
@@ -361,12 +373,12 @@ enteringAckedStateCallback(UA_Server *server, const UA_NodeId *condition) {
 
     UA_Variant_setScalar(&value, &activeStateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
     UA_StatusCode retval =
-        UA_Server_setConditionVariableFieldProperty(server, *condition,
+        acDriver->setConditionVariableFieldProperty(acDriver, *condition,
                                                     &value, activeStateField,
                                                     activeStateIdField);
 
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting ActiveState/Id Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
     }
@@ -387,21 +399,21 @@ enteringConfirmedStateCallback(UA_Server *server, const UA_NodeId *condition) {
 
     UA_Variant_setScalar(&value, &activeStateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
     UA_StatusCode retval =
-        UA_Server_setConditionVariableFieldProperty(server, *condition,
+        acDriver->setConditionVariableFieldProperty(acDriver, *condition,
                                                     &value, activeStateField,
                                                     activeStateIdField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting ActiveState/Id Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
     }
 
     UA_Variant_setScalar(&value, &retain, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    retval = UA_Server_setConditionField(server, *condition,
+    retval = acDriver->setConditionField(acDriver, *condition,
                                          &value, retainField);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting ActiveState/Id Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
     }
@@ -421,43 +433,43 @@ setUpEnvironment(UA_Server *server) {
      * entering enabled state, when acknowledging and when confirming. */
     UA_StatusCode retval = addCondition_1(server);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "adding condition 1 failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
     }
 
     UA_TwoStateVariableChangeCallback userSpecificCallback = enteringEnabledStateCallback;
-    retval = UA_Server_setConditionTwoStateVariableCallback(server, conditionInstance_1,
+    retval = acDriver->setConditionTwoStateVariableCallback(acDriver, conditionInstance_1,
                                                             conditionSource, false,
                                                             userSpecificCallback,
                                                             UA_ENTERING_ENABLEDSTATE);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "adding entering enabled state callback failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
     }
 
     userSpecificCallback = enteringAckedStateCallback;
-    retval = UA_Server_setConditionTwoStateVariableCallback(server, conditionInstance_1,
+    retval = acDriver->setConditionTwoStateVariableCallback(acDriver, conditionInstance_1,
                                                             conditionSource, false,
                                                             userSpecificCallback,
                                                             UA_ENTERING_ACKEDSTATE);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "adding entering acked state callback failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
     }
 
     userSpecificCallback = enteringConfirmedStateCallback;
-    retval = UA_Server_setConditionTwoStateVariableCallback(server, conditionInstance_1,
+    retval = acDriver->setConditionTwoStateVariableCallback(acDriver, conditionInstance_1,
                                                             conditionSource, false,
                                                             userSpecificCallback,
                                                             UA_ENTERING_CONFIRMEDSTATE);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "adding entering confirmed state callback failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
@@ -470,7 +482,7 @@ setUpEnvironment(UA_Server *server) {
      * unexposed condition using a client like UaExpert or Softing). */
     retval = addCondition_2(server);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "adding condition 2 failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
@@ -486,12 +498,12 @@ setUpEnvironment(UA_Server *server) {
     UA_QualifiedName enabledStateField = UA_QUALIFIEDNAME(0,"EnabledState");
     UA_QualifiedName enabledStateIdField = UA_QUALIFIEDNAME(0,"Id");
     UA_Variant_setScalar(&value, &enabledStateId, &UA_TYPES[UA_TYPES_BOOLEAN]);
-    retval = UA_Server_setConditionVariableFieldProperty(server, conditionInstance_2,
+    retval = acDriver->setConditionVariableFieldProperty(acDriver, conditionInstance_2,
                                                          &value, enabledStateField,
                                                          enabledStateIdField);
 
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting EnabledState/Id Field failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
@@ -504,7 +516,7 @@ setUpEnvironment(UA_Server *server) {
     callback.onWrite = afterWriteCallbackVariable_1;
     retval = UA_Server_setVariableNode_valueCallback(server, variable_1, callback);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting variable 1 Callback failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
@@ -517,7 +529,7 @@ setUpEnvironment(UA_Server *server) {
     callback.onWrite = afterWriteCallbackVariable_2;
     retval = UA_Server_setVariableNode_valueCallback(server, variable_2, callback);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting variable 2 Callback failed. StatusCode %s",
                      UA_StatusCode_name(retval));
         return retval;
@@ -528,7 +540,7 @@ setUpEnvironment(UA_Server *server) {
     callback.onWrite = afterWriteCallbackVariable_3;
     retval = UA_Server_setVariableNode_valueCallback(server, variable_3, callback);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Setting variable 3 Callback failed. StatusCode %s",
                      UA_StatusCode_name(retval));
     }
@@ -540,11 +552,32 @@ setUpEnvironment(UA_Server *server) {
  * It follows the main server code, making use of the above definitions. */
 
 int main (void) {
+    signal(SIGINT, stopHandler);
+    signal(SIGTERM, stopHandler);
+
     UA_Server *server = UA_Server_new();
+
+    acDriver = UA_AlarmsConditionsDriver(UA_KEYVALUEMAP_NULL);
+    if(!acDriver ||
+       UA_Server_addDriver(server, &acDriver->drv) != UA_STATUSCODE_GOOD) {
+        if(acDriver)
+            acDriver->drv.free(&acDriver->drv);
+        UA_Server_delete(server);
+        return EXIT_FAILURE;
+    }
+
+    UA_StatusCode retval = UA_Server_run_startup(server);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_Server_delete(server);
+        return EXIT_FAILURE;
+    }
 
     setUpEnvironment(server);
 
-    UA_Server_runUntilInterrupt(server);
+    while(running)
+        UA_Server_run_iterate(server, true);
+
+    UA_Server_run_shutdown(server);
     UA_Server_delete(server);
     return 0;
 }

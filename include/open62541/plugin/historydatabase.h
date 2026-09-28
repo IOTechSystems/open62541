@@ -12,6 +12,8 @@
 
 _UA_BEGIN_DECLS
 
+#ifdef UA_ENABLE_HISTORIZING
+
 typedef struct UA_HistoryDatabase UA_HistoryDatabase;
 
 struct UA_HistoryDatabase {
@@ -178,9 +180,22 @@ struct UA_HistoryDatabase {
                          const UA_DeleteRawModifiedDetails *details,
                          UA_HistoryUpdateResult *result);
 
+    /* No default implementation is provided by UA_HistoryDatabase_default
+     * for the following function */
+    void
+    (*deleteEvent)(UA_Server *server,
+                   void *hdbContext,
+                   const UA_NodeId *sessionId,
+                   void *sessionContext,
+                   const UA_RequestHeader *requestHeader,
+                   const UA_DeleteEventDetails *details,
+                   UA_HistoryUpdateResult *result);
+
     /* Add more function pointer here.
      * For example for read_event, read_annotation, update_details */
 };
+
+#endif /* UA_ENABLE_HISTORIZING */
 
 _UA_END_DECLS
 

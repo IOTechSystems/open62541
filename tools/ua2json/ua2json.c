@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
  *    Copyright 2018 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include <open62541/types.h>
@@ -10,12 +11,6 @@
 #include <open62541/pubsub.h>
 
 #include <stdio.h>
-#if defined(_MSC_VER)
-# include <BaseTsd.h>
-typedef SSIZE_T ssize_t;
-#else
-#include <unistd.h>
-#endif
 
 static UA_StatusCode
 encode(const UA_ByteString *buf, UA_ByteString *out, const UA_DataType *type) {
@@ -55,7 +50,7 @@ decode(const UA_ByteString *buf, UA_ByteString *out, const UA_DataType *type) {
     }
 
     /* Encode Binary. Internally allocates the buffer upon success */
-    retval = UA_encodeBinary(data, type, out);
+    retval = UA_encodeBinary(data, type, out, NULL);
 
     /* Clean up */
     UA_delete(data, type);
@@ -68,21 +63,20 @@ static UA_StatusCode
 encodeNetworkMessage(const UA_ByteString *buf, UA_ByteString *out) {
     UA_EncodeJsonOptions options;
     memset(&options, 0, sizeof(UA_EncodeJsonOptions));
-    options.useReversible = true;
 
     UA_NetworkMessage msg;
-    UA_StatusCode retval = UA_NetworkMessage_decodeBinary(buf, &msg, NULL);
+    UA_StatusCode retval = UA_NetworkMessage_decodeBinary(buf, &msg, NULL, NULL);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
-    size_t jsonLength = UA_NetworkMessage_calcSizeJson(&msg, &options);
+    size_t jsonLength = UA_NetworkMessage_calcSizeJson(&msg, NULL, &options);
     retval = UA_ByteString_allocBuffer(out, jsonLength);
     if(retval != UA_STATUSCODE_GOOD) {
         UA_NetworkMessage_clear(&msg);
         return retval;
     }
 
-    retval = UA_NetworkMessage_encodeJson(&msg, out, &options);
+    retval = UA_NetworkMessage_encodeJson(&msg, out, NULL, &options);
     UA_NetworkMessage_clear(&msg);
     if(retval != UA_STATUSCODE_GOOD)
         UA_ByteString_clear(out);
@@ -93,18 +87,18 @@ encodeNetworkMessage(const UA_ByteString *buf, UA_ByteString *out) {
 static UA_StatusCode
 decodeNetworkMessage(const UA_ByteString *buf, UA_ByteString *out) {
     UA_NetworkMessage msg;
-    UA_StatusCode retval = UA_NetworkMessage_decodeJson(buf, &msg, NULL);
+    UA_StatusCode retval = UA_NetworkMessage_decodeJson(buf, &msg, NULL, NULL);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
-    size_t binLength = UA_NetworkMessage_calcSizeBinary(&msg);
+    size_t binLength = UA_NetworkMessage_calcSizeBinary(&msg, NULL);
     retval = UA_ByteString_allocBuffer(out, binLength);
     if(retval != UA_STATUSCODE_GOOD) {
         UA_NetworkMessage_clear(&msg);
         return retval;
     }
 
-    retval = UA_NetworkMessage_encodeBinary(&msg, out);
+    retval = UA_NetworkMessage_encodeBinary(&msg, out, NULL);
     UA_NetworkMessage_clear(&msg);
     if(retval != UA_STATUSCODE_GOOD)
         UA_ByteString_clear(out);
@@ -243,6 +237,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Reading from input failed\n");
             goto cleanup;
         }
+
         pos += c;
     } while (!feof(in));
 

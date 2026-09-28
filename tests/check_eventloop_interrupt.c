@@ -13,13 +13,17 @@
 #include <stdlib.h>
 #include <check.h>
 
-#ifndef _WIN32
-#define TESTSIG SIGUSR1
+#ifdef UA_ARCHITECTURE_WIN32
+# define TESTSIG SIGINT
+# define UA_TEST_EVENTLOOP_NEW UA_EventLoop_new_WIN32
+# define UA_TEST_INTERRUPT_MANAGER_NEW UA_InterruptManager_new_WIN32
 #else
-#define TESTSIG SIGINT
+# define TESTSIG SIGUSR1
+# define UA_TEST_EVENTLOOP_NEW UA_EventLoop_new_POSIX
+# define UA_TEST_INTERRUPT_MANAGER_NEW UA_InterruptManager_new_POSIX
 #endif
 
-unsigned counter = 0;
+static unsigned counter = 0;
 
 static void
 interruptCallback(UA_InterruptManager *im,
@@ -29,8 +33,8 @@ interruptCallback(UA_InterruptManager *im,
 }
 
 START_TEST(catchInterrupt) {
-    UA_EventLoop *el = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    UA_InterruptManager *im = UA_InterruptManager_new_POSIX(UA_STRING("im1"));
+    UA_EventLoop *el = UA_TEST_EVENTLOOP_NEW(UA_Log_Stdout);
+    UA_InterruptManager *im = UA_TEST_INTERRUPT_MANAGER_NEW(UA_STRING("im1"));
     el->registerEventSource(el, &im->eventSource);
 
     im->registerInterrupt(im, TESTSIG, &UA_KEYVALUEMAP_NULL, interruptCallback, NULL);
@@ -38,12 +42,14 @@ START_TEST(catchInterrupt) {
 
     /* Send signal to self*/
     raise(TESTSIG);
-    el->run(el, 0);
+    for(size_t i = 0; i < 100 && counter < 1; i++)
+        el->run(el, 10);
     ck_assert_uint_eq(counter, 1);
 
     /* Send signal to self*/
     raise(TESTSIG);
-    el->run(el, 0);
+    for(size_t i = 0; i < 100 && counter < 2; i++)
+        el->run(el, 10);
     ck_assert_uint_eq(counter, 2);
 
     /* Stop the EventLoop */
@@ -57,8 +63,8 @@ START_TEST(catchInterrupt) {
 } END_TEST
 
 START_TEST(registerDuplicate) {
-    UA_EventLoop *el = UA_EventLoop_new_POSIX(UA_Log_Stdout);
-    UA_InterruptManager *im = UA_InterruptManager_new_POSIX(UA_STRING("im1"));
+    UA_EventLoop *el = UA_TEST_EVENTLOOP_NEW(UA_Log_Stdout);
+    UA_InterruptManager *im = UA_TEST_INTERRUPT_MANAGER_NEW(UA_STRING("im1"));
     el->registerEventSource(el, &im->eventSource);
 
     el->start(el);
@@ -81,11 +87,61 @@ START_TEST(registerDuplicate) {
     el = NULL;
 } END_TEST
 
+START_TEST(multipleInterruptManagers) {
+    counter = 0;
+
+    UA_EventLoop *el1 = UA_TEST_EVENTLOOP_NEW(UA_Log_Stdout);
+    UA_EventLoop *el2 = UA_TEST_EVENTLOOP_NEW(UA_Log_Stdout);
+    ck_assert_ptr_ne(el1, NULL);
+    ck_assert_ptr_ne(el2, NULL);
+
+    UA_InterruptManager *im1 = UA_TEST_INTERRUPT_MANAGER_NEW(UA_STRING("im1"));
+    UA_InterruptManager *im2 = UA_TEST_INTERRUPT_MANAGER_NEW(UA_STRING("im2"));
+    ck_assert_ptr_ne(im1, NULL);
+    ck_assert_ptr_ne(im2, NULL);
+
+    el1->registerEventSource(el1, &im1->eventSource);
+    el2->registerEventSource(el2, &im2->eventSource);
+
+    UA_StatusCode res1 =
+        im1->registerInterrupt(im1, TESTSIG, &UA_KEYVALUEMAP_NULL, interruptCallback, NULL);
+    UA_StatusCode res2 =
+        im2->registerInterrupt(im2, TESTSIG, &UA_KEYVALUEMAP_NULL, interruptCallback, NULL);
+    ck_assert_uint_eq(res1, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(res2, UA_STATUSCODE_GOOD);
+
+    el1->start(el1);
+    el2->start(el2);
+
+    raise(TESTSIG);
+
+    for(size_t i = 0; i < 10 && counter < 2; i++) {
+        el1->run(el1, 1);
+        el2->run(el2, 1);
+    }
+    ck_assert_uint_eq(counter, 2);
+
+    el2->stop(el2);
+    while(el2->state != UA_EVENTLOOPSTATE_STOPPED) {
+        UA_DateTime next = el2->run(el2, 1);
+        UA_fakeSleep((UA_UInt32)((next - UA_DateTime_now()) / UA_DATETIME_MSEC));
+    }
+    el2->free(el2);
+
+    el1->stop(el1);
+    while(el1->state != UA_EVENTLOOPSTATE_STOPPED) {
+        UA_DateTime next = el1->run(el1, 1);
+        UA_fakeSleep((UA_UInt32)((next - UA_DateTime_now()) / UA_DATETIME_MSEC));
+    }
+    el1->free(el1);
+} END_TEST
+
 int main(void) {
     Suite *s  = suite_create("Test EventLoop Interrupts");
     TCase *tc = tcase_create("test cases");
     tcase_add_test(tc, catchInterrupt);
     tcase_add_test(tc, registerDuplicate);
+    tcase_add_test(tc, multipleInterruptManagers);
     suite_add_tcase(s, tc);
 
     SRunner *sr = srunner_create(s);

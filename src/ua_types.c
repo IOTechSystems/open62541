@@ -13,15 +13,18 @@
  *    Copyright 2015-2016 (c) Oleksiy Vasylyev
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
  *    Copyright 2016 (c) Lorenz Haas
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include <open62541/types.h>
 #include <open62541/types_generated.h>
 
+#include "parse_num.h"
 #include "util/ua_util_internal.h"
 #include "../deps/itoa.h"
 #include "../deps/base64.h"
-#include "libc_time.h"
+#include "../deps/libc_time.h"
+#include "../deps/mp_printf.h"
 
 #define UA_MAX_ARRAY_DIMS 100 /* Max dimensions of an array */
 
@@ -52,12 +55,11 @@ typedef UA_Order
 extern const UA_orderSignature orderJumpTable[UA_DATATYPEKINDS];
 
 static UA_Order
-nodeIdOrder(const UA_NodeId *p1, const UA_NodeId *p2, const UA_DataType *_);
+nodeIdOrder(const void *p1_, const void *p2_, const UA_DataType *_);
 static UA_Order
-expandedNodeIdOrder(const UA_ExpandedNodeId *p1, const UA_ExpandedNodeId *p2,
-                    const UA_DataType *_);
+expandedNodeIdOrder(const void *p1_, const void *p2_, const UA_DataType *_);
 static UA_Order
-guidOrder(const UA_Guid *p1, const UA_Guid *p2, const UA_DataType *_);
+guidOrder(const void *p1_, const void *p2_, const UA_DataType *_);
 
 const UA_DataType *
 UA_findDataTypeWithCustom(const UA_NodeId *typeId,
@@ -89,24 +91,105 @@ UA_findDataType(const UA_NodeId *typeId) {
     return UA_findDataTypeWithCustom(typeId, NULL);
 }
 
-void
-UA_cleanupDataTypeWithCustom(const UA_DataTypeArray *customTypes) {
-    while (customTypes) {
-        const UA_DataTypeArray *next = customTypes->next;
-        if (customTypes->cleanup) {
-            for(size_t i = 0; i < customTypes->typesSize; ++i) {
-                const UA_DataType *type = &customTypes->types[i];
 #ifdef UA_ENABLE_TYPEDESCRIPTION
-                UA_free((void*)(uintptr_t)type->typeName);
-                for(size_t j = 0; j < type->membersSize; ++j) {
-                    const UA_DataTypeMember *m = &type->members[j];
-                    UA_free((void*)(uintptr_t)m->memberName);
-                }
+const UA_DataType *
+UA_findDataTypeByName(const UA_QualifiedName *qn) {
+    UA_Byte nameBuf[512];
+    UA_String name = {511, nameBuf};
+    UA_StatusCode res = UA_QualifiedName_print(qn, &name);
+    name.data[name.length] = 0;
+    if(res != UA_STATUSCODE_GOOD)
+        return NULL;
+    for(size_t i = 0; i < UA_TYPES_COUNT; ++i) {
+        if(strcmp((char*)nameBuf, UA_TYPES[i].typeName) == 0)
+            return &UA_TYPES[i];
+    }
+    return NULL;
+}
 #endif
-                UA_free((void*)type->members);
+
+void
+UA_DataType_clear(UA_DataType *type) {
+#ifdef UA_ENABLE_TYPEDESCRIPTION
+    UA_free((void*)(uintptr_t)type->typeName);
+    for(size_t j = 0; j < type->membersSize; ++j) {
+        const UA_DataTypeMember *m = &type->members[j];
+        UA_free((void*)(uintptr_t)m->memberName);
+    }
+#endif
+    UA_NodeId_clear(&type->typeId);
+    UA_NodeId_clear(&type->binaryEncodingId);
+    UA_NodeId_clear(&type->xmlEncodingId);
+    UA_free((void*)(uintptr_t)type->members);
+    memset(type, 0, sizeof(UA_DataType));
+}
+
+UA_StatusCode
+UA_DataType_copy(const UA_DataType *t1, UA_DataType *t2) {
+    UA_StatusCode res = UA_STATUSCODE_GOOD;
+    memcpy(t2, t1, sizeof(UA_DataType));
+    t2->members = NULL;
+    t2->membersSize = 0;
+
+    /* Copy the typename */
+#ifdef UA_ENABLE_TYPEDESCRIPTION
+    size_t nameLen = strlen(t1->typeName) + 1;
+    char *t2Name = (char*)UA_malloc(nameLen);
+    if(!t2Name) {
+        res = UA_STATUSCODE_BADOUTOFMEMORY;
+        goto errout;
+    }
+    memcpy(t2Name, t1->typeName, nameLen);
+    *(void**)(uintptr_t)&t2->typeName = t2Name;
+#endif
+
+
+    /* Copy the members */
+    if(t1->membersSize > 0) {
+        UA_DataTypeMember *newMembers = (UA_DataTypeMember*)
+            UA_calloc(t1->membersSize, sizeof(UA_DataTypeMember));
+        if(!newMembers) {
+            res = UA_STATUSCODE_BADOUTOFMEMORY;
+            goto errout;
+        }
+        t2->members = newMembers;
+        t2->membersSize = t1->membersSize;
+        for(size_t i = 0; i < t1->membersSize; i++) {
+            const UA_DataTypeMember *m1 = &t1->members[i];
+            UA_DataTypeMember *m2 = &newMembers[i];
+            memcpy(m2, m1, sizeof(UA_DataTypeMember));
+            if(m1->memberType == t1)
+                m2->memberType = t2;
+#ifdef UA_ENABLE_TYPEDESCRIPTION
+            nameLen = strlen(m1->memberName) + 1;
+            char *mName = (char*)UA_malloc(nameLen);
+            if(!mName) {
+                res = UA_STATUSCODE_BADOUTOFMEMORY;
+                goto errout;
+            }
+            memcpy(mName, m1->memberName, nameLen);
+            *(void**)(uintptr_t)&m2->memberName = mName;
+#endif
+        }
+    }
+
+ errout:
+    if(res != UA_STATUSCODE_GOOD)
+        UA_DataType_clear(t2);
+    return res;
+}
+
+void
+UA_cleanupDataTypeWithCustom(UA_DataTypeArray *customTypes) {
+    while(customTypes) {
+        UA_DataTypeArray *next = customTypes->next;
+        if(customTypes->cleanup) {
+            for(size_t i = 0; i < customTypes->typesSize; ++i) {
+                UA_DataType *type = (UA_DataType*)(uintptr_t)&customTypes->types[i];
+                UA_DataType_clear(type);
             }
             UA_free((void*)(uintptr_t)customTypes->types);
-            UA_free((void*)(uintptr_t)customTypes);
+            UA_free(customTypes);
         }
         customTypes = next;
     }
@@ -115,6 +198,36 @@ UA_cleanupDataTypeWithCustom(const UA_DataTypeArray *customTypes) {
 /*****************/
 /* Builtin Types */
 /*****************/
+
+UA_Boolean
+UA_StatusCode_isBad(UA_StatusCode code) {
+    return ((code >> 30) >= 0x02);
+}
+
+UA_Boolean
+UA_StatusCode_isUncertain(UA_StatusCode code) {
+    return ((code >> 30) == 0x01);
+}
+
+UA_Boolean
+UA_StatusCode_isGood(UA_StatusCode code) {
+    return ((code >> 30) == 0x00);
+}
+
+UA_Boolean
+UA_StatusCode_equalTop(UA_StatusCode s1, UA_StatusCode s2) {
+    return ((s1 & 0xFFFF0000) == (s2 & 0xFFFF0000));
+}
+
+UA_String
+UA_STRING(char *chars) {
+    UA_String s = {0, NULL};
+    if(!chars)
+        return s;
+    s.length = strlen(chars);
+    s.data = (UA_Byte*)chars;
+    return s;
+}
 
 UA_String
 UA_String_fromChars(const char *src) {
@@ -168,31 +281,127 @@ UA_String_equal_ignorecase(const UA_String *s1, const UA_String *s2) {
 }
 
 static UA_StatusCode
-String_copy(UA_String const *src, UA_String *dst, const UA_DataType *_) {
+String_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_String *srcS = (const UA_String*)src;
+    UA_String *dstS = (UA_String *)dst;
     UA_StatusCode res =
-        UA_Array_copy(src->data, src->length, (void**)&dst->data,
+        UA_Array_copy(srcS->data, srcS->length, (void**)&dstS->data,
                       &UA_TYPES[UA_TYPES_BYTE]);
     if(res == UA_STATUSCODE_GOOD)
-        dst->length = src->length;
+        dstS->length = srcS->length;
     return res;
 }
 
 static void
-String_clear(UA_String *s, const UA_DataType *_) {
+String_clear(void *p, const UA_DataType *_) {
+    UA_String *s = (UA_String*)p;
     UA_Array_delete(s->data, s->length, &UA_TYPES[UA_TYPES_BYTE]);
 }
 
+UA_StatusCode
+UA_String_append(UA_String *s, const UA_String s2) {
+    if(s2.length == 0)
+        return UA_STATUSCODE_GOOD;
+    UA_Byte *buf = (UA_Byte*)
+        UA_realloc((void*)((uintptr_t)s->data & ~(uintptr_t)UA_EMPTY_ARRAY_SENTINEL),
+                   s->length + s2.length);
+    if(!buf)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    memcpy(buf + s->length, s2.data, s2.length);
+    s->data = buf;
+    s->length += s2.length;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_String_format(UA_String *str, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    UA_StatusCode ret = UA_String_vprintf(str, format, args);
+    va_end(args);
+    return ret;
+}
+
+UA_StatusCode
+UA_String_vformat(UA_String *str, const char *format, va_list args) {
+    /* Store a copy of the arguments for the second pass. va_list cannot be
+     * iterated twice. */
+    va_list args2;
+    va_copy(args2, args);
+
+    /* Encode initially */
+    UA_StatusCode res = UA_STATUSCODE_GOOD;
+    int out = mp_vsnprintf((char*)str->data, str->length, format, args);
+    if(out < 0) {
+        res = UA_STATUSCODE_BADENCODINGERROR;
+        goto errout;
+    }
+
+    /* Output length zero */
+    if(out == 0) {
+        str->length = 0;
+        if(str->data == NULL)
+            str->data = (UA_Byte*)UA_EMPTY_ARRAY_SENTINEL;
+        goto errout;
+    }
+
+    /* Encode into existing buffer. mp_snprintf adds a trailing \0. So out must
+     * be truly smaller than str->length for success. */
+    if(str->length > 0) {
+        if((size_t)out < str->length) {
+            str->length = (size_t)out;
+        } else {
+            res = UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED;
+        }
+        goto errout;
+    }
+
+    /* Allocate and encode again (+1 length for the trailing \0) */
+    res = UA_ByteString_allocBuffer(str, (size_t)out + 1);
+    if(res != UA_STATUSCODE_GOOD)
+        goto errout;
+    mp_vsnprintf((char*)str->data, str->length, format, args2);
+    str->length--;
+
+ errout:
+    va_end(args2);
+    return res;
+}
+
 /* QualifiedName */
+UA_Boolean
+UA_QualifiedName_isNull(const UA_QualifiedName *q) {
+    return (q->namespaceIndex == 0 && q->name.length == 0);
+}
+
+UA_QualifiedName
+UA_QUALIFIEDNAME(UA_UInt16 nsIndex, char *chars) {
+    UA_QualifiedName qn;
+    qn.namespaceIndex = nsIndex;
+    qn.name = UA_STRING(chars);
+    return qn;
+}
+
+UA_QualifiedName
+UA_QUALIFIEDNAME_ALLOC(UA_UInt16 nsIndex, const char *chars) {
+    UA_QualifiedName qn;
+    qn.namespaceIndex = nsIndex;
+    qn.name = UA_STRING_ALLOC(chars);
+    return qn;
+}
+
 static UA_StatusCode
-QualifiedName_copy(const UA_QualifiedName *src, UA_QualifiedName *dst,
-                   const UA_DataType *_) {
-    dst->namespaceIndex = src->namespaceIndex;
-    return String_copy(&src->name, &dst->name, NULL);
+QualifiedName_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_QualifiedName *srcQ = (const UA_QualifiedName*)src;
+    UA_QualifiedName *dstQ = (UA_QualifiedName*)dst;
+    dstQ->namespaceIndex = srcQ->namespaceIndex;
+    return String_copy(&srcQ->name, &dstQ->name, NULL);
 }
 
 static void
-QualifiedName_clear(UA_QualifiedName *p, const UA_DataType *_) {
-    String_clear(&p->name, NULL);
+QualifiedName_clear(void *p, const UA_DataType *_) {
+    UA_QualifiedName *qn = (UA_QualifiedName*)p;
+    String_clear(&qn->name, NULL);
 }
 
 u32
@@ -201,7 +410,75 @@ UA_QualifiedName_hash(const UA_QualifiedName *q) {
                               q->name.data, q->name.length);
 }
 
+UA_StatusCode
+UA_QualifiedName_printEx(const UA_QualifiedName *qn, UA_String *output,
+                         const UA_NamespaceMapping *nsMapping) {
+    /* Start tracking the output length */
+    size_t len = qn->name.length;
+
+    /* Try to map the NamespaceIndex to the Uri */
+    UA_String nsUri = UA_STRING_NULL;
+    if(qn->namespaceIndex > 0 && nsMapping) {
+        UA_NamespaceMapping_index2Uri(nsMapping, qn->namespaceIndex, &nsUri);
+        if(nsUri.length > 0)
+            len += nsUri.length + 1;
+    }
+
+    /* Print the NamespaceIndex */
+    char nsStr[6];
+    size_t nsStrSize = 0;
+    if(nsUri.length == 0 && qn->namespaceIndex > 0) {
+        nsStrSize = itoaUnsigned(qn->namespaceIndex, nsStr, 10);
+        len += 1 + nsStrSize;
+    }
+
+    /* Allocate memory if required */
+    if(output->length == 0) {
+        UA_StatusCode res = UA_ByteString_allocBuffer((UA_ByteString*)output, len);
+        if(res != UA_STATUSCODE_GOOD)
+            return res;
+    } else {
+        if(output->length < len)
+            return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED;
+        output->length = len;
+    }
+
+    /* Print the namespace */
+    u8 *pos = output->data;
+    if(nsUri.length > 0) {
+        memcpy(pos, nsUri.data, nsUri.length);
+        pos += nsUri.length;
+        *pos++ = ';';
+    } else if(qn->namespaceIndex > 0) {
+        memcpy(pos, nsStr, nsStrSize);
+        pos += nsStrSize;
+        *pos++ = ':';
+    }
+
+    /* Print the name */
+    if(UA_LIKELY(qn->name.data != NULL))
+        memcpy(pos, qn->name.data, qn->name.length);
+
+    UA_assert(output->length == (size_t)((UA_Byte*)pos + qn->name.length - output->data));
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_QualifiedName_print(const UA_QualifiedName *qn, UA_String *output) {
+    return UA_QualifiedName_printEx(qn, output, NULL);
+}
+
 /* DateTime */
+UA_Int64
+UA_DateTime_toUnixTime(UA_DateTime date) {
+    return (date - UA_DATETIME_UNIX_EPOCH) / UA_DATETIME_SEC;
+}
+
+UA_DateTime
+UA_DateTime_fromUnixTime(UA_Int64 unixDate) {
+    return (unixDate * UA_DATETIME_SEC) + UA_DATETIME_UNIX_EPOCH;
+}
+
 UA_DateTimeStruct
 UA_DateTime_toStruct(UA_DateTime t) {
     /* Divide, then subtract -> avoid underflow. Also, negative numbers are
@@ -217,9 +494,9 @@ UA_DateTime_toStruct(UA_DateTime t) {
         frac += UA_DATETIME_SEC;
     }
 
-    struct mytm ts;
-    memset(&ts, 0, sizeof(struct mytm));
-    __secs_to_tm(secSinceUnixEpoch, &ts);
+    struct musl_tm ts;
+    memset(&ts, 0, sizeof(struct musl_tm));
+    musl_secs_to_tm(secSinceUnixEpoch, &ts);
 
     UA_DateTimeStruct dateTimeStruct;
     dateTimeStruct.year   = (i16)(ts.tm_year + 1900);
@@ -237,15 +514,15 @@ UA_DateTime_toStruct(UA_DateTime t) {
 UA_DateTime
 UA_DateTime_fromStruct(UA_DateTimeStruct ts) {
     /* Seconds since the Unix epoch */
-    struct mytm tm;
-    memset(&tm, 0, sizeof(struct mytm));
+    struct musl_tm tm;
+    memset(&tm, 0, sizeof(struct musl_tm));
     tm.tm_year = ts.year - 1900;
     tm.tm_mon = ts.month - 1;
     tm.tm_mday = ts.day;
     tm.tm_hour = ts.hour;
     tm.tm_min = ts.min;
     tm.tm_sec = ts.sec;
-    long long sec_epoch = __tm_to_secs(&tm);
+    long long sec_epoch = musl_tm_to_secs(&tm);
 
     UA_DateTime t = UA_DATETIME_UNIX_EPOCH;
     t += sec_epoch * UA_DATETIME_SEC;
@@ -253,6 +530,178 @@ UA_DateTime_fromStruct(UA_DateTimeStruct ts) {
     t += ts.microSec * UA_DATETIME_USEC;
     t += ts.nanoSec / 100;
     return t;
+}
+
+UA_StatusCode
+UA_DateTime_parse(UA_DateTime *dst, const UA_String str) {
+    if(str.length == 0)
+        return UA_STATUSCODE_BADDECODINGERROR;
+
+    struct musl_tm dts;
+    memset(&dts, 0, sizeof(dts));
+
+    /* Parse the year. The ISO standard asks for four digits. But we accept up
+     * to five with an optional plus or minus in front due to the range of the
+     * DateTime 64bit integer. But in that case we require the year and the
+     * month to be separated by a '-'. Otherwise we cannot know where the month
+     * starts. */
+    size_t pos = 0;
+    if(str.data[0] == '-' || str.data[0] == '+')
+        pos++;
+    UA_Int64 year = 0;
+    UA_CHECK(str.length - pos > 5, return UA_STATUSCODE_BADDECODINGERROR);
+    size_t len = parseInt64((char*)&str.data[pos], 5, &year);
+    pos += len;
+    UA_CHECK(len > 0 && pos < str.length, return UA_STATUSCODE_BADDECODINGERROR);
+    UA_CHECK(len == 4 || str.data[pos] == '-', return UA_STATUSCODE_BADDECODINGERROR);
+    if(str.data[0] == '-')
+        year = -year;
+    dts.tm_year = (UA_Int16)year - 1900;
+    if(str.data[pos] == '-')
+        pos++;
+
+    /* Parse the month */
+    UA_UInt64 month = 0;
+    UA_CHECK(str.length - pos > 2, return UA_STATUSCODE_BADDECODINGERROR);
+    len = parseUInt64((char*)&str.data[pos], 2, &month);
+    pos += len;
+    UA_CHECK(len == 2, return UA_STATUSCODE_BADDECODINGERROR);
+    dts.tm_mon = (UA_UInt16)month - 1;
+    if(str.data[pos] == '-')
+        pos++;
+
+    /* Parse the day and check the T between date and time */
+    UA_UInt64 day = 0;
+    UA_CHECK(str.length - pos > 2, return UA_STATUSCODE_BADDECODINGERROR);
+    len = parseUInt64((char*)&str.data[pos], 2, &day);
+    pos += len;
+    UA_CHECK(len == 2 || str.data[pos] != 'T',
+             return UA_STATUSCODE_BADDECODINGERROR);
+    dts.tm_mday = (UA_UInt16)day;
+    pos++;
+
+    /* Parse the hour */
+    UA_UInt64 hour = 0;
+    UA_CHECK(str.length - pos > 2, return UA_STATUSCODE_BADDECODINGERROR);
+    len = parseUInt64((char*)&str.data[pos], 2, &hour);
+    pos += len;
+    UA_CHECK(len == 2, return UA_STATUSCODE_BADDECODINGERROR);
+    dts.tm_hour = (UA_UInt16)hour;
+    if(str.data[pos] == ':')
+        pos++;
+
+    /* Parse the minute */
+    UA_UInt64 min = 0;
+    UA_CHECK(str.length - pos > 2, return UA_STATUSCODE_BADDECODINGERROR);
+    len = parseUInt64((char*)&str.data[pos], 2, &min);
+    pos += len;
+    UA_CHECK(len == 2, return UA_STATUSCODE_BADDECODINGERROR);
+    dts.tm_min = (UA_UInt16)min;
+    if(str.data[pos] == ':')
+        pos++;
+
+    /* Parse the second */
+    UA_UInt64 sec = 0;
+    UA_CHECK(str.length - pos >= 2, return UA_STATUSCODE_BADDECODINGERROR);
+    len = parseUInt64((char*)&str.data[pos], 2, &sec);
+    pos += len;
+    UA_CHECK(len == 2, return UA_STATUSCODE_BADDECODINGERROR);
+    dts.tm_sec = (UA_UInt16)sec;
+
+    /* Compute the seconds since the Unix epoch */
+    long long sinceunix = musl_tm_to_secs(&dts);
+
+    /* Are we within the range that can be represented? */
+    long long sinceunix_min =
+        (long long)(UA_INT64_MIN / UA_DATETIME_SEC) -
+        (long long)(UA_DATETIME_UNIX_EPOCH / UA_DATETIME_SEC) -
+        (long long)1; /* manual correction due to rounding */
+    long long sinceunix_max = (long long)
+        ((UA_INT64_MAX - UA_DATETIME_UNIX_EPOCH) / UA_DATETIME_SEC);
+    if(sinceunix < sinceunix_min || sinceunix > sinceunix_max)
+        return UA_STATUSCODE_BADDECODINGERROR;
+
+    /* Convert to DateTime. Add or subtract one extra second here to prevent
+     * underflow/overflow. This is reverted once the fractional part has been
+     * added. */
+    sinceunix -= (sinceunix > 0) ? 1 : -1;
+    UA_DateTime dt = (UA_DateTime)
+        (sinceunix + (UA_DATETIME_UNIX_EPOCH / UA_DATETIME_SEC)) * UA_DATETIME_SEC;
+
+    /* Parse the fraction of the second if defined */
+    UA_CHECK(pos < str.length, goto finish);
+    if(str.data[pos] == ',' || str.data[pos] == '.') {
+        pos++;
+        double frac = 0.0;
+        double denom = 0.1;
+        while(pos < str.length && str.data[pos] >= '0' && str.data[pos] <= '9') {
+            frac += denom * (str.data[pos] - '0');
+            denom *= 0.1;
+            pos++;
+        }
+        frac += 0.00000005; /* Correct rounding when converting to integer */
+        dt += (UA_DateTime)(frac * UA_DATETIME_SEC);
+    }
+
+    /* Time zone handling */
+    UA_CHECK(pos < str.length, goto finish);
+    if(str.data[pos] == 'Z') {
+        pos++;
+    } else if(str.data[pos] == '+' || str.data[pos] == '-') {
+        UA_UInt64 tzHour = 0, tzMin = 0;
+        UA_Int64 offsetSeconds = 0;
+        UA_Byte tzSign = str.data[pos++];
+
+        UA_CHECK(str.length - pos >= 2, return UA_STATUSCODE_BADDECODINGERROR);
+        len = parseUInt64((char*)&str.data[pos], 2, &tzHour);
+        pos += len;
+        UA_CHECK(len == 2, return UA_STATUSCODE_BADDECODINGERROR);
+
+        UA_CHECK(str.length > pos, goto finish); /* Allow missing tz minutes */
+        if(str.data[pos] == ':')
+            pos++;
+
+        UA_CHECK(str.length - pos >= 2, return UA_STATUSCODE_BADDECODINGERROR);
+        len = parseUInt64((char*)&str.data[pos], 2, &tzMin);
+        pos += len;
+        UA_CHECK(len == 2, return UA_STATUSCODE_BADDECODINGERROR);
+
+        offsetSeconds = (tzHour * 3600) + (tzMin * 60);
+        if(tzSign == '-')
+            offsetSeconds = -offsetSeconds;
+        dt -= (UA_DateTime)(offsetSeconds * UA_DATETIME_SEC);
+    } else {
+        return UA_STATUSCODE_BADDECODINGERROR;
+    }
+
+ finish:
+    /* Remove the underflow/overflow protection (see above) */
+    if(sinceunix > 0) {
+        if(dt > UA_INT64_MAX - UA_DATETIME_SEC)
+            return UA_STATUSCODE_BADDECODINGERROR;
+        dt += UA_DATETIME_SEC;
+    } else {
+        if(dt < UA_INT64_MIN + UA_DATETIME_SEC)
+            return UA_STATUSCODE_BADDECODINGERROR;
+        dt -= UA_DATETIME_SEC;
+    }
+
+    /* We must be at the end of the string */
+    if(pos != str.length)
+        return UA_STATUSCODE_BADDECODINGERROR;
+
+    *dst = dt;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_DateTime
+UA_DATETIME(const char *chars) {
+    UA_DateTime dst;
+    UA_StatusCode res =
+        UA_DateTime_parse(&dst, UA_STRING((char*)(uintptr_t)chars));
+    if(res != UA_STATUSCODE_GOOD)
+        UA_DateTime_init(&dst);
+    return dst;
 }
 
 /* Guid */
@@ -301,13 +750,22 @@ UA_Guid_print(const UA_Guid *guid, UA_String *output) {
     return UA_STATUSCODE_GOOD;
 }
 
+UA_Guid
+UA_GUID(const char *chars) {
+    UA_Guid guid;
+    UA_Guid_parse(&guid, UA_STRING((char*)(uintptr_t)chars));
+    return guid;
+}
+
 /* ByteString */
 UA_StatusCode
 UA_ByteString_allocBuffer(UA_ByteString *bs, size_t length) {
     UA_ByteString_init(bs);
-    if(length == 0)
+    if(length == 0) {
+        bs->data = (u8*)UA_EMPTY_ARRAY_SENTINEL;
         return UA_STATUSCODE_GOOD;
-    bs->data = (u8*)UA_malloc(length);
+    }
+    bs->data = (u8*)UA_calloc(1,length);
     if(UA_UNLIKELY(!bs->data))
         return UA_STATUSCODE_BADOUTOFMEMORY;
     bs->length = length;
@@ -316,36 +774,39 @@ UA_ByteString_allocBuffer(UA_ByteString *bs, size_t length) {
 
 /* NodeId */
 static void
-NodeId_clear(UA_NodeId *p, const UA_DataType *_) {
-    switch(p->identifierType) {
+NodeId_clear(void *p, const UA_DataType *_) {
+    UA_NodeId *id = (UA_NodeId*)p;
+    switch(id->identifierType) {
     case UA_NODEIDTYPE_STRING:
     case UA_NODEIDTYPE_BYTESTRING:
-        String_clear(&p->identifier.string, NULL);
+        String_clear(&id->identifier.string, NULL);
         break;
     default: break;
     }
 }
 
 static UA_StatusCode
-NodeId_copy(UA_NodeId const *src, UA_NodeId *dst, const UA_DataType *_) {
+NodeId_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_NodeId *srcN = (const UA_NodeId*)src;
+    UA_NodeId *dstN = (UA_NodeId *)dst;
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    switch(src->identifierType) {
+    switch(srcN->identifierType) {
     case UA_NODEIDTYPE_NUMERIC:
-        *dst = *src;
+        *dstN = *srcN;
         return UA_STATUSCODE_GOOD;
     case UA_NODEIDTYPE_STRING:
     case UA_NODEIDTYPE_BYTESTRING:
-        retval |= String_copy(&src->identifier.string,
-                              &dst->identifier.string, NULL);
+        retval |= String_copy(&srcN->identifier.string,
+                              &dstN->identifier.string, NULL);
         break;
     case UA_NODEIDTYPE_GUID:
-        dst->identifier.guid = src->identifier.guid;
+        dstN->identifier.guid = srcN->identifier.guid;
         break;
     default:
         return UA_STATUSCODE_BADINTERNALERROR;
     }
-    dst->namespaceIndex = src->namespaceIndex;
-    dst->identifierType = src->identifierType;
+    dstN->namespaceIndex = srcN->namespaceIndex;
+    dstN->identifierType = srcN->identifierType;
     return retval;
 }
 
@@ -368,6 +829,68 @@ UA_NodeId_isNull(const UA_NodeId *p) {
 UA_Order
 UA_NodeId_order(const UA_NodeId *n1, const UA_NodeId *n2) {
     return nodeIdOrder(n1, n2, NULL);
+}
+
+UA_NodeId
+UA_NODEID_NUMERIC(UA_UInt16 nsIndex, UA_UInt32 identifier) {
+    UA_NodeId id;
+    memset(&id, 0, sizeof(UA_NodeId));
+    id.namespaceIndex = nsIndex;
+    id.identifierType = UA_NODEIDTYPE_NUMERIC;
+    id.identifier.numeric = identifier;
+    return id;
+}
+
+UA_NodeId
+UA_NODEID_STRING(UA_UInt16 nsIndex, char *chars) {
+    UA_NodeId id;
+    memset(&id, 0, sizeof(UA_NodeId));
+    id.namespaceIndex = nsIndex;
+    id.identifierType = UA_NODEIDTYPE_STRING;
+    id.identifier.string = UA_STRING(chars);
+    return id;
+}
+
+UA_NodeId
+UA_NODEID_STRING_ALLOC(UA_UInt16 nsIndex,
+                       const char *chars) {
+    UA_NodeId id;
+    memset(&id, 0, sizeof(UA_NodeId));
+    id.namespaceIndex = nsIndex;
+    id.identifierType = UA_NODEIDTYPE_STRING;
+    id.identifier.string = UA_STRING_ALLOC(chars);
+    return id;
+}
+
+UA_NodeId
+UA_NODEID_GUID(UA_UInt16 nsIndex, UA_Guid guid) {
+    UA_NodeId id;
+    memset(&id, 0, sizeof(UA_NodeId));
+    id.namespaceIndex = nsIndex;
+    id.identifierType = UA_NODEIDTYPE_GUID;
+    id.identifier.guid = guid;
+    return id;
+}
+
+UA_NodeId
+UA_NODEID_BYTESTRING(UA_UInt16 nsIndex, char *chars) {
+    UA_NodeId id;
+    memset(&id, 0, sizeof(UA_NodeId));
+    id.namespaceIndex = nsIndex;
+    id.identifierType = UA_NODEIDTYPE_BYTESTRING;
+    id.identifier.byteString = UA_BYTESTRING(chars);
+    return id;
+}
+
+UA_NodeId
+UA_NODEID_BYTESTRING_ALLOC(UA_UInt16 nsIndex,
+                           const char *chars) {
+    UA_NodeId id;
+    memset(&id, 0, sizeof(UA_NodeId));
+    id.namespaceIndex = nsIndex;
+    id.identifierType = UA_NODEIDTYPE_BYTESTRING;
+    id.identifier.byteString = UA_BYTESTRING_ALLOC(chars);
+    return id;
 }
 
 /* sdbm-hash (http://www.cse.yorku.ca/~oz/hash.html) */
@@ -397,32 +920,41 @@ UA_NodeId_hash(const UA_NodeId *n) {
     }
 }
 
-/* Computes length for the encoding size and pre-encodes the numeric values */
+/* Computes length for the encoding size and pre-encodes the numeric values.
+ * This can be larger than the actual size due to the removed base64 padding
+ * (for the percent-escaping). */
 static size_t
-nodeIdSize(const UA_NodeId *id,
-           char *nsStr, size_t *nsStrSize,
-           char *numIdStr, size_t *numIdStrSize) {
+nodeIdSize(const UA_NodeId *id, u8 *nsStr, u8 *numIdStr, UA_String nsUri,
+           UA_Escaping idEsc) {
     /* Namespace length */
     size_t len = 0;
-    if(id->namespaceIndex != 0) {
+    if(nsUri.data != NULL) {
+        len += 5; /* nsu=; */
+        len += UA_String_escapedSize(nsUri, UA_ESCAPING_PERCENT);
+    } else if(id->namespaceIndex > 0) {
         len += 4; /* ns=; */
-        *nsStrSize = itoaUnsigned(id->namespaceIndex, nsStr, 10);
-        len += *nsStrSize;
+        size_t nsStrSize = itoaUnsigned(id->namespaceIndex, (char*)nsStr, 10);
+        nsStr[nsStrSize] = 0;
+        len += nsStrSize;
     }
 
+    len += 2; /* ?= */
+
     switch (id->identifierType) {
-    case UA_NODEIDTYPE_NUMERIC:
-        *numIdStrSize = itoaUnsigned(id->identifier.numeric, numIdStr, 10);
-        len += 2 + *numIdStrSize;
+    case UA_NODEIDTYPE_NUMERIC: {
+        size_t numIdStrSize = itoaUnsigned(id->identifier.numeric, (char*)numIdStr, 10);
+        numIdStr[numIdStrSize] = 0;
+        len += numIdStrSize;
         break;
+    }
     case UA_NODEIDTYPE_STRING:
-        len += 2 + id->identifier.string.length;
+        len += UA_String_escapedSize(id->identifier.string, idEsc);
         break;
     case UA_NODEIDTYPE_GUID:
-        len += 2 + 36;
+        len += 36;
         break;
     case UA_NODEIDTYPE_BYTESTRING:
-        len += 2 + (4*((id->identifier.byteString.length + 2) / 3));
+        len += 4 * ((id->identifier.byteString.length + 2) / 3);
         break;
     default:
         len = 0;
@@ -430,56 +962,80 @@ nodeIdSize(const UA_NodeId *id,
     return len;
 }
 
-#define PRINT_NODEID                                           \
-    /* Encode the namespace */                                 \
-    if(id->namespaceIndex != 0) {                              \
-        memcpy(pos, "ns=", 3);                                 \
-        pos += 3;                                              \
-        memcpy(pos, nsStr, nsStrSize);                         \
-        pos += nsStrSize;                                      \
-        *pos++ = ';';                                          \
-    }                                                          \
-                                                               \
-    /* Encode the identifier */                                \
-    switch(id->identifierType) {                               \
-    case UA_NODEIDTYPE_NUMERIC:                                \
-        memcpy(pos, "i=", 2);                                  \
-        pos += 2;                                              \
-        memcpy(pos, numIdStr, numIdStrSize);                   \
-        pos += numIdStrSize;                                   \
-        break;                                                 \
-    case UA_NODEIDTYPE_STRING:                                 \
-        memcpy(pos, "s=", 2);                                  \
-        pos += 2;                                              \
-        memcpy(pos, id->identifier.string.data,                \
-               id->identifier.string.length);                  \
-        pos += id->identifier.string.length;                   \
-        break;                                                 \
-    case UA_NODEIDTYPE_GUID:                                   \
-        memcpy(pos, "g=", 2);                                  \
-        pos += 2;                                              \
-        UA_Guid_to_hex(&id->identifier.guid,                   \
-                       (unsigned char*)pos, true);             \
-        pos += 36;                                             \
-        break;                                                 \
-    case UA_NODEIDTYPE_BYTESTRING:                             \
-        memcpy(pos, "b=", 2);                                  \
-        pos += 2;                                              \
-        pos += UA_base64_buf(id->identifier.byteString.data,   \
-                             id->identifier.byteString.length, \
-                             (unsigned char*)pos);             \
-        break;                                                 \
-    }                                                          \
-    do { } while(false)
+static u8 *
+printNodeIdBody(const UA_NodeId *id, UA_String nsUri, u8* nsStr, u8* numIdStr, u8 *pos,
+                const UA_NamespaceMapping *nsMapping, UA_Escaping idEsc) {
+    size_t len;
+
+    /* Encode the namespace */
+    if(nsUri.data != NULL) {
+        memcpy(pos, "nsu=", 4);
+        pos += 4;
+        pos += UA_String_escapeInsert(pos, nsUri, UA_ESCAPING_PERCENT);
+        *pos++ = ';';
+    } else if(id->namespaceIndex > 0) {
+        memcpy(pos, "ns=", 3);
+        pos += 3;
+        len = strlen((char*)nsStr);
+        memcpy(pos, nsStr, len);
+        pos += len;
+        *pos++ = ';';
+    }
+
+    /* Encode the identifier */
+    switch(id->identifierType) {
+    case UA_NODEIDTYPE_NUMERIC:
+        memcpy(pos, "i=", 2);
+        pos += 2;
+        len = strlen((char*)numIdStr);
+        memcpy(pos, numIdStr, len);
+        pos += len;
+        break;
+    case UA_NODEIDTYPE_STRING:
+        memcpy(pos, "s=", 2);
+        pos += 2;
+        pos += UA_String_escapeInsert(pos, id->identifier.string, idEsc);
+        break;
+    case UA_NODEIDTYPE_GUID:
+        memcpy(pos, "g=", 2);
+        pos += 2;
+        UA_Guid_to_hex(&id->identifier.guid, pos, true);
+        pos += 36;
+        break;
+    case UA_NODEIDTYPE_BYTESTRING:
+        memcpy(pos, "b=", 2);
+        pos += 2;
+        /* Use base64url encoding for percent-escaping.
+         * Replace +/ with -_ and remove the padding. */
+        u8 *bpos = pos;
+        pos += UA_base64_buf(id->identifier.byteString.data,
+                             id->identifier.byteString.length, pos);
+        if(idEsc == UA_ESCAPING_PERCENT ||
+           idEsc == UA_ESCAPING_PERCENT_EXTENDED) {
+            while(pos > bpos && pos[-1] == '=')
+                pos--;
+            for(; bpos < pos; bpos++) {
+                if(*bpos == '+') *bpos = '-';
+                else if(*bpos == '/') *bpos = '_';
+            }
+        }
+        break;
+    }
+    return pos;
+}
 
 UA_StatusCode
-UA_NodeId_print(const UA_NodeId *id, UA_String *output) {
-    /* Compute the string length */
-    char nsStr[6];
-    size_t nsStrSize = 0;
-    char numIdStr[11];
-    size_t numIdStrSize = 0;
-    size_t idLen = nodeIdSize(id, nsStr, &nsStrSize, numIdStr, &numIdStrSize);
+nodeId_printEscape(const UA_NodeId *id, UA_String *output,
+                   const UA_NamespaceMapping *nsMapping, UA_Escaping idEsc) {
+    /* Try to map the NamespaceIndex to the Uri */
+    UA_String nsUri = UA_STRING_NULL;
+    if(id->namespaceIndex > 0 && nsMapping)
+        UA_NamespaceMapping_index2Uri(nsMapping, id->namespaceIndex, &nsUri);
+
+    /* Compute the string length and print numerical identifiers. */
+    u8 nsStr[7];
+    u8 numIdStr[12];
+    size_t idLen = nodeIdSize(id, nsStr, numIdStr, nsUri, idEsc);
     if(idLen == 0)
         return UA_STATUSCODE_BADINTERNALERROR;
 
@@ -495,27 +1051,107 @@ UA_NodeId_print(const UA_NodeId *id, UA_String *output) {
     }
 
     /* Print the NodeId */
-    char *pos = (char*)output->data;
-    PRINT_NODEID;
-
-    UA_assert(output->length == (size_t)((UA_Byte*)pos - output->data));
+    u8 *pos = printNodeIdBody(id, nsUri, nsStr, numIdStr, output->data, nsMapping, idEsc);
+    output->length = (size_t)(pos - output->data);
     return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_NodeId_printEx(const UA_NodeId *id, UA_String *output,
+                  const UA_NamespaceMapping *nsMapping) {
+    return nodeId_printEscape(id, output, nsMapping, UA_ESCAPING_NONE);
+}
+
+UA_StatusCode
+UA_NodeId_print(const UA_NodeId *id, UA_String *output) {
+    return UA_NodeId_printEx(id, output, NULL);
+}
+
+UA_NodeId UA_NODEID(const char *chars) {
+    UA_NodeId id;
+    UA_NodeId_parse(&id, UA_STRING((char*)(uintptr_t)chars));
+    return id;
 }
 
 /* ExpandedNodeId */
 static void
-ExpandedNodeId_clear(UA_ExpandedNodeId *p, const UA_DataType *_) {
-    NodeId_clear(&p->nodeId, _);
-    String_clear(&p->namespaceUri, NULL);
+ExpandedNodeId_clear(void *p, const UA_DataType *_) {
+    UA_ExpandedNodeId *id = (UA_ExpandedNodeId*)p;
+    NodeId_clear(&id->nodeId, NULL);
+    String_clear(&id->namespaceUri, NULL);
 }
 
 static UA_StatusCode
-ExpandedNodeId_copy(UA_ExpandedNodeId const *src, UA_ExpandedNodeId *dst,
-                    const UA_DataType *_) {
-    UA_StatusCode retval = NodeId_copy(&src->nodeId, &dst->nodeId, NULL);
-    retval |= String_copy(&src->namespaceUri, &dst->namespaceUri, NULL);
-    dst->serverIndex = src->serverIndex;
+ExpandedNodeId_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_ExpandedNodeId *srcE = (const UA_ExpandedNodeId *)src;
+    UA_ExpandedNodeId *dstE = (UA_ExpandedNodeId*)dst;
+    UA_StatusCode retval = NodeId_copy(&srcE->nodeId, &dstE->nodeId, NULL);
+    retval |= String_copy(&srcE->namespaceUri, &dstE->namespaceUri, NULL);
+    dstE->serverIndex = srcE->serverIndex;
     return retval;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID_NUMERIC(UA_UInt16 nsIndex, UA_UInt32 identifier) {
+    UA_ExpandedNodeId id;
+    memset(&id, 0, sizeof(UA_ExpandedNodeId));
+    id.nodeId = UA_NODEID_NUMERIC(nsIndex, identifier);
+    return id;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID_STRING(UA_UInt16 nsIndex, char *chars) {
+    UA_ExpandedNodeId id;
+    memset(&id, 0, sizeof(UA_ExpandedNodeId));
+    id.nodeId = UA_NODEID_STRING(nsIndex, chars);
+    return id;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID_STRING_ALLOC(UA_UInt16 nsIndex, const char *chars) {
+    UA_ExpandedNodeId id;
+    memset(&id, 0, sizeof(UA_ExpandedNodeId));
+    id.nodeId = UA_NODEID_STRING_ALLOC(nsIndex, chars);
+    return id;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID_STRING_GUID(UA_UInt16 nsIndex, UA_Guid guid) {
+    UA_ExpandedNodeId id;
+    memset(&id, 0, sizeof(UA_ExpandedNodeId));
+    id.nodeId = UA_NODEID_GUID(nsIndex, guid);
+    return id;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID_BYTESTRING(UA_UInt16 nsIndex, char *chars) {
+    UA_ExpandedNodeId id;
+    memset(&id, 0, sizeof(UA_ExpandedNodeId));
+    id.nodeId = UA_NODEID_BYTESTRING(nsIndex, chars);
+    return id;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID_BYTESTRING_ALLOC(UA_UInt16 nsIndex, const char *chars) {
+    UA_ExpandedNodeId id;
+    memset(&id, 0, sizeof(UA_ExpandedNodeId));
+    id.nodeId = UA_NODEID_BYTESTRING_ALLOC(nsIndex, chars);
+    return id;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID_NODEID(UA_NodeId nodeId) {
+    UA_ExpandedNodeId id;
+    memset(&id, 0, sizeof(UA_ExpandedNodeId));
+    id.nodeId = nodeId;
+    return id;
+}
+
+UA_ExpandedNodeId
+UA_EXPANDEDNODEID(const char *chars) {
+    UA_ExpandedNodeId id;
+    UA_ExpandedNodeId_parse(&id, UA_STRING((char*)(uintptr_t)chars));
+    return id;
 }
 
 UA_Boolean
@@ -540,33 +1176,37 @@ UA_ExpandedNodeId_hash(const UA_ExpandedNodeId *n) {
 }
 
 UA_StatusCode
-UA_ExpandedNodeId_print(const UA_ExpandedNodeId *eid, UA_String *output) {
-    /* Don't print the namespace-index if a NamespaceUri is set */
-    UA_NodeId stackid = eid->nodeId;
-    UA_NodeId *id = &stackid; /* for the print-macro below */
-    if(eid->namespaceUri.data != NULL)
-        id->namespaceIndex = 0;
+UA_ExpandedNodeId_printEx(const UA_ExpandedNodeId *eid, UA_String *output,
+                          const UA_NamespaceMapping *nsMapping,
+                          size_t serverUrisSize, const UA_String *serverUris) {
+    /* Try to map the NamespaceIndex to the Uri */
+    UA_String nsUri = eid->namespaceUri;
+    if(nsUri.data == NULL && eid->nodeId.namespaceIndex > 0 && nsMapping)
+        UA_NamespaceMapping_index2Uri(nsMapping, eid->nodeId.namespaceIndex, &nsUri);
 
-    /* Compute the string length */
-    char nsStr[6];
-    size_t nsStrSize = 0;
-    char numIdStr[11];
-    size_t numIdStrSize = 0;
-    size_t idLen = nodeIdSize(id, nsStr, &nsStrSize, numIdStr, &numIdStrSize);
-    if(idLen == 0)
-        return UA_STATUSCODE_BADINTERNALERROR;
+    /* Try to map the ServerIndex to a Uri */
+    UA_String srvUri = UA_STRING_NULL;
+    if(eid->serverIndex > 0 && eid->serverIndex < serverUrisSize)
+        srvUri = serverUris[eid->serverIndex];
 
+    /* No special escaping for ExpandedNodeIds */
+    UA_Escaping idEsc = UA_ESCAPING_NONE;
+
+    /* Compute the NodeId string length */
+    u8 nsStr[7];
+    u8 numIdStr[12];
     char srvIdxStr[11];
     size_t srvIdxSize = 0;
-    if(eid->serverIndex != 0) {
+    size_t idLen = nodeIdSize(&eid->nodeId, nsStr, numIdStr, nsUri, idEsc);
+    if(idLen == 0)
+        return UA_STATUSCODE_BADINTERNALERROR;
+    if(srvUri.length  > 0) {
+        idLen += 5; /* svu=; */
+        idLen += UA_String_escapedSize(srvUri, UA_ESCAPING_PERCENT);
+    } else if(eid->serverIndex > 0) {
         idLen += 5; /* svr=; */
         srvIdxSize = itoaUnsigned(eid->serverIndex, srvIdxStr, 10);
         idLen += srvIdxSize;
-    }
-
-    if(eid->namespaceUri.data != NULL) {
-        idLen += 5; /* nsu=; */
-        idLen += eid->namespaceUri.length;
     }
 
     /* Allocate memory if required */
@@ -580,9 +1220,14 @@ UA_ExpandedNodeId_print(const UA_ExpandedNodeId *eid, UA_String *output) {
         output->length = idLen;
     }
 
-    /* Encode the ServerIndex */
-    char *pos = (char*)output->data;
-    if(eid->serverIndex != 0) {
+    /* Encode the ServerIndex or ServerUrl */
+    u8 *pos = output->data;
+    if(srvUri.length  > 0) {
+        memcpy(pos, "svu=", 4);
+        pos += 4;
+        pos += UA_String_escapeInsert(pos, srvUri, UA_ESCAPING_PERCENT);
+        *pos++ = ';';
+    } else if(eid->serverIndex > 0) {
         memcpy(pos, "svr=", 4);
         pos += 4;
         memcpy(pos, srvIdxStr, srvIdxSize);
@@ -590,35 +1235,32 @@ UA_ExpandedNodeId_print(const UA_ExpandedNodeId *eid, UA_String *output) {
         *pos++ = ';';
     }
 
-    /* Encode the NamespaceUri */
-    if(eid->namespaceUri.data != NULL) {
-        memcpy(pos, "nsu=", 4);
-        pos += 4;
-        memcpy(pos, eid->namespaceUri.data, eid->namespaceUri.length);
-        pos += eid->namespaceUri.length;
-        *pos++ = ';';
-    }
-
     /* Print the NodeId */
-    PRINT_NODEID;
-
-    UA_assert(output->length == (size_t)((UA_Byte*)pos - output->data));
+    pos = printNodeIdBody(&eid->nodeId, nsUri, nsStr, numIdStr, pos, nsMapping, idEsc);
+    output->length = (size_t)(pos - output->data);
     return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_ExpandedNodeId_print(const UA_ExpandedNodeId *eid, UA_String *output) {
+    return UA_ExpandedNodeId_printEx(eid, output, NULL, 0, NULL);
 }
 
 /* ExtensionObject */
 static void
-ExtensionObject_clear(UA_ExtensionObject *p, const UA_DataType *_) {
-    switch(p->encoding) {
+ExtensionObject_clear(void *p, const UA_DataType *_) {
+    UA_ExtensionObject *eo = (UA_ExtensionObject *)p;
+    switch(eo->encoding) {
     case UA_EXTENSIONOBJECT_ENCODED_NOBODY:
     case UA_EXTENSIONOBJECT_ENCODED_BYTESTRING:
     case UA_EXTENSIONOBJECT_ENCODED_XML:
-        NodeId_clear(&p->content.encoded.typeId, NULL);
-        String_clear(&p->content.encoded.body, NULL);
+    case UA_EXTENSIONOBJECT_ENCODED_JSON:
+        NodeId_clear(&eo->content.encoded.typeId, NULL);
+        String_clear(&eo->content.encoded.body, NULL);
         break;
     case UA_EXTENSIONOBJECT_DECODED:
-        if(p->content.decoded.data)
-            UA_delete(p->content.decoded.data, p->content.decoded.type);
+        if(eo->content.decoded.data)
+            UA_delete(eo->content.decoded.data, eo->content.decoded.type);
         break;
     default:
         break;
@@ -626,28 +1268,31 @@ ExtensionObject_clear(UA_ExtensionObject *p, const UA_DataType *_) {
 }
 
 static UA_StatusCode
-ExtensionObject_copy(UA_ExtensionObject const *src, UA_ExtensionObject *dst,
-                     const UA_DataType *_) {
+ExtensionObject_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_ExtensionObject *srcE = (const UA_ExtensionObject *)src;
+    UA_ExtensionObject *dstE = (UA_ExtensionObject *)dst;
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    switch(src->encoding) {
+    switch(srcE->encoding) {
     case UA_EXTENSIONOBJECT_ENCODED_NOBODY:
     case UA_EXTENSIONOBJECT_ENCODED_BYTESTRING:
     case UA_EXTENSIONOBJECT_ENCODED_XML:
-        dst->encoding = src->encoding;
-        retval = NodeId_copy(&src->content.encoded.typeId,
-                             &dst->content.encoded.typeId, NULL);
+    case UA_EXTENSIONOBJECT_ENCODED_JSON:
+        dstE->encoding = srcE->encoding;
+        retval = NodeId_copy(&srcE->content.encoded.typeId,
+                             &dstE->content.encoded.typeId, NULL);
         /* ByteString -> copy as string */
-        retval |= String_copy(&src->content.encoded.body,
-                              &dst->content.encoded.body, NULL);
+        retval |= String_copy(&srcE->content.encoded.body,
+                              &dstE->content.encoded.body, NULL);
         break;
     case UA_EXTENSIONOBJECT_DECODED:
     case UA_EXTENSIONOBJECT_DECODED_NODELETE:
-        if(!src->content.decoded.type || !src->content.decoded.data)
+        if(!srcE->content.decoded.type || !srcE->content.decoded.data)
             return UA_STATUSCODE_BADINTERNALERROR;
-        dst->encoding = UA_EXTENSIONOBJECT_DECODED;
-        dst->content.decoded.type = src->content.decoded.type;
-        retval = UA_Array_copy(src->content.decoded.data, 1,
-            &dst->content.decoded.data, src->content.decoded.type);
+        dstE->encoding = UA_EXTENSIONOBJECT_DECODED;
+        dstE->content.decoded.type = srcE->content.decoded.type;
+        retval = UA_Array_copy(srcE->content.decoded.data, 1,
+                               &dstE->content.decoded.data,
+                               srcE->content.decoded.type);
         break;
     default:
         break;
@@ -698,43 +1343,83 @@ UA_ExtensionObject_setValueCopy(UA_ExtensionObject *eo,
     return UA_STATUSCODE_GOOD;
 }
 
+UA_Boolean
+UA_ExtensionObject_hasDecodedType(const UA_ExtensionObject *eo,
+                                  const UA_DataType *type) {
+    if(eo->encoding != UA_EXTENSIONOBJECT_DECODED &&
+       eo->encoding != UA_EXTENSIONOBJECT_DECODED_NODELETE)
+        return false;
+    return (eo->content.decoded.data != NULL &&
+            eo->content.decoded.type == type);
+}
+
 /* Variant */
+UA_Boolean
+UA_Variant_isEmpty(const UA_Variant *v) {
+    return v->type == NULL;
+}
+
+UA_Boolean
+UA_Variant_isScalar(const UA_Variant *v) {
+    return (v->type != NULL && v->arrayLength == 0 &&
+            v->data > UA_EMPTY_ARRAY_SENTINEL);
+}
+
+UA_Boolean
+UA_Variant_hasScalarType(const UA_Variant *v, const UA_DataType *type) {
+    return UA_Variant_isScalar(v) && type == v->type;
+}
+
+UA_Boolean
+UA_Variant_isArray(const UA_Variant *v) {
+    return (v->type != NULL && !UA_Variant_isScalar(v));
+}
+
+UA_Boolean
+UA_Variant_hasArrayType(const UA_Variant *v, const UA_DataType *type) {
+    return (!UA_Variant_isScalar(v)) && type == v->type;
+}
+
 static void
-Variant_clear(UA_Variant *p, const UA_DataType *_) {
+Variant_clear(void *p, const UA_DataType *_) {
+    UA_Variant *v = (UA_Variant *)p;
+
     /* The content is "borrowed" */
-    if(p->storageType == UA_VARIANT_DATA_NODELETE)
+    if(v->storageType == UA_VARIANT_DATA_NODELETE)
         return;
 
     /* Delete the value */
-    if(p->type && p->data > UA_EMPTY_ARRAY_SENTINEL) {
-        if(p->arrayLength == 0)
-            p->arrayLength = 1;
-        UA_Array_delete(p->data, p->arrayLength, p->type);
-        p->data = NULL;
+    if(v->type && v->data > UA_EMPTY_ARRAY_SENTINEL) {
+        if(v->arrayLength == 0)
+            v->arrayLength = 1;
+        UA_Array_delete(v->data, v->arrayLength, v->type);
+        v->data = NULL;
     }
 
     /* Delete the array dimensions */
-    if((void*)p->arrayDimensions > UA_EMPTY_ARRAY_SENTINEL)
-        UA_free(p->arrayDimensions);
+    if((void*)v->arrayDimensions > UA_EMPTY_ARRAY_SENTINEL)
+        UA_free(v->arrayDimensions);
 }
 
 static UA_StatusCode
-Variant_copy(UA_Variant const *src, UA_Variant *dst, const UA_DataType *_) {
-    size_t length = src->arrayLength;
-    if(UA_Variant_isScalar(src))
+Variant_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_Variant *srcV = (const UA_Variant *)src;
+    UA_Variant *dstV = (UA_Variant *)dst;
+    size_t length = srcV->arrayLength;
+    if(UA_Variant_isScalar(srcV))
         length = 1;
-    UA_StatusCode retval = UA_Array_copy(src->data, length,
-                                         &dst->data, src->type);
+    UA_StatusCode retval = UA_Array_copy(srcV->data, length,
+                                         &dstV->data, srcV->type);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
-    dst->arrayLength = src->arrayLength;
-    dst->type = src->type;
-    if(src->arrayDimensions) {
-        retval = UA_Array_copy(src->arrayDimensions, src->arrayDimensionsSize,
-            (void**)&dst->arrayDimensions, &UA_TYPES[UA_TYPES_INT32]);
+    dstV->arrayLength = srcV->arrayLength;
+    dstV->type = srcV->type;
+    if(srcV->arrayDimensions) {
+        retval = UA_Array_copy(srcV->arrayDimensions, srcV->arrayDimensionsSize,
+            (void**)&dstV->arrayDimensions, &UA_TYPES[UA_TYPES_INT32]);
         if(retval != UA_STATUSCODE_GOOD)
             return retval;
-        dst->arrayDimensionsSize = src->arrayDimensionsSize;
+        dstV->arrayDimensionsSize = srcV->arrayDimensionsSize;
     }
     return UA_STATUSCODE_GOOD;
 }
@@ -811,8 +1496,11 @@ checkAdjustRange(const UA_Variant *v, UA_NumericRange *range) {
     /* Check that the number of elements in the variant matches the array
      * dimensions */
     size_t elements = 1;
-    for(size_t i = 0; i < dims_count; ++i)
+    for(size_t i = 0; i < dims_count; ++i) {
+        if(dims[i] != 0 && elements > SIZE_MAX / dims[i])
+            return UA_STATUSCODE_BADINTERNALERROR;
         elements *= dims[i];
+    }
     if(elements != v->arrayLength)
         return UA_STATUSCODE_BADINTERNALERROR;
 
@@ -875,6 +1563,11 @@ computeStrides(const UA_Variant *v, const UA_NumericRange range,
             *block = running_dimssize * dimrange;
             *stride = running_dimssize * dims[k];
         }
+        /* Overflow in running_dimssize is only possible when the Variant has
+         * passed a corrupted state through checkAdjustRange. Guard here as a
+         * defence-in-depth measure. */
+        if(running_dimssize != 0 && dims[k] > SIZE_MAX / running_dimssize)
+            break;
         *first += running_dimssize * range.dimensions[k].min;
         running_dimssize *= dims[k];
     }
@@ -1078,7 +1771,7 @@ Variant_setRange(UA_Variant *v, void *array, size_t arraySize,
 
     /* Compute the strides */
     size_t count, block, stride, first;
-    computeStrides(v, range, &count, &block, &stride, &first);
+    computeStrides(v, thisrange, &count, &block, &stride, &first);
     if(count != arraySize)
         return UA_STATUSCODE_BADINDEXRANGEINVALID;
 
@@ -1107,7 +1800,7 @@ Variant_setRange(UA_Variant *v, void *array, size_t arraySize,
 
     /* If members were moved, initialize original array to prevent reuse */
     if(!copy && !v->type->pointerFree)
-        memset(array, 0, sizeof(elem_size)*arraySize);
+        memset(array, 0, elem_size*arraySize);
 
     return retval;
 }
@@ -1126,40 +1819,60 @@ UA_Variant_setRangeCopy(UA_Variant *v, const void * UA_RESTRICT array,
 }
 
 /* LocalizedText */
+UA_LocalizedText
+UA_LOCALIZEDTEXT(char *locale, char *text) {
+    UA_LocalizedText lt;
+    lt.locale = UA_STRING(locale);
+    lt.text = UA_STRING(text);
+    return lt;
+}
+
+UA_LocalizedText
+UA_LOCALIZEDTEXT_ALLOC(const char *locale, const char *text) {
+    UA_LocalizedText lt;
+    lt.locale = UA_STRING_ALLOC(locale);
+    lt.text = UA_STRING_ALLOC(text);
+    return lt;
+}
+
 static void
-LocalizedText_clear(UA_LocalizedText *p, const UA_DataType *_) {
-    String_clear(&p->locale, NULL);
-    String_clear(&p->text, NULL);
+LocalizedText_clear(void *p, const UA_DataType *_) {
+    UA_LocalizedText *lt = (UA_LocalizedText *)p;
+    String_clear(&lt->locale, NULL);
+    String_clear(&lt->text, NULL);
 }
 
 static UA_StatusCode
-LocalizedText_copy(UA_LocalizedText const *src, UA_LocalizedText *dst,
-                   const UA_DataType *_) {
-    UA_StatusCode retval = String_copy(&src->locale, &dst->locale, NULL);
-    retval |= String_copy(&src->text, &dst->text, NULL);
+LocalizedText_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_LocalizedText *srcL = (const UA_LocalizedText *)src;
+    UA_LocalizedText *dstL = (UA_LocalizedText *)dst;
+    UA_StatusCode retval = String_copy(&srcL->locale, &dstL->locale, NULL);
+    retval |= String_copy(&srcL->text, &dstL->text, NULL);
     return retval;
 }
 
 /* DataValue */
 static void
-DataValue_clear(UA_DataValue *p, const UA_DataType *_) {
-    Variant_clear(&p->value, NULL);
+DataValue_clear(void *p, const UA_DataType *_) {
+    UA_DataValue *dv = (UA_DataValue *)p;
+    Variant_clear(&dv->value, NULL);
 }
 
 static UA_StatusCode
-DataValue_copy(UA_DataValue const *src, UA_DataValue *dst,
-               const UA_DataType *_) {
-    memcpy(dst, src, sizeof(UA_DataValue));
-    UA_Variant_init(&dst->value);
-    UA_StatusCode retval = Variant_copy(&src->value, &dst->value, NULL);
+DataValue_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_DataValue *srcD = (const UA_DataValue*)src;
+    UA_DataValue *dstD = (UA_DataValue *)dst;
+    memcpy(dstD, srcD, sizeof(UA_DataValue));
+    UA_Variant_init(&dstD->value);
+    UA_StatusCode retval = Variant_copy(&srcD->value, &dstD->value, NULL);
     if(retval != UA_STATUSCODE_GOOD)
-        DataValue_clear(dst, NULL);
+        DataValue_clear(dstD, NULL);
     return retval;
 }
 
 UA_StatusCode
-UA_DataValue_copyVariantRange(const UA_DataValue *src, UA_DataValue * UA_RESTRICT dst,
-                              const UA_NumericRange range) {
+UA_DataValue_copyRange(const UA_DataValue *src, UA_DataValue * UA_RESTRICT dst,
+                       const UA_NumericRange range) {
     memcpy(dst, src, sizeof(UA_DataValue));
     UA_Variant_init(&dst->value);
     UA_StatusCode retval = UA_Variant_copyRange(&src->value, &dst->value, range);
@@ -1170,32 +1883,35 @@ UA_DataValue_copyVariantRange(const UA_DataValue *src, UA_DataValue * UA_RESTRIC
 
 /* DiagnosticInfo */
 static void
-DiagnosticInfo_clear(UA_DiagnosticInfo *p, const UA_DataType *_) {
-    String_clear(&p->additionalInfo, NULL);
-    if(p->hasInnerDiagnosticInfo && p->innerDiagnosticInfo) {
-        DiagnosticInfo_clear(p->innerDiagnosticInfo, NULL);
-        UA_free(p->innerDiagnosticInfo);
+DiagnosticInfo_clear(void *p, const UA_DataType *_) {
+    UA_DiagnosticInfo *di = (UA_DiagnosticInfo *)p;
+
+    String_clear(&di->additionalInfo, NULL);
+    if(di->hasInnerDiagnosticInfo && di->innerDiagnosticInfo) {
+        DiagnosticInfo_clear(di->innerDiagnosticInfo, NULL);
+        UA_free(di->innerDiagnosticInfo);
     }
 }
 
 static UA_StatusCode
-DiagnosticInfo_copy(UA_DiagnosticInfo const *src, UA_DiagnosticInfo *dst,
-                    const UA_DataType *_) {
-    memcpy(dst, src, sizeof(UA_DiagnosticInfo));
-    UA_String_init(&dst->additionalInfo);
-    dst->innerDiagnosticInfo = NULL;
+DiagnosticInfo_copy(const void *src, void *dst, const UA_DataType *_) {
+    const UA_DiagnosticInfo *srcD = (const UA_DiagnosticInfo *)src;
+    UA_DiagnosticInfo *dstD = (UA_DiagnosticInfo *)dst;
+    memcpy(dstD, srcD, sizeof(UA_DiagnosticInfo));
+    UA_String_init(&dstD->additionalInfo);
+    dstD->innerDiagnosticInfo = NULL;
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    if(src->hasAdditionalInfo)
-        retval = String_copy(&src->additionalInfo, &dst->additionalInfo, NULL);
-    if(src->hasInnerDiagnosticInfo && src->innerDiagnosticInfo) {
-        dst->innerDiagnosticInfo = (UA_DiagnosticInfo*)
+    if(srcD->hasAdditionalInfo)
+        retval = String_copy(&srcD->additionalInfo, &dstD->additionalInfo, NULL);
+    if(srcD->hasInnerDiagnosticInfo && srcD->innerDiagnosticInfo) {
+        dstD->innerDiagnosticInfo = (UA_DiagnosticInfo*)
             UA_malloc(sizeof(UA_DiagnosticInfo));
-        if(UA_LIKELY(dst->innerDiagnosticInfo != NULL)) {
-            retval |= DiagnosticInfo_copy(src->innerDiagnosticInfo,
-                                          dst->innerDiagnosticInfo, NULL);
-            dst->hasInnerDiagnosticInfo = true;
+        if(UA_LIKELY(dstD->innerDiagnosticInfo != NULL)) {
+            retval |= DiagnosticInfo_copy(srcD->innerDiagnosticInfo,
+                                          dstD->innerDiagnosticInfo, NULL);
+            dstD->hasInnerDiagnosticInfo = true;
         } else {
-            dst->hasInnerDiagnosticInfo = false;
+            dstD->hasInnerDiagnosticInfo = false;
             retval |= UA_STATUSCODE_BADOUTOFMEMORY;
         }
     }
@@ -1212,33 +1928,47 @@ UA_new(const UA_DataType *type) {
     return p;
 }
 
+void UA_init(void *p, const UA_DataType *type) {
+    memset(p, 0, type->memSize);
+}
+
 static UA_StatusCode
-copyByte(const u8 *src, u8 *dst, const UA_DataType *_) {
-    *dst = *src;
+copyByte(const void *src, void *dst, const UA_DataType *_) {
+    const u8 *src8 = (const u8 *)src;
+    u8 *dst8 = (u8 *)dst;
+    *dst8 = *src8;
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-copy2Byte(const u16 *src, u16 *dst, const UA_DataType *_) {
-    *dst = *src;
+copy2Byte(const void *src, void *dst, const UA_DataType *_) {
+    const u16 *src16 = (const u16 *)src;
+    u16 *dst16 = (u16 *)dst;
+    *dst16 = *src16;
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-copy4Byte(const u32 *src, u32 *dst, const UA_DataType *_) {
-    *dst = *src;
+copy4Byte(const void *src, void *dst, const UA_DataType *_) {
+    const u32 *src32 = (const u32 *)src;
+    u32 *dst32 = (u32 *)dst;
+    *dst32 = *src32;
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-copy8Byte(const u64 *src, u64 *dst, const UA_DataType *_) {
-    *dst = *src;
+copy8Byte(const void *src, void *dst, const UA_DataType *_) {
+    const u64 *src64 = (const u64 *)src;
+    u64 *dst64 = (u64 *)dst;
+    *dst64 = *src64;
     return UA_STATUSCODE_GOOD;
 }
 
 static UA_StatusCode
-copyGuid(const UA_Guid *src, UA_Guid *dst, const UA_DataType *_) {
-    *dst = *src;
+copyGuid(const void *src, void *dst, const UA_DataType *_) {
+    const UA_Guid *srcG = (const UA_Guid*)src;
+    UA_Guid *dstG = (UA_Guid*)dst;
+    *dstG = *srcG;
     return UA_STATUSCODE_GOOD;
 }
 
@@ -1335,37 +2065,37 @@ copyNotImplemented(const void *src, void *dst, const UA_DataType *type) {
 }
 
 const UA_copySignature copyJumpTable[UA_DATATYPEKINDS] = {
-    (UA_copySignature)copyByte, /* Boolean */
-    (UA_copySignature)copyByte, /* SByte */
-    (UA_copySignature)copyByte, /* Byte */
-    (UA_copySignature)copy2Byte, /* Int16 */
-    (UA_copySignature)copy2Byte, /* UInt16 */
-    (UA_copySignature)copy4Byte, /* Int32 */
-    (UA_copySignature)copy4Byte, /* UInt32 */
-    (UA_copySignature)copy8Byte, /* Int64 */
-    (UA_copySignature)copy8Byte, /* UInt64 */
-    (UA_copySignature)copy4Byte, /* Float */
-    (UA_copySignature)copy8Byte, /* Double */
-    (UA_copySignature)String_copy,
-    (UA_copySignature)copy8Byte, /* DateTime */
-    (UA_copySignature)copyGuid, /* Guid */
-    (UA_copySignature)String_copy, /* ByteString */
-    (UA_copySignature)String_copy, /* XmlElement */
-    (UA_copySignature)NodeId_copy,
-    (UA_copySignature)ExpandedNodeId_copy,
-    (UA_copySignature)copy4Byte, /* StatusCode */
-    (UA_copySignature)QualifiedName_copy,
-    (UA_copySignature)LocalizedText_copy,
-    (UA_copySignature)ExtensionObject_copy,
-    (UA_copySignature)DataValue_copy,
-    (UA_copySignature)Variant_copy,
-    (UA_copySignature)DiagnosticInfo_copy,
-    (UA_copySignature)copyNotImplemented, /* Decimal */
-    (UA_copySignature)copy4Byte, /* Enumeration */
-    (UA_copySignature)copyStructure,
-    (UA_copySignature)copyStructure, /* Structure with Optional Fields */
-    (UA_copySignature)copyUnion, /* Union */
-    (UA_copySignature)copyNotImplemented /* BitfieldCluster*/
+    copyByte, /* Boolean */
+    copyByte, /* SByte */
+    copyByte, /* Byte */
+    copy2Byte, /* Int16 */
+    copy2Byte, /* UInt16 */
+    copy4Byte, /* Int32 */
+    copy4Byte, /* UInt32 */
+    copy8Byte, /* Int64 */
+    copy8Byte, /* UInt64 */
+    copy4Byte, /* Float */
+    copy8Byte, /* Double */
+    String_copy,
+    copy8Byte, /* DateTime */
+    copyGuid, /* Guid */
+    String_copy, /* ByteString */
+    String_copy, /* XmlElement */
+    NodeId_copy,
+    ExpandedNodeId_copy,
+    copy4Byte, /* StatusCode */
+    QualifiedName_copy,
+    LocalizedText_copy,
+    ExtensionObject_copy,
+    DataValue_copy,
+    Variant_copy,
+    DiagnosticInfo_copy,
+    copyNotImplemented, /* Decimal */
+    copy4Byte, /* Enumeration */
+    copyStructure,
+    copyStructure, /* Structure with Optional Fields */
+    copyUnion, /* Union */
+    copyNotImplemented /* BitfieldCluster*/
 };
 
 UA_StatusCode
@@ -1438,37 +2168,37 @@ static void nopClear(void *p, const UA_DataType *type) { }
 
 const
 UA_clearSignature clearJumpTable[UA_DATATYPEKINDS] = {
-    (UA_clearSignature)nopClear, /* Boolean */
-    (UA_clearSignature)nopClear, /* SByte */
-    (UA_clearSignature)nopClear, /* Byte */
-    (UA_clearSignature)nopClear, /* Int16 */
-    (UA_clearSignature)nopClear, /* UInt16 */
-    (UA_clearSignature)nopClear, /* Int32 */
-    (UA_clearSignature)nopClear, /* UInt32 */
-    (UA_clearSignature)nopClear, /* Int64 */
-    (UA_clearSignature)nopClear, /* UInt64 */
-    (UA_clearSignature)nopClear, /* Float */
-    (UA_clearSignature)nopClear, /* Double */
-    (UA_clearSignature)String_clear, /* String */
-    (UA_clearSignature)nopClear, /* DateTime */
-    (UA_clearSignature)nopClear, /* Guid */
-    (UA_clearSignature)String_clear, /* ByteString */
-    (UA_clearSignature)String_clear, /* XmlElement */
-    (UA_clearSignature)NodeId_clear,
-    (UA_clearSignature)ExpandedNodeId_clear,
-    (UA_clearSignature)nopClear, /* StatusCode */
-    (UA_clearSignature)QualifiedName_clear,
-    (UA_clearSignature)LocalizedText_clear,
-    (UA_clearSignature)ExtensionObject_clear,
-    (UA_clearSignature)DataValue_clear,
-    (UA_clearSignature)Variant_clear,
-    (UA_clearSignature)DiagnosticInfo_clear,
-    (UA_clearSignature)nopClear, /* Decimal, not implemented */
-    (UA_clearSignature)nopClear, /* Enumeration */
-    (UA_clearSignature)clearStructure,
-    (UA_clearSignature)clearStructure, /* Struct with Optional Fields*/
-    (UA_clearSignature)clearUnion, /* Union*/
-    (UA_clearSignature)nopClear /* BitfieldCluster, not implemented*/
+    nopClear, /* Boolean */
+    nopClear, /* SByte */
+    nopClear, /* Byte */
+    nopClear, /* Int16 */
+    nopClear, /* UInt16 */
+    nopClear, /* Int32 */
+    nopClear, /* UInt32 */
+    nopClear, /* Int64 */
+    nopClear, /* UInt64 */
+    nopClear, /* Float */
+    nopClear, /* Double */
+    String_clear, /* String */
+    nopClear, /* DateTime */
+    nopClear, /* Guid */
+    String_clear, /* ByteString */
+    String_clear, /* XmlElement */
+    NodeId_clear,
+    ExpandedNodeId_clear,
+    nopClear, /* StatusCode */
+    QualifiedName_clear,
+    LocalizedText_clear,
+    ExtensionObject_clear,
+    DataValue_clear,
+    Variant_clear,
+    DiagnosticInfo_clear,
+    nopClear, /* Decimal, not implemented */
+    nopClear, /* Enumeration */
+    clearStructure,
+    clearStructure, /* Struct with Optional Fields*/
+    clearUnion, /* Union*/
+    nopClear /* BitfieldCluster, not implemented*/
 };
 
 void
@@ -1487,12 +2217,14 @@ UA_delete(void *p, const UA_DataType *type) {
 /* Value Ordering */
 /******************/
 
-#define UA_NUMERICORDER(NAME, TYPE)                                 \
-    static UA_Order                                                 \
-    NAME(const TYPE *p1, const TYPE *p2, const UA_DataType *type) { \
-        if(*p1 != *p2)                                              \
-            return (*p1 < *p2) ? UA_ORDER_LESS : UA_ORDER_MORE;     \
-        return UA_ORDER_EQ;                                         \
+#define UA_NUMERICORDER(NAME, TYPE)                                      \
+    static UA_Order                                                      \
+    NAME(const void *p1_, const void *p2_, const UA_DataType *type) {     \
+        const TYPE *p1 = (const TYPE*)p1_;                                \
+        const TYPE *p2 = (const TYPE*)p2_;                                \
+        if(*p1 != *p2)                                                    \
+            return (*p1 < *p2) ? UA_ORDER_LESS : UA_ORDER_MORE;           \
+        return UA_ORDER_EQ;                                               \
     }
 
 UA_NUMERICORDER(booleanOrder, UA_Boolean)
@@ -1505,10 +2237,12 @@ UA_NUMERICORDER(uInt32Order, UA_UInt32)
 UA_NUMERICORDER(int64Order, UA_Int64)
 UA_NUMERICORDER(uInt64Order, UA_UInt64)
 
-#define UA_FLOATORDER(NAME, TYPE)                                   \
-    static UA_Order                                                 \
-    NAME(const TYPE *p1, const TYPE *p2, const UA_DataType *type) { \
-        if(*p1 != *p2) {                                            \
+#define UA_FLOATORDER(NAME, TYPE)                                        \
+    static UA_Order                                                      \
+    NAME(const void *p1_, const void *p2_, const UA_DataType *type) {     \
+        const TYPE *p1 = (const TYPE*)p1_;                                \
+        const TYPE *p2 = (const TYPE*)p2_;                                \
+        if(*p1 != *p2) {                                                  \
             /* p1 is NaN */                                         \
             if(*p1 != *p1) {                                        \
                 if(*p2 != *p2)                                      \
@@ -1527,7 +2261,9 @@ UA_FLOATORDER(floatOrder, UA_Float)
 UA_FLOATORDER(doubleOrder, UA_Double)
 
 static UA_Order
-guidOrder(const UA_Guid *p1, const UA_Guid *p2, const UA_DataType *type) {
+guidOrder(const void *p1_, const void *p2_, const UA_DataType *type) {
+    const UA_Guid *p1 = (const UA_Guid*)p1_;
+    const UA_Guid *p2 = (const UA_Guid*)p2_;
     if(p1->data1 != p2->data1)
         return (p1->data1 < p2->data1) ? UA_ORDER_LESS : UA_ORDER_MORE;
     if(p1->data2 != p2->data2)
@@ -1541,7 +2277,9 @@ guidOrder(const UA_Guid *p1, const UA_Guid *p2, const UA_DataType *type) {
 }
 
 static UA_Order
-stringOrder(const UA_String *p1, const UA_String *p2, const UA_DataType *type) {
+stringOrder(const void *p1_, const void *p2_, const UA_DataType *type) {
+    const UA_String *p1 = (const UA_String*)p1_;
+    const UA_String *p2 = (const UA_String*)p2_;
     if(p1->length != p2->length)
         return (p1->length < p2->length) ? UA_ORDER_LESS : UA_ORDER_MORE;
     /* For zero-length arrays, every pointer not NULL is considered a
@@ -1556,7 +2294,9 @@ stringOrder(const UA_String *p1, const UA_String *p2, const UA_DataType *type) {
 }
 
 static UA_Order
-nodeIdOrder(const UA_NodeId *p1, const UA_NodeId *p2, const UA_DataType *_) {
+nodeIdOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_NodeId *p1 = (const UA_NodeId*)p1_;
+    const UA_NodeId *p2 = (const UA_NodeId*)p2_;
     /* Compare namespaceIndex */
     if(p1->namespaceIndex != p2->namespaceIndex)
         return (p1->namespaceIndex < p2->namespaceIndex) ? UA_ORDER_LESS : UA_ORDER_MORE;
@@ -1582,8 +2322,9 @@ nodeIdOrder(const UA_NodeId *p1, const UA_NodeId *p2, const UA_DataType *_) {
 }
 
 static UA_Order
-expandedNodeIdOrder(const UA_ExpandedNodeId *p1, const UA_ExpandedNodeId *p2,
-                    const UA_DataType *_) {
+expandedNodeIdOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_ExpandedNodeId *p1 = (const UA_ExpandedNodeId*)p1_;
+    const UA_ExpandedNodeId *p2 = (const UA_ExpandedNodeId*)p2_;
     if(p1->serverIndex != p2->serverIndex)
         return (p1->serverIndex < p2->serverIndex) ? UA_ORDER_LESS : UA_ORDER_MORE;
     UA_Order o = stringOrder(&p1->namespaceUri, &p2->namespaceUri, NULL);
@@ -1593,16 +2334,18 @@ expandedNodeIdOrder(const UA_ExpandedNodeId *p1, const UA_ExpandedNodeId *p2,
 }
 
 static UA_Order
-qualifiedNameOrder(const UA_QualifiedName *p1, const UA_QualifiedName *p2,
-                   const UA_DataType *_) {
+qualifiedNameOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_QualifiedName *p1 = (const UA_QualifiedName*)p1_;
+    const UA_QualifiedName *p2 = (const UA_QualifiedName*)p2_;
     if(p1->namespaceIndex != p2->namespaceIndex)
         return (p1->namespaceIndex < p2->namespaceIndex) ? UA_ORDER_LESS : UA_ORDER_MORE;
     return stringOrder(&p1->name, &p2->name, NULL);
 }
 
 static UA_Order
-localizedTextOrder(const UA_LocalizedText *p1, const UA_LocalizedText *p2,
-                   const UA_DataType *_) {
+localizedTextOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_LocalizedText *p1 = (const UA_LocalizedText*)p1_;
+    const UA_LocalizedText *p2 = (const UA_LocalizedText*)p2_;
     UA_Order o = stringOrder(&p1->locale, &p2->locale, NULL);
     if(o != UA_ORDER_EQ)
         return o;
@@ -1610,13 +2353,14 @@ localizedTextOrder(const UA_LocalizedText *p1, const UA_LocalizedText *p2,
 }
 
 static UA_Order
-extensionObjectOrder(const UA_ExtensionObject *p1, const UA_ExtensionObject *p2,
-                     const UA_DataType *_) {
+extensionObjectOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_ExtensionObject *p1 = (const UA_ExtensionObject*)p1_;
+    const UA_ExtensionObject *p2 = (const UA_ExtensionObject*)p2_;
     UA_ExtensionObjectEncoding enc1 = p1->encoding;
     UA_ExtensionObjectEncoding enc2 = p2->encoding;
-    if(enc1 > UA_EXTENSIONOBJECT_DECODED)
+    if(enc1 == UA_EXTENSIONOBJECT_DECODED_NODELETE)
         enc1 = UA_EXTENSIONOBJECT_DECODED;
-    if(enc2 > UA_EXTENSIONOBJECT_DECODED)
+    if(enc2 == UA_EXTENSIONOBJECT_DECODED_NODELETE)
         enc2 = UA_EXTENSIONOBJECT_DECODED;
     if(enc1 != enc2)
         return (enc1 < enc2) ? UA_ORDER_LESS : UA_ORDER_MORE;
@@ -1626,7 +2370,8 @@ extensionObjectOrder(const UA_ExtensionObject *p1, const UA_ExtensionObject *p2,
         return UA_ORDER_EQ;
 
     case UA_EXTENSIONOBJECT_ENCODED_BYTESTRING:
-    case UA_EXTENSIONOBJECT_ENCODED_XML: {
+    case UA_EXTENSIONOBJECT_ENCODED_XML:
+    case UA_EXTENSIONOBJECT_ENCODED_JSON: {
             UA_Order o = nodeIdOrder(&p1->content.encoded.typeId,
                                      &p2->content.encoded.typeId, NULL);
             if(o != UA_ORDER_EQ)
@@ -1674,7 +2419,9 @@ arrayOrder(const void *p1, size_t p1Length,
 }
 
 static UA_Order
-variantOrder(const UA_Variant *p1, const UA_Variant *p2, const UA_DataType *_) {
+variantOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_Variant *p1 = (const UA_Variant*)p1_;
+    const UA_Variant *p2 = (const UA_Variant*)p2_;
     if(p1->type != p2->type)
         return ((uintptr_t)p1->type < (uintptr_t)p2->type) ? UA_ORDER_LESS : UA_ORDER_MORE;
 
@@ -1709,7 +2456,9 @@ variantOrder(const UA_Variant *p1, const UA_Variant *p2, const UA_DataType *_) {
 }
 
 static UA_Order
-dataValueOrder(const UA_DataValue *p1, const UA_DataValue *p2, const UA_DataType *_) {
+dataValueOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_DataValue *p1 = (const UA_DataValue*)p1_;
+    const UA_DataValue *p2 = (const UA_DataValue*)p2_;
     /* Value */
     if(p1->hasValue != p2->hasValue)
         return (!p1->hasValue) ? UA_ORDER_LESS : UA_ORDER_MORE;
@@ -1755,8 +2504,9 @@ dataValueOrder(const UA_DataValue *p1, const UA_DataValue *p2, const UA_DataType
 }
 
 static UA_Order
-diagnosticInfoOrder(const UA_DiagnosticInfo *p1, const UA_DiagnosticInfo *p2,
-                    const UA_DataType *_) {
+diagnosticInfoOrder(const void *p1_, const void *p2_, const UA_DataType *_) {
+    const UA_DiagnosticInfo *p1 = (const UA_DiagnosticInfo*)p1_;
+    const UA_DiagnosticInfo *p2 = (const UA_DiagnosticInfo*)p2_;
     /* SymbolicId */
     if(p1->hasSymbolicId != p2->hasSymbolicId)
         return (!p1->hasSymbolicId) ? UA_ORDER_LESS : UA_ORDER_MORE;
@@ -1893,41 +2643,46 @@ notImplementedOrder(const void *p1, const void *p2, const UA_DataType *type) {
 
 const
 UA_orderSignature orderJumpTable[UA_DATATYPEKINDS] = {
-    (UA_orderSignature)booleanOrder,
-    (UA_orderSignature)sByteOrder,
-    (UA_orderSignature)byteOrder,
-    (UA_orderSignature)int16Order,
-    (UA_orderSignature)uInt16Order,
-    (UA_orderSignature)int32Order,
-    (UA_orderSignature)uInt32Order,
-    (UA_orderSignature)int64Order,
-    (UA_orderSignature)uInt64Order,
-    (UA_orderSignature)floatOrder,
-    (UA_orderSignature)doubleOrder,
-    (UA_orderSignature)stringOrder,
-    (UA_orderSignature)int64Order,  /* DateTime */
-    (UA_orderSignature)guidOrder,
-    (UA_orderSignature)stringOrder, /* ByteString */
-    (UA_orderSignature)stringOrder, /* XmlElement */
-    (UA_orderSignature)nodeIdOrder,
-    (UA_orderSignature)expandedNodeIdOrder,
-    (UA_orderSignature)uInt32Order, /* StatusCode */
-    (UA_orderSignature)qualifiedNameOrder,
-    (UA_orderSignature)localizedTextOrder,
-    (UA_orderSignature)extensionObjectOrder,
-    (UA_orderSignature)dataValueOrder,
-    (UA_orderSignature)variantOrder,
-    (UA_orderSignature)diagnosticInfoOrder,
+    booleanOrder,
+    sByteOrder,
+    byteOrder,
+    int16Order,
+    uInt16Order,
+    int32Order,
+    uInt32Order,
+    int64Order,
+    uInt64Order,
+    floatOrder,
+    doubleOrder,
+    stringOrder,
+    int64Order,  /* DateTime */
+    guidOrder,
+    stringOrder, /* ByteString */
+    stringOrder, /* XmlElement */
+    nodeIdOrder,
+    expandedNodeIdOrder,
+    uInt32Order, /* StatusCode */
+    qualifiedNameOrder,
+    localizedTextOrder,
+    extensionObjectOrder,
+    dataValueOrder,
+    variantOrder,
+    diagnosticInfoOrder,
     notImplementedOrder, /* Decimal, not implemented */
-    (UA_orderSignature)uInt32Order, /* Enumeration */
-    (UA_orderSignature)structureOrder,
-    (UA_orderSignature)structureOrder, /* Struct with Optional Fields*/
-    (UA_orderSignature)unionOrder, /* Union*/
+    uInt32Order, /* Enumeration */
+    structureOrder,
+    structureOrder, /* Struct with Optional Fields*/
+    unionOrder, /* Union*/
     notImplementedOrder /* BitfieldCluster, not implemented */
 };
 
 UA_Order UA_order(const void *p1, const void *p2, const UA_DataType *type) {
     return orderJumpTable[type->typeKind](p1, p2, type);
+}
+
+UA_Boolean
+UA_equal(const void *p1, const void *p2, const UA_DataType *type) {
+    return (UA_order(p1, p2, type) == UA_ORDER_EQ);
 }
 
 /******************/
@@ -1940,6 +2695,8 @@ UA_Array_new(size_t size, const UA_DataType *type) {
         return NULL;
     if(size == 0)
         return UA_EMPTY_ARRAY_SENTINEL;
+    if(size > SIZE_MAX / type->memSize)
+        return NULL;
     return UA_calloc(size, type->memSize);
 }
 
@@ -1959,13 +2716,17 @@ UA_Array_copy(const void *src, size_t size,
     if(UA_UNLIKELY(!type || !src))
         return UA_STATUSCODE_BADINTERNALERROR;
 
+    if(size > SIZE_MAX / type->memSize)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    size_t byteSize = size * type->memSize;
+
     /* calloc, so we don't have to check retval in every iteration of copying */
     *dst = UA_calloc(size, type->memSize);
     if(!*dst)
         return UA_STATUSCODE_BADOUTOFMEMORY;
 
     if(type->pointerFree) {
-        memcpy(*dst, src, type->memSize * size);
+        memcpy(*dst, src, byteSize);
         return UA_STATUSCODE_GOOD;
     }
 
@@ -1990,6 +2751,11 @@ UA_Array_resize(void **p, size_t *size, size_t newSize,
     if(*size == newSize)
         return UA_STATUSCODE_GOOD;
 
+    /* The old and new representations must fit into size_t. */
+    if(*size > SIZE_MAX / type->memSize ||
+       newSize > SIZE_MAX / type->memSize)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+
     /* Empty array? */
     if(newSize == 0) {
         UA_Array_delete(*p, *size, type);
@@ -1998,16 +2764,19 @@ UA_Array_resize(void **p, size_t *size, size_t newSize,
         return UA_STATUSCODE_GOOD;
     }
 
+    size_t newByteSize = newSize * type->memSize;
+
     /* Make a copy of the members that shall be removed. Realloc can fail during
      * trimming. So we cannot clear the members already here. */
     void *deleteMembers = NULL;
     if(newSize < *size && !type->pointerFree) {
         size_t deleteSize = *size - newSize;
-        deleteMembers = UA_malloc(deleteSize * type->memSize);
+        size_t deleteByteSize = deleteSize * type->memSize;
+        deleteMembers = UA_malloc(deleteByteSize);
         if(!deleteMembers)
             return UA_STATUSCODE_BADOUTOFMEMORY;
-        memcpy(deleteMembers, (void*)((uintptr_t)*p + (newSize * type->memSize)),
-               deleteSize * type->memSize); /* shallow copy */
+        memcpy(deleteMembers, (void*)((uintptr_t)*p + newByteSize),
+               deleteByteSize); /* shallow copy */
     }
 
     void *oldP = *p;
@@ -2015,7 +2784,7 @@ UA_Array_resize(void **p, size_t *size, size_t newSize,
         oldP = NULL;
 
     /* Realloc */
-    void *newP = UA_realloc(oldP, newSize * type->memSize);
+    void *newP = UA_realloc(oldP, newByteSize);
     if(!newP) {
         if(deleteMembers)
             UA_free(deleteMembers);
@@ -2025,8 +2794,9 @@ UA_Array_resize(void **p, size_t *size, size_t newSize,
     /* Clear removed members or initialize the new ones. Note that deleteMembers
      * depends on type->pointerFree. */
     if(newSize > *size) {
-        memset((void*)((uintptr_t)newP + (*size * type->memSize)), 0,
-               (newSize - *size) * type->memSize);
+        size_t oldByteSize = *size * type->memSize;
+        memset((void*)((uintptr_t)newP + oldByteSize), 0,
+               newByteSize - oldByteSize);
     } else if(deleteMembers) {
         UA_Array_delete(deleteMembers, *size - newSize, type);
     }
@@ -2042,6 +2812,8 @@ UA_Array_append(void **p, size_t *size, void *newElem,
                 const UA_DataType *type) {
     /* Resize the array */
     size_t oldSize = *size;
+    if(oldSize == SIZE_MAX)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
     UA_StatusCode res = UA_Array_resize(p, size, oldSize+1, type);
     if(res != UA_STATUSCODE_GOOD)
         return res;
@@ -2223,4 +2995,76 @@ UA_NumericRange_parse(UA_NumericRange *range, const UA_String str) {
     }
 
     return retval;
+}
+
+UA_NumericRange
+UA_NUMERICRANGE(const char *s) {
+    UA_NumericRange nr;
+    memset(&nr, 0, sizeof(nr));
+    UA_NumericRange_parse(&nr, UA_STRING((char*)(uintptr_t)s));
+    return nr;
+}
+
+/*********************/
+/* Namespace Mapping */
+/*********************/
+
+UA_UInt16
+UA_NamespaceMapping_local2Remote(const UA_NamespaceMapping *nm,
+                                 UA_UInt16 localIndex) {
+    if(localIndex >= nm->local2remoteSize)
+        return UA_UINT16_MAX - localIndex;
+    return nm->local2remote[localIndex];
+}
+
+UA_UInt16
+UA_NamespaceMapping_remote2Local(const UA_NamespaceMapping *nm,
+                                 UA_UInt16 remoteIndex) {
+    if(remoteIndex >= nm->remote2localSize)
+        return UA_UINT16_MAX - remoteIndex;
+    return nm->remote2local[remoteIndex];
+}
+
+/* Returns an error if the uri was not found.
+ * The pointer to the index argument needs to be non-NULL. */
+UA_StatusCode
+UA_NamespaceMapping_uri2Index(const UA_NamespaceMapping *nm,
+                              UA_String uri, UA_UInt16 *index) {
+    for(size_t i = 0; i < nm->namespaceUrisSize; i++) {
+        if(UA_String_equal(&uri, &nm->namespaceUris[i])) {
+            *index = (UA_UInt16)i;
+            return UA_STATUSCODE_GOOD;
+        }
+    }
+    return UA_STATUSCODE_BADNOTFOUND;
+}
+
+UA_StatusCode
+UA_NamespaceMapping_index2Uri(const UA_NamespaceMapping *nm,
+                              UA_UInt16 index, UA_String *uri) {
+    if(nm->namespaceUrisSize <= index)
+        return UA_STATUSCODE_BADNOTFOUND;
+    *uri = nm->namespaceUris[index];
+    return UA_STATUSCODE_GOOD;
+}
+
+void
+UA_NamespaceMapping_clear(UA_NamespaceMapping *nm) {
+    if(!nm)
+        return;
+    UA_Array_delete(nm->namespaceUris, nm->namespaceUrisSize, &UA_TYPES[UA_TYPES_STRING]);
+    UA_Array_delete(nm->local2remote, nm->local2remoteSize, &UA_TYPES[UA_TYPES_UINT16]);
+    UA_Array_delete(nm->remote2local, nm->remote2localSize, &UA_TYPES[UA_TYPES_UINT16]);
+    nm->namespaceUris = NULL;
+    nm->local2remote = NULL;
+    nm->remote2local = NULL;
+    nm->namespaceUrisSize = 0;
+    nm->local2remoteSize = 0;
+    nm->remote2localSize = 0;
+}
+
+void
+UA_NamespaceMapping_delete(UA_NamespaceMapping *nm) {
+    UA_NamespaceMapping_clear(nm);
+    UA_free(nm);
 }

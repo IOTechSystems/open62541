@@ -10,6 +10,8 @@
  *    Copyright 2015-2016 (c) Oleksiy Vasylyev
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
  *    Copyright 2021 (c) Fraunhofer IOSB (Author: Jan Hermes)
+ *    Copyright 2025 (c) Siemens AG (Author: Tin Raic)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_UTIL_H_
@@ -20,12 +22,22 @@
 #include <open62541/util.h>
 #include <open62541/statuscodes.h>
 
+#include <open62541/plugin/log.h>
+#include <open62541/plugin/securitypolicy.h>
+
 #include "../ua_types_encoding_binary.h"
+#include "../ua_securechannel.h"
 
 _UA_BEGIN_DECLS
 
 /* Macro-Expand for MSVC workarounds */
 #define UA_MACRO_EXPAND(x) x
+
+/* Often-used macro to get the beginning of the parent data structure */
+#ifndef container_of
+# define container_of(ptr, type, member) \
+    (type *)((uintptr_t)ptr - offsetof(type,member))
+#endif
 
 /* Try if the type of the value can be adjusted "in situ" to the target type.
  * That can be done, for example, to map between int32 and an enum.
@@ -59,25 +71,83 @@ lookupRefType(UA_Server *server, UA_QualifiedName *qn, UA_NodeId *outRefTypeId);
 UA_StatusCode
 getRefTypeBrowseName(const UA_NodeId *refTypeId, UA_String *outBN);
 
-/* Unescape &-escaped string. The string is modified */
-void
-UA_String_unescape(UA_String *s, UA_Boolean extended);
+typedef enum {
+    UA_ESCAPING_NONE = 0,
+    UA_ESCAPING_AND,
+    UA_ESCAPING_AND_EXTENDED,
+    UA_ESCAPING_PERCENT,
+    UA_ESCAPING_PERCENT_EXTENDED
+} UA_Escaping;
 
-/* Returns the position of the first unescaped reserved character (or the end
- * position) */
-char *
-find_unescaped(char *pos, char *end, UA_Boolean extended);
+static UA_INLINE UA_Boolean
+isReservedAnd(u8 c) {
+    return (c == '/' || c == '.' || c == '<' || c == '>' ||
+            c == ':' || c == '#' || c == '!' || c == '&');
+}
+
+static UA_INLINE UA_Boolean
+isReservedAndExtended(u8 c) {
+    return (isReservedAnd(c) || c == ',' || c == '(' || c == ')' ||
+            c == '[' || c == ']' || c <= ' ' || c == 127);
+}
+
+static UA_INLINE UA_Boolean
+isReservedPercent(u8 c) {
+    return (c == ';'  || c == '%' || c <= ' ' || c == 127);
+}
+
+static UA_INLINE UA_Boolean
+isReservedPercentExtended(u8 c) {
+    return (isReservedPercent(c) || c == ':' || c == '#' || c == '[' || c == ']' ||
+            c == '&' || c == '(' || c == ')' || c == ',' || c == '<' || c == '>' ||
+            c == '`' || c == '/' || c == '\\' || c == '"' || c == '\'' );
+}
+
+/* Unescape string. The copyEscape boolean indicates whether a copy of the
+ * string should be made if an escaped character is found. Otherwise the string
+ * is unescaped in-place. */
+UA_StatusCode
+UA_String_unescape(UA_String *str, UA_Boolean copyEscape, UA_Escaping esc);
+
+/* Size of the string with the escaping */
+size_t
+UA_String_escapedSize(const UA_String s, UA_Escaping esc);
+
+/* Insert string with escaping at the defined position.
+ * Returns the length of the inserted escaped string.
+ * This is an unsafe procedure if not enough space is available. */
+size_t
+UA_String_escapeInsert(u8 *pos, const UA_String s2, UA_Escaping esc);
 
 /* Escape s2 and append it to s. Memory is allocated internally. */
 UA_StatusCode
-UA_String_escapeAppend(UA_String *s, const UA_String s2, UA_Boolean extended);
-
-UA_StatusCode
-UA_String_append(UA_String *s, const UA_String s2);
+UA_String_escapeAppend(UA_String *s, const UA_String s2, UA_Escaping esc);
 
 /* Case insensitive lookup. Returns UA_ATTRIBUTEID_INVALID if not found. */
 UA_AttributeId
 UA_AttributeId_fromName(const UA_String name);
+
+/* Special version of NodeId_print where the identifier component is escaped as
+ * well (not just the NamespaceUri). For percent-escaping (URL format), the
+ * ByteString body is in base64url format (no +/, no =-padding). */
+UA_StatusCode
+nodeId_printEscape(const UA_NodeId *id, UA_String *output,
+                   const UA_NamespaceMapping *nsMapping, UA_Escaping idEsc);
+
+#ifdef UA_TYPES_SIMPLEATTRIBUTEOPERAND
+UA_StatusCode
+sao_parseWithDefaultNsIdx(UA_SimpleAttributeOperand *sao,
+                          const UA_String str, UA_UInt16 defaultNsIndex);
+#endif
+
+UA_StatusCode
+encodeDateTime(const UA_DateTime dt, UA_String *output);
+
+/***************/
+/* Log Helpers */
+/***************/
+
+extern char * securityModeNames[4];
 
 /**
  * Error checking macros
@@ -196,7 +266,7 @@ isTrue(uint8_t expr) {
  * ----------------- */
 
 #ifdef UA_ENABLE_DISCOVERY_SEMAPHORE
-# ifdef _WIN32
+# ifdef UA_ARCHITECTURE_WIN32
 #  include <io.h>
 #  define UA_fileExists(X) ( _access(X, 0) == 0)
 # else
@@ -206,7 +276,7 @@ isTrue(uint8_t expr) {
 #endif
 
 void
-UA_cleanupDataTypeWithCustom(const UA_DataTypeArray *customTypes);
+UA_cleanupDataTypeWithCustom(UA_DataTypeArray *customTypes);
 
 /* Get the number of optional fields contained in an structure type */
 size_t UA_EXPORT
@@ -228,9 +298,7 @@ typedef union {
     UA_FindServersRequest findServersRequest;
     UA_GetEndpointsRequest getEndpointsRequest;
 #ifdef UA_ENABLE_DISCOVERY
-# ifdef UA_ENABLE_DISCOVERY_MULTICAST
     UA_FindServersOnNetworkRequest findServersOnNetworkRequest;
-# endif
     UA_RegisterServerRequest registerServerRequest;
     UA_RegisterServer2Request registerServer2Request;
 #endif
@@ -319,8 +387,13 @@ typedef union {
 
 /* Do not expose UA_String_equal_ignorecase to public API as it currently only handles
  * ASCII strings, and not UTF8! */
-UA_Boolean UA_EXPORT
+UA_Boolean
 UA_String_equal_ignorecase(const UA_String *s1, const UA_String *s2);
+
+/* Make a deep copy of val and clear+replace orig.
+ * orig is not touched when the deep copy fails. */
+UA_StatusCode
+UA_replace(void *orig, const void *val, const UA_DataType *type);
 
 /********************/
 /* Encoding Helpers */
@@ -332,12 +405,12 @@ void UA_Guid_to_hex(const UA_Guid *guid, u8* out, UA_Boolean lower);
 #define UA_ENCODING_HELPERS(TYPE, UPCASE_TYPE)                          \
     static UA_INLINE size_t                                             \
     UA_##TYPE##_calcSizeBinary(const UA_##TYPE *src) {                    \
-        return UA_calcSizeBinary(src, &UA_TYPES[UA_TYPES_##UPCASE_TYPE]); \
+        return UA_calcSizeBinary(src, &UA_TYPES[UA_TYPES_##UPCASE_TYPE], NULL); \
     }                                                                   \
     static UA_INLINE UA_StatusCode                                      \
     UA_##TYPE##_encodeBinary(const UA_##TYPE *src, UA_Byte **bufPos, const UA_Byte *bufEnd) { \
         return UA_encodeBinaryInternal(src, &UA_TYPES[UA_TYPES_##UPCASE_TYPE], \
-                                       bufPos, &bufEnd, NULL, NULL);    \
+                                       bufPos, &bufEnd, NULL, NULL, NULL); \
     }                                                                   \
     static UA_INLINE UA_StatusCode                                      \
     UA_##TYPE##_decodeBinary(const UA_ByteString *src, size_t *offset, UA_##TYPE *dst) { \
@@ -370,6 +443,39 @@ UA_ENCODING_HELPERS(ExtensionObject, EXTENSIONOBJECT)
 UA_ENCODING_HELPERS(DataValue, DATAVALUE)
 UA_ENCODING_HELPERS(Variant, VARIANT)
 UA_ENCODING_HELPERS(DiagnosticInfo, DIAGNOSTICINFO)
+
+/****************************/
+/* Legacy Secret Encryption */
+/****************************/
+
+UA_StatusCode
+encryptSecretLegacy(const UA_SecurityPolicy *sp, void *spContext,
+                    const UA_ByteString serverSessionNonce,
+                    UA_ByteString *tokenData);
+
+UA_StatusCode
+decryptSecretLegacy(const UA_SecurityPolicy *sp, void *spContext,
+                    const UA_ByteString serverSessionNonce,
+                    UA_ByteString *tokenData);
+
+/******************/
+/* ECC Encryption */
+/******************/
+
+UA_StatusCode
+encryptUserIdentityTokenEcc(UA_Logger *logger, UA_SecureChannel *channel,
+                            const UA_SecurityPolicy *sp, void *spContext,
+                            UA_ByteString *tokenData,
+                            const UA_ByteString serverSessionNonce,
+                            const UA_ByteString serverEphemeralPubKey);
+
+/* If the EccEncryptedSecret does not define a certificate, check if the
+ * SecureChannel uses the same SecurityPolicy and reuse its context. */
+UA_StatusCode
+decryptUserTokenEcc(UA_Logger *logger, UA_SecureChannel *channel,
+                    const UA_SecurityPolicy *sp, void *spContext,
+                    UA_ByteString sessionServerNonce,
+                    UA_ByteString *es);
 
 _UA_END_DECLS
 

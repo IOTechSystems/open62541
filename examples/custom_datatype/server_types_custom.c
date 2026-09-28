@@ -10,18 +10,18 @@
 
 #include "custom_datatype.h"
 
-UA_Boolean running = true;
-const UA_NodeId pointVariableTypeId = {
+static volatile UA_Boolean running = true;
+static const UA_NodeId pointVariableTypeId = {
     1, UA_NODEIDTYPE_NUMERIC, {4243}};
-const UA_NodeId measurementVariableTypeId = {
+static const UA_NodeId measurementVariableTypeId = {
     1, UA_NODEIDTYPE_NUMERIC, {4444}};
-const UA_NodeId optstructVariableTypeId = {
+static const UA_NodeId optstructVariableTypeId = {
     1, UA_NODEIDTYPE_NUMERIC, {4645}};
-const UA_NodeId unionVariableTypeId = {
+static const UA_NodeId unionVariableTypeId = {
     1, UA_NODEIDTYPE_NUMERIC, {4846}};
 
 static void stopHandler(int sig) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "received ctrl-c");
+    (void)sig;
     running = false;
 }
 
@@ -250,6 +250,8 @@ int main(void) {
     UA_Server *server = UA_Server_new();
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
+
+    setupCustomTypes();
 
     /* Make your custom datatype known to the stack */
     UA_DataType *types = (UA_DataType*)UA_malloc(4 * sizeof(UA_DataType));

@@ -10,8 +10,8 @@ open62541 uses CMake to build the library and binaries. CMake generates a
 Makefile or a Visual Studio project. This is then used to perform the actual
 build.
 
-Building with CMake on Ubuntu or Debian
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Building with CMake on Debian/Ubuntu
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
 
@@ -21,22 +21,35 @@ Building with CMake on Ubuntu or Debian
    sudo apt-get install cmake-curses-gui     # for the ccmake graphical interface
    sudo apt-get install libmbedtls-dev       # for encryption support
    sudo apt-get install check libsubunit-dev # for unit tests
-   sudo apt-get install python3-sphinx graphviz  # for documentation generation
+   sudo apt-get install libpcap-dev          # for network-replay unit tests
+   sudo apt-get install python3-sphinx  # for documentation generation
    sudo apt-get install python3-sphinx-rtd-theme # documentation style
+   sudo apt-get install libavahi-client-dev libavahi-common-dev # for LDS-ME (multicast discovery)
 
+   git clone https://github.com/open62541/open62541.git
    cd open62541
    mkdir build
    cd build
    cmake ..
    make
 
+   # optional: fetch additional dependencies for advanced features
+   git submodule update --init --recursive
+
    # select additional features
    ccmake ..
+   cmake .. -DUA_ENABLE_DRIVER_MDNS_AVAHI=ON # use Avahi for multicast discovery
    make
 
    # build documentation
    make doc # html documentation
    make doc_pdf # pdf documentation (requires LaTeX)
+
+Note: parallel compilation can be enable by using 
+
+.. code-block:: bash
+
+    make -j$(nproc)
 
 You can install open62541 using the well known `make install` command. This
 allows you to use pre-built libraries and headers for your own project. In order
@@ -69,17 +82,40 @@ CMake project definition looks as follows:
     #   find_package(open62541 REQUIRED)
     #   target_link_libraries(main open62541::open62541)
 
-Building with CMake on Windows
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Building with Visual Studio on Windows
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Here we explain the build process for Visual Studio (2013 or newer). To build
-with MinGW, just replace the compiler selection in the call to CMake.
+Here we explain the build process for Visual Studio 2022 Community.
 
 - Download and install
+    - Python 3.x: https://python.org/downloads
+    - Visual Studio 2022: https://visualstudio.microsoft.com
+        - When installing Visual Studio select the workload "Desktop development with C++"
 
-  - Python 3.x: https://python.org/downloads
-  - CMake: http://www.cmake.org/cmake/resources/software.html
-  - Microsoft Visual Studio: https://www.visualstudio.com/products/visual-studio-community-vs
+- Open Visual Studio and from the Get started window select "Clone a repository"
+    - Repository location: https://github.com/open62541/open62541.git
+    - Select a local path where to download the project and press Clone
+- Switch to Folder View from the Solution Explorer
+- Project / CMake Settings for open62541
+        - Customize CMake variables as wanted and save
+- Build / Build All
+- Build / Install open62541
+
+Note: the solution generated with cmake can also be compiled in parallel with the command
+
+.. code-block:: bash
+
+    msbuild open62541.sln /v:n -t:rebuild -m
+
+Building with CMake/MinGW on Windows
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+To build with MinGW, just replace the compiler selection in the call to CMake.
+
+- Download and install
+    - MinGW http://sourceforge.net/projects/mingw
+    - Python 3.x: https://python.org/downloads
+    - CMake: http://www.cmake.org/cmake/resources/software.html
 
 - Download the open62541 sources (using git or as a zipfile from github)
 - Open a command shell (cmd) and run
@@ -89,10 +125,9 @@ with MinGW, just replace the compiler selection in the call to CMake.
    cd <path-to>\open62541
    mkdir build
    cd build
-   <path-to>\cmake.exe .. -G "Visual Studio 14 2015"
+   <path-to>\cmake.exe .. -G "MinGW Makefiles"
    :: You can use use cmake-gui for a graphical user-interface to select features
-
-- Then open :file:`build\open62541.sln` in Visual Studio 2015 and build as usual
+   make
 
 Building on OS X
 ^^^^^^^^^^^^^^^^
@@ -110,7 +145,6 @@ Building on OS X
    brew install cmake
    pip install sphinx # for documentation generation
    pip install sphinx_rtd_theme # documentation style
-   brew install graphviz # for graphics in the documentation
    brew install check # for unit tests
 
 Follow Ubuntu instructions without the ``apt-get`` commands as these are taken care of by the above packages.
@@ -146,6 +180,10 @@ The procedure below works on OpenBSD 5.8 with gcc version 4.8.4, cmake version
 Building Debian Packages inside Docker Container with CMake on Ubuntu or Debian
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+The python tool with the debian packaging definitions and the debian build
+files can be found in the external repository:
+https://salsa.debian.org/jpfr/open62541/-/tree/main/tools?ref_type=heads
+
 This is how to build the Debian packages.
 
 .. code-block:: bash
@@ -171,6 +209,8 @@ Most options can be changed manually in :file:`ua_config.h` (:file:`open62541.h`
 for the single-file release) after the code generation. But usually there is no
 need to adjust them.
 
+.. _build_options:
+
 Main Build Options
 ^^^^^^^^^^^^^^^^^^
 
@@ -181,7 +221,7 @@ Main Build Options
   - ``MinSizeRel`` -Os optimization without debug symbols
 
 **BUILD_SHARED_LIBS**
-   Build a shared library (dll/so) or (an archive of) object files for linking
+   Build a shared library (.dll/.so) or (an archive of) object files for linking
    into a static binary. Shared libraries are recommended for a system-wide
    install. Note that this option modifies the :file:`ua_config.h` file that is
    also included in :file:`open62541.h` for the single-file distribution.
@@ -234,15 +274,8 @@ Detailed SDK Features
 **UA_ENABLE_SUBSCRIPTIONS_EVENTS**
     Enable the use of events for subscriptions. This is a new feature and currently marked as EXPERIMENTAL.
 
-**UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS (EXPERIMENTAL)**
-    Enable the use of A&C for subscriptions. This is a new feature build upon events and currently marked as EXPERIMENTAL.
-
 **UA_ENABLE_METHODCALLS**
    Enable the Method service set
-
-**UA_ENABLE_PARSING**
-   Enable parsing human readable formats of builtin data types (Guid, NodeId, etc.).
-   Utility functions that are not essential to the SDK.
 
 **UA_ENABLE_NODEMANAGEMENT**
    Enable dynamic addition and removal of nodes at runtime
@@ -251,20 +284,11 @@ Detailed SDK Features
    Compile a single-file release into the files :file:`open62541.c` and :file:`open62541.h`.
    Invoke the CMake target to generate the amalgamation as ``make open62541-amalgamation``.
 
-**UA_ENABLE_IMMUTABLE_NODES**
-   Nodes in the information model are not edited but copied and replaced. The
-   replacement is done with atomic operations so that the information model is
-   always consistent and can be accessed from an interrupt or parallel thread
-   (depends on the node storage plugin implementation).
-
 **UA_ENABLE_COVERAGE**
    Measure the coverage of unit tests
 
 **UA_ENABLE_DISCOVERY**
    Enable Discovery Service (LDS)
-
-**UA_ENABLE_DISCOVERY_MULTICAST**
-   Enable Discovery Service with multicast support (LDS-ME)
 
 **UA_ENABLE_DISCOVERY_SEMAPHORE**
    Enable Discovery Semaphore support
@@ -272,10 +296,15 @@ Detailed SDK Features
 **UA_ENABLE_ENCRYPTION**
    Enable encryption support and specify the used encryption backend. The possible
    options are:
+
    - ``OFF`` No encryption support. (default)
    - ``MBEDTLS`` Encryption support using mbed TLS
    - ``OPENSSL`` Encryption support using OpenSSL
    - ``LIBRESSL`` EXPERIMENTAL: Encryption support using LibreSSL
+
+   ECC security policies (NIST P-256/P-384, Brainpool) are available with OpenSSL
+   or mbedTLS ≥ 3.0.  Curve25519 and Curve448 require OpenSSL.  See
+   :ref:`security-ecc` for details.
 
 **UA_ENABLE_ENCRYPTION_TPM2**
    Enable TPM hardware for encryption. The possible options are:
@@ -286,14 +315,19 @@ Detailed SDK Features
    Namespace zero contains the standard-defined nodes. The full namespace zero
    may not be required for all applications. The selectable options are as follows:
 
+   - ``NONE``: Do not generate namespace zero from the XML definitions.
    - ``MINIMAL``: A barebones namespace zero that is compatible with most
      clients. But this namespace 0 is so small that it does not pass the CTT
      (Conformance Testing Tools of the OPC Foundation).
    - ``REDUCED``: Small namespace zero that passes the CTT.
    - ``FULL``: Full namespace zero generated from the official XML definitions.
 
-   The advanced build option ``UA_FILE_NS0`` can be used to override the XML
-   file used for namespace zero generation.
+**UA_ENABLE_DIAGNOSTICS**
+   Enable diagnostics information exposed by the server. Enabled by default.
+
+**UA_ENABLE_JSON_ENCODING**
+   Enable JSON encoding. Enabled by default. The JSON encoding changed with the
+   1.05 version of the OPC UA specification.
 
 Some options are marked as advanced. The advanced options need to be toggled to
 be visible in the cmake GUIs.
@@ -304,26 +338,53 @@ be visible in the cmake GUIs.
 **UA_ENABLE_STATUSCODE_DESCRIPTIONS**
    Compile the human-readable name of the StatusCodes into the binary. Enabled by default.
 
-**UA_ENABLE_FULL_NS0**
-   Use the full NS0 instead of a minimal Namespace 0 nodeset
-   ``UA_FILE_NS0`` is used to specify the file for NS0 generation from namespace0 folder. Default value is ``Opc.Ua.NodeSet2.xml``
+**UA_ENABLE_LWS**
+   Enable the ``libwebsockets`` transport provider. It supplies the generic
+   HTTP client/server ConnectionManager, OPC UA services over HTTPS
+   (``opc.https://``), and OPC UA Binary over WebSockets (``opc.ws://`` and
+   ``opc.wss://``). The server transports remain opt-in through
+   ``httpEnabled`` and ``webSocketEnabled``. ``opc.https`` requires a TLS
+   certificate and private key. Binary and, when ``UA_ENABLE_JSON_ENCODING``
+   is enabled, JSON service bodies can coexist on the same endpoint URL and
+   are exposed as separate Binary and ``/json`` endpoint paths. Each logical
+   channel remains pinned to one encoding. Internally, Session routing contexts
+   isolate AuthenticationTokens and nonces between clients without creating a
+   new wire-level SecureChannel for every HTTP request.
+   HTTP content compression is optional in the OPC UA specification.
+
+   Session-less HTTPS ``Authorization`` and ``Accept-Language`` processing are
+   not implemented by this transport. Applications that require those optional
+   profile features must provide them above the generic HTTP ConnectionManager.
+
+**UA_ENABLE_HTTP_COMPRESSION**
+   Enable bounded ``gzip`` and ``deflate`` request/response content coding for
+   HTTP clients and servers. This option requires ``UA_ENABLE_LWS`` and zlib. Compressed
+   input is limited independently on the wire and after decompression. Unknown
+   request codings are rejected with HTTP status 415 and unacceptable response
+   coding negotiation with status 406.
+
+**UA_ENABLE_LWS_MQTT**
+   Enable the MQTT part of the ``libwebsockets`` provider for PubSub MQTT
+   transport protocols (``opc.mqtt://`` and ``opc.mqtts://``). Requires
+   ``UA_ENABLE_LWS`` and libwebsockets compiled with MQTT support
+   (``LWS_ROLE_MQTT=ON``).
 
 PubSub Build Options
 ^^^^^^^^^^^^^^^^^^^^
 
 **UA_ENABLE_PUBSUB**
    Enable the experimental OPC UA PubSub support. The option will include the
-   PubSub UDP multicast plugin. Disabled by default.
+   PubSub UDP multicast plugin. Enabled by default.
 
 **UA_ENABLE_PUBSUB_FILE_CONFIG**
    Enable loading OPC UA PubSub configuration from File/ByteString. Enabling
    PubSub informationmodel methods also will add a method to the
-   Publish/Subscribe object which allows configuring PubSub at runtime.
+   Publish/Subscribe object which allows configuring PubSub at runtime. Disabled by default.
 
 **UA_ENABLE_PUBSUB_INFORMATIONMODEL**
    Enable the information model representation of the PubSub configuration. For
    more details take a look at the following section `PubSub Information Model
-   Representation`. Disabled by default.
+   Representation`. Enabled by default.
 
 Debug Build Options
 ^^^^^^^^^^^^^^^^^^^
@@ -374,18 +435,18 @@ The RAM requirements of a server are mostly due to the following settings:
 Prebuilt packages
 -----------------
 
-Debian
-^^^^^^
-Debian packages can be found in our official PPA:
+.. _debian:
 
- * Daily Builds (based on master branch): https://launchpad.net/~open62541-team/+archive/ubuntu/daily
- * Release Builds (starting with Version 0.4): https://launchpad.net/~open62541-team/+archive/ubuntu/ppa
+Debian/Ubuntu
+^^^^^^^^^^^^^
+Official distribution packages are available for
+`Debian <https://packages.debian.org/search?keywords=open62541>`__ and
+`Ubuntu <https://packages.ubuntu.com/search?keywords=open62541>`__.
 
-Install them with:
+Install the development package with:
 
 .. code-block:: bash
 
-    sudo add-apt-repository ppa:open62541-team/ppa
     sudo apt-get update
     sudo apt-get install libopen62541-1-dev
 
@@ -418,4 +479,3 @@ the shared library.
 
    cp /path-to/examples/tutorial_server_firststeps.c . # copy the example server
    gcc -std=c99 -o server tutorial_server_firststeps.c -lopen62541
-

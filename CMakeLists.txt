@@ -9,6 +9,14 @@ else()
     project(open62541 C) # Do not look for a C++ compiler
 endif()
 
+if(ZEPHYR_BASE)
+  if(NOT CONFIG_OPEN62541)
+    return()
+  endif()
+  include(arch/zephyr/zephyr.cmake)
+  add_compile_definitions(UA_ARCH_HEADER="${PROJECT_SOURCE_DIR}/arch/zephyr/zephyr_arch.h")
+endif()
+
 # set(CMAKE_VERBOSE_MAKEFILE ON)
 
 set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/tools/cmake")
@@ -18,7 +26,6 @@ find_package(Git)
 
 include(AssignSourceGroup)
 include(GNUInstallDirs)
-include(open62541Macros)
 
 #############################
 # Compiled binaries folders #
@@ -36,14 +43,16 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # number from the latest release plus the "-undefined" label. Will be
 # overwritten with more detailed information if git is available.
 set(OPEN62541_VER_MAJOR 1)
-set(OPEN62541_VER_MINOR 4)
-set(OPEN62541_VER_PATCH 6)
-set(OPEN62541_VER_LABEL "-undefined") # like "-rc1" or "-g4538abcd" or "-g4538abcd-dirty"
+set(OPEN62541_VER_MINOR 5)
+set(OPEN62541_VER_PATCH 8)
+set(OPEN62541_VER_LABEL "") # like "-rc1" or "-g4538abcd" or "-g4538abcd-dirty"
 set(OPEN62541_VER_COMMIT "unknown-commit")
 
-# Overwrite the version information based on git if available
-include(SetGitBasedVersion)
-set_open62541_version()
+# Overwrite the version information based on git if available and we are the main cmake project.
+if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    include(SetGitBasedVersion)
+    set_open62541_version()
+endif()
 
 # Examples for the version string are:
 # v1.2
@@ -59,16 +68,16 @@ MESSAGE(STATUS "open62541 Version: ${OPEN62541_VERSION}")
 # Architecture #
 ################
 
-set(UA_ARCHITECTURES "none" "posix" "win32")
+set(UA_ARCHITECTURES "none" "posix" "win32" "zephyr" "freertos-lwip" "posix-lwip")
 set(UA_ARCHITECTURE "" CACHE STRING "Architecture to build open62541 for")
 SET_PROPERTY(CACHE UA_ARCHITECTURE PROPERTY STRINGS "" ${UA_ARCHITECTURES})
 
 if("${UA_ARCHITECTURE}" STREQUAL "")
-    if(UNIX)
-        set(UA_ARCHITECTURE "posix" CACHE STRING "" FORCE)
-    elseif(WIN32)
+    if(WIN32)
         set(UA_ARCHITECTURE "win32" CACHE STRING ""  FORCE)
-    endif(UNIX)
+    else()
+        set(UA_ARCHITECTURE "posix" CACHE STRING "" FORCE)
+    endif()
 endif()
 
 message(STATUS "The selected architecture is: ${UA_ARCHITECTURE}")
@@ -76,6 +85,14 @@ if("${UA_ARCHITECTURE}" STREQUAL "posix")
     set(UA_ARCHITECTURE_POSIX 1)
 elseif("${UA_ARCHITECTURE}" STREQUAL "win32")
     set(UA_ARCHITECTURE_WIN32 1)
+elseif("${UA_ARCHITECTURE}" STREQUAL "zephyr")
+    set(UA_ARCHITECTURE_ZEPHYR 1)
+elseif("${UA_ARCHITECTURE}" STREQUAL "freertos-lwip")
+    set(UA_ARCHITECTURE_LWIP 1)
+    set(UA_ARCHITECTURE_FREERTOS 1)
+elseif("${UA_ARCHITECTURE}" STREQUAL "posix-lwip")
+    set(UA_ARCHITECTURE_LWIP 1)
+    set(UA_ARCHITECTURE_POSIX 1)
 endif()
 
 #################
@@ -101,12 +118,26 @@ option(UA_ENABLE_DA "Enable OPC UA DataAccess (Part 8) definitions" ON)
 option(UA_ENABLE_HISTORIZING "Enable basic support for historical access (client and server)" ON)
 option(UA_ENABLE_DISCOVERY "Enable Discovery Service (LDS)" ON)
 option(UA_ENABLE_JSON_ENCODING "Enable JSON encoding" ON)
-option(UA_ENABLE_XML_ENCODING "Enable XML encoding (EXPERIMENTAL)" OFF)
-option(UA_ENABLE_NODESETLOADER "Enable nodesetLoader public API" OFF)
+option(UA_ENABLE_XML_ENCODING "Enable XML encoding" ON)
 option(UA_ENABLE_DATATYPES_ALL "Generate all datatypes for namespace zero (uses more binary space)" ON)
+option(UA_ENABLE_RBAC "Enable Role-Based Access Control (EXPERIMENTAL - NOT FOR PRODUCTION)" OFF)
+
+if(UA_ENABLE_RBAC)
+    message(WARNING "UA_ENABLE_RBAC is EXPERIMENTAL and NOT RECOMMENDED FOR PRODUCTION USE. "
+                    "The RBAC implementation is under active development and the API may change. "
+                    "Use only for testing and development purposes.")
+endif()
 
 if(UA_INFORMATION_MODEL_AUTOLOAD AND NOT UA_BUILD_FUZZING)
     set(UA_ENABLE_NODESET_INJECTOR ON)
+
+    # Detect whether any loaded companion spec requires the RoleSet node
+    set(UA_NODESET_INJECTOR_NEEDS_ROLESET OFF)
+    foreach(_model ${UA_INFORMATION_MODEL_AUTOLOAD})
+        if(_model STREQUAL "GDS" OR _model STREQUAL "Onboarding" OR _model STREQUAL "UAFX-Data")
+            set(UA_NODESET_INJECTOR_NEEDS_ROLESET ON)
+        endif()
+    endforeach()
 endif()
 
 set(MULTITHREADING_DEFAULT 0)
@@ -117,20 +148,58 @@ endif()
 set(UA_MULTITHREADING ${MULTITHREADING_DEFAULT} CACHE STRING
     "Multithreading support (<100: No multithreading support, >=100: Thread-safety enabled (internal mutexes)")
 
-option(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS "Enable the use of A&C. (EXPERIMENTAL)" OFF)
-mark_as_advanced(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
-
 option(UA_ENABLE_NODEMANAGEMENT "Enable dynamic addition and removal of nodes at runtime" ON)
 mark_as_advanced(UA_ENABLE_NODEMANAGEMENT)
 
-option(UA_ENABLE_PARSING "Utility functions that require parsing (e.g. NodeId expressions)" ON)
-mark_as_advanced(UA_ENABLE_PARSING)
+option(UA_ENABLE_AUDITING "Enable generation of audit events in servers" ON)
+mark_as_advanced(UA_ENABLE_AUDITING)
 
 option(UA_ENABLE_INLINABLE_EXPORT "Export 'static inline' methods as regular API" OFF)
 mark_as_advanced(UA_ENABLE_INLINABLE_EXPORT)
 
-option(UA_ENABLE_DISCOVERY_MULTICAST "Enable Discovery Service with multicast support (LDS-ME)" OFF)
-mark_as_advanced(UA_ENABLE_DISCOVERY_MULTICAST)
+# Drivers
+option(UA_ENABLE_DRIVER_GDS_RECEIVER "Enable the GDS Receiver driver" OFF)
+mark_as_advanced(UA_ENABLE_DRIVER_GDS_RECEIVER)
+option(UA_ENABLE_DRIVER_MDNS_AVAHI "Enable the Avahi mDNS discovery driver" OFF)
+mark_as_advanced(UA_ENABLE_DRIVER_MDNS_AVAHI)
+set(UA_ENABLE_DISCOVERY_MULTICAST_MDNSD OFF)
+set(UA_ENABLE_DISCOVERY_MULTICAST_AVAHI OFF)
+set(UA_FILE_MDNSD "${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/mdnsd.c")
+
+option(UA_ENABLE_LWS
+       "Enable the libwebsockets provider for HTTP and WebSocket transports"
+       OFF)
+mark_as_advanced(UA_ENABLE_LWS)
+option(UA_ENABLE_LWS_MQTT "Enable the libwebsockets MQTT ConnectionManager" OFF)
+mark_as_advanced(UA_ENABLE_LWS_MQTT)
+option(UA_ENABLE_HTTP_COMPRESSION
+       "Enable bounded gzip/deflate support for HTTP clients and servers (requires zlib)"
+       OFF)
+mark_as_advanced(UA_ENABLE_HTTP_COMPRESSION)
+
+
+if(UA_ENABLE_LWS_MQTT AND NOT UA_ENABLE_LWS)
+    message(FATAL_ERROR "UA_ENABLE_LWS_MQTT requires UA_ENABLE_LWS")
+endif()
+
+if(UA_ENABLE_HTTP_COMPRESSION AND NOT UA_ENABLE_LWS)
+    message(FATAL_ERROR "UA_ENABLE_HTTP_COMPRESSION requires UA_ENABLE_LWS")
+endif()
+
+if(UA_ENABLE_LWS)
+    if(NOT UA_ARCHITECTURE_POSIX)
+        message(FATAL_ERROR "libwebsockets cannot be used without POSIX")
+    endif()
+endif()
+
+option(UA_ENABLE_EVENTLOOP_GLIB "Enable the GLib-based EventLoop implementation (requires glib-2.0)" OFF)
+mark_as_advanced(UA_ENABLE_EVENTLOOP_GLIB)
+
+if(UA_ENABLE_EVENTLOOP_GLIB)
+    if(NOT UA_ARCHITECTURE_POSIX)
+        message(FATAL_ERROR "The GLib EventLoop cannot be used without posix")
+    endif()
+endif()
 
 # security provider
 set(UA_ENCRYPTION_PLUGINS "MBEDTLS" "OPENSSL" "LIBRESSL")
@@ -141,11 +210,30 @@ mark_as_advanced(UA_ENABLE_ENCRYPTION_OPENSSL)
 option(UA_ENABLE_ENCRYPTION_MBEDTLS "Deprecated: Enable encryption support (uses mbedTLS)" OFF)
 mark_as_advanced(UA_ENABLE_ENCRYPTION_MBEDTLS)
 
-list (FIND UA_ENCRYPTION_PLUGINS ${UA_ENABLE_ENCRYPTION} _tmp)
+# Convert deprecated backend-specific options to the current selector option.
+if(UA_ENABLE_ENCRYPTION STREQUAL "OFF" OR UA_ENABLE_ENCRYPTION STREQUAL "ON")
+    if(UA_ENABLE_ENCRYPTION_MBEDTLS)
+        message(DEPRECATION "Set UA_ENABLE_ENCRYPTION=MBEDTLS instead of UA_ENABLE_ENCRYPTION_MBEDTLS=ON.")
+        set(UA_ENABLE_ENCRYPTION "MBEDTLS")
+    elseif(UA_ENABLE_ENCRYPTION_OPENSSL)
+        message(DEPRECATION "Set UA_ENABLE_ENCRYPTION=OPENSSL instead of UA_ENABLE_ENCRYPTION_OPENSSL=ON.")
+        set(UA_ENABLE_ENCRYPTION "OPENSSL")
+    elseif(UA_ENABLE_ENCRYPTION_LIBRESSL)
+        message(DEPRECATION "Set UA_ENABLE_ENCRYPTION=LIBRESSL instead of UA_ENABLE_ENCRYPTION_LIBRESSL=ON.")
+        set(UA_ENABLE_ENCRYPTION "LIBRESSL")
+    elseif(UA_ENABLE_ENCRYPTION STREQUAL "ON")
+        message(DEPRECATION "Set UA_ENABLE_ENCRYPTION=MBEDTLS instead of UA_ENABLE_ENCRYPTION=ON.")
+        set(UA_ENABLE_ENCRYPTION "MBEDTLS")
+    endif()
+endif()
+
+set(UA_ENABLE_ENCRYPTION_OPENSSL OFF)
+set(UA_ENABLE_ENCRYPTION_MBEDTLS OFF)
+set(UA_ENABLE_ENCRYPTION_LIBRESSL OFF)
+
+list(FIND UA_ENCRYPTION_PLUGINS ${UA_ENABLE_ENCRYPTION} _tmp)
+
 if(UA_ENABLE_ENCRYPTION STREQUAL "OFF" OR ${_tmp} GREATER -1)
-    set(UA_ENABLE_ENCRYPTION_OPENSSL OFF)
-    set(UA_ENABLE_ENCRYPTION_MBEDTLS OFF)
-    set(UA_ENABLE_ENCRYPTION_LIBRESSL OFF)
     if(UA_ENABLE_ENCRYPTION STREQUAL "MBEDTLS")
         set(UA_ENABLE_ENCRYPTION_MBEDTLS ON)
     elseif(UA_ENABLE_ENCRYPTION STREQUAL "OPENSSL")
@@ -153,22 +241,9 @@ if(UA_ENABLE_ENCRYPTION STREQUAL "OFF" OR ${_tmp} GREATER -1)
     elseif(UA_ENABLE_ENCRYPTION STREQUAL "LIBRESSL")
         set(UA_ENABLE_ENCRYPTION_LIBRESSL ON)
     endif()
-# Only for backward compatability
-elseif(UA_ENABLE_ENCRYPTION)
-    message(DEPRECATION "Set UA_ENABLE_ENCRYPTION to the desired encryption library." )
-    if(NOT UA_ENABLE_ENCRYPTION_OPENSSL)
-    set(UA_ENABLE_ENCRYPTION_MBEDTLS ON)
-    endif()
 else()
-    message(DEPRECATION "Set UA_ENABLE_ENCRYPTION to the desired encryption library." )
-    if(UA_ENABLE_ENCRYPTION_MBEDTLS)
-        set(UA_ENABLE_ENCRYPTION "MBEDTLS")
-        set(UA_ENABLE_ENCRYPTION_OPENSSL OFF)
-    endif()
-    if(UA_ENABLE_ENCRYPTION_OPENSSL)
-        set(UA_ENABLE_ENCRYPTION "OPENSSL")
-        set(UA_ENABLE_ENCRYPTION_MBEDTLS OFF)
-    endif()
+    message(WARNING "Invalid UA_ENABLE_ENCRYPTION value: ${UA_ENABLE_ENCRYPTION}. Proceeding without encryption")
+    set(UA_ENABLE_ENCRYPTION "OFF")
 endif()
 
 # TPM Security
@@ -198,12 +273,18 @@ if(UA_ENABLE_TPM2_KEYSTORE)
 endif()
 
 # Namespace Zero
-set(UA_NAMESPACE_ZERO "REDUCED" CACHE STRING "Completeness of the generated namespace zero (minimal/reduced/full)")
-SET_PROPERTY(CACHE UA_NAMESPACE_ZERO PROPERTY STRINGS "MINIMAL" "REDUCED" "FULL")
-if(UA_NAMESPACE_ZERO STREQUAL "MINIMAL")
+set(UA_NAMESPACE_ZERO "REDUCED" CACHE STRING "Completeness of the generated namespace zero (none/minimal/reduced/full)")
+SET_PROPERTY(CACHE UA_NAMESPACE_ZERO PROPERTY STRINGS "NONE" "MINIMAL" "REDUCED" "FULL")
+if(UA_NAMESPACE_ZERO STREQUAL "MINIMAL" OR UA_NAMESPACE_ZERO STREQUAL "NONE")
     set(UA_GENERATED_NAMESPACE_ZERO OFF)
 else()
     set(UA_GENERATED_NAMESPACE_ZERO ON)
+endif()
+
+if(UA_NAMESPACE_ZERO STREQUAL "MINIMAL")
+    set(UA_NAMESPACE_ZERO_MINIMAL ON)
+else()
+    set(UA_NAMESPACE_ZERO_MINIMAL OFF)
 endif()
 
 if(UA_NAMESPACE_ZERO STREQUAL "FULL")
@@ -221,9 +302,6 @@ endif()
 if(UA_BUILD_FUZZING OR UA_BUILD_OSS_FUZZ OR UA_BUILD_FUZZING_CORPUS)
     # Force enable options not passed in the build script, to also fuzzy-test this code
     set(UA_ENABLE_DISCOVERY ON CACHE STRING "" FORCE)
-    set(UA_ENABLE_DISCOVERY_MULTICAST ON CACHE STRING "" FORCE)
-    set(UA_ENABLE_ENCRYPTION ON CACHE STRING "OFF" FORCE)
-    set(UA_ENABLE_ENCRYPTION_MBEDTLS ON CACHE STRING "" FORCE)
     set(UA_ENABLE_HISTORIZING ON CACHE STRING "" FORCE)
     set(UA_ENABLE_JSON_ENCODING ON CACHE STRING "" FORCE)
     set(UA_ENABLE_SUBSCRIPTIONS ON CACHE STRING "" FORCE)
@@ -235,14 +313,16 @@ endif()
 #    message(FATAL_ERROR "Unable to enable events without UA_ENABLE_SUBSCRIPTIONS and full namespace 0")
 #endif()
 
-# It should not be possible to enable Alarms and Condition without enabling Events and full ns0
-if((UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS) AND (NOT (UA_ENABLE_SUBSCRIPTIONS_EVENTS AND UA_NAMESPACE_ZERO STREQUAL "FULL")))
-    message(FATAL_ERROR "Unable to enable A&C without UA_ENABLE_SUBSCRIPTIONS_EVENTS and full namespace 0")
+if(UA_ENABLE_DRIVER_MDNS_AVAHI AND NOT UA_ENABLE_DISCOVERY)
+    message(FATAL_ERROR "UA_ENABLE_DRIVER_MDNS_AVAHI requires UA_ENABLE_DISCOVERY")
 endif()
 
-if(UA_ENABLE_DISCOVERY_MULTICAST AND NOT UA_ENABLE_DISCOVERY)
-    MESSAGE(WARNING "UA_ENABLE_DISCOVERY_MULTICAST is enabled, but not UA_ENABLE_DISCOVERY. UA_ENABLE_DISCOVERY_MULTICAST will be set to OFF")
-    SET(UA_ENABLE_DISCOVERY_MULTICAST OFF CACHE BOOL "Enable Discovery Service with multicast support (LDS-ME)" FORCE)
+if(UA_ENABLE_DISCOVERY)
+    if(UA_ENABLE_DRIVER_MDNS_AVAHI)
+        set(UA_ENABLE_DISCOVERY_MULTICAST_AVAHI ON)
+    elseif(UA_ARCHITECTURE_POSIX AND EXISTS "${UA_FILE_MDNSD}")
+        set(UA_ENABLE_DISCOVERY_MULTICAST_MDNSD ON)
+    endif()
 endif()
 
 # Advanced options
@@ -281,13 +361,17 @@ if(UA_ENABLE_PUBSUB_SKS)
     endif()
 endif()
 
-option(UA_ENABLE_PUBSUB_INFORMATIONMODEL "Enable PubSub information model twin" ON)
+option(UA_ENABLE_PUBSUB_INFORMATIONMODEL "Enable PubSub information model twin" ${UA_ENABLE_PUBSUB})
 if(UA_ENABLE_PUBSUB_INFORMATIONMODEL)
-    if(NOT UA_ENABLE_PUBSUB)
-        message(FATAL_ERROR "PubSub information model representation cannot be used with disabled PubSub function.")
+    if(NOT UA_ENABLE_METHODCALLS)
+        message(FATAL_ERROR "PubSub information model representation requires UA_ENABLE_METHODCALLS.")
     endif()
     if(UA_NAMESPACE_ZERO STREQUAL "MINIMAL")
         message(FATAL_ERROR "PubSub information model representation cannot be used with MINIMAL namespace zero.")
+    endif()
+    if(UA_NAMESPACE_ZERO STREQUAL "NONE")
+        message(STATUS "PubSub information model enabled with NONE namespace zero configuration.")
+        message(STATUS "  External nodestore (e.g., ROM) must provide all Part 14 Nodes.")
     endif()
 endif()
 
@@ -302,14 +386,10 @@ endif()
 option(UA_ENABLE_MQTT "Enable MQTT connections for the EventLoop" OFF)
 mark_as_advanced(UA_ENABLE_MQTT)
 if(UA_ENABLE_MQTT)
+    set(UA_FILE_MQTT "${PROJECT_SOURCE_DIR}/deps/mqtt-c/src/mqtt.c")
     if(NOT EXISTS "${UA_FILE_MQTT}")
-        message(STATUS "Submodule update")
-        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
-                        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-                        RESULT_VARIABLE GIT_SUBMOD_RESULT)
-        if(NOT GIT_SUBMOD_RESULT EQUAL "0")
-            message(FATAL_ERROR "git submodule update --init --recursive failed with ${GIT_SUBMOD_RESULT}")
-        endif()
+        message(FATAL_ERROR "UA_ENABLE_MQTT requires the mqtt-c dependency. "
+                            "Fetch submodules or provide deps/mqtt-c locally.")
     endif()
     include_directories("${PROJECT_SOURCE_DIR}/deps/mqtt-c/include")
 endif()
@@ -326,22 +406,21 @@ mark_as_advanced(UA_ENABLE_NODESET_COMPILER_DESCRIPTIONS)
 option(UA_ENABLE_DETERMINISTIC_RNG "Do not seed the random number generator (e.g. for unit tests)." OFF)
 mark_as_advanced(UA_ENABLE_DETERMINISTIC_RNG)
 
-option(UA_ENABLE_MALLOC_SINGLETON
-       "Use a global variable pointer for malloc (and free, ...) that can be switched at runtime" OFF)
-mark_as_advanced(UA_ENABLE_MALLOC_SINGLETON)
+option(UA_LWIP_EXTERNAL "LwIP is provided by the parent project" OFF)
+mark_as_advanced(UA_LWIP_EXTERNAL)
 
 option(UA_MSVC_FORCE_STATIC_CRT "Force linking with the static C-runtime library when compiling to static library with MSVC" ON)
 mark_as_advanced(UA_MSVC_FORCE_STATIC_CRT)
 
-option(UA_FILE_NS0 "Override the NodeSet xml file used to generate namespace zero")
-mark_as_advanced(UA_FILE_NS0)
+set(UA_NODESET_DIR ${PROJECT_SOURCE_DIR}/deps/ua-nodeset CACHE STRING "The path to the nodeset directory (e.g. from https://github.com/OPCFoundation/UA-Nodeset)")
+mark_as_advanced(UA_NODESET_DIR)
 
 # Blacklist file passed as --blacklist to the nodeset compiler. All the given nodes will be removed from the generated
 # nodeset, including all the references to and from that node. The format is a node id per line.
 # Supported formats: "i=123" (for NS0), "ns=2;s=asdf" (matches NS2 in that specific file), or recommended
 # "ns=http://opcfoundation.org/UA/DI/;i=123" namespace index independent node id
-option(UA_FILE_NS0_BLACKLIST "File containing blacklisted nodes which should not be included in the generated nodeset code.")
-mark_as_advanced(UA_FILE_NS0_BLACKLIST)
+option(UA_NS0_BLACKLIST "File containing blacklisted nodes which should not be included in the generated nodeset code")
+mark_as_advanced(UA_NS0_BLACKLIST)
 
 # Semaphores/file system may not be available on embedded devices. It can be
 # disabled with the following option
@@ -361,9 +440,6 @@ endif()
 option(UA_DEBUG_DUMP_PKGS "Dump every package received by the server as hexdump format" OFF)
 mark_as_advanced(UA_DEBUG_DUMP_PKGS)
 
-option(UA_ENABLE_HARDENING "Enable Hardening measures (e.g. Stack-Protectors and Fortify)" ON)
-mark_as_advanced(UA_ENABLE_HARDENING)
-
 if(CMAKE_VERSION VERSION_GREATER 3.6)
     set(UA_ENABLE_STATIC_ANALYZER "OFF" CACHE STRING "Enable installed static analyzer during build process (off/minimal/reduced/full)")
     mark_as_advanced(UA_ENABLE_STATIC_ANALYZER)
@@ -381,6 +457,8 @@ endif()
 option(UA_BUILD_EXAMPLES "Build example servers and clients" OFF)
 option(UA_BUILD_TOOLS "Build OPC UA shell tools" OFF)
 option(UA_BUILD_UNIT_TESTS "Build the unit tests" OFF)
+option(UA_BUILD_INTEROP_TESTS "Build cross-SDK interoperability test client and server (CI only)" OFF)
+mark_as_advanced(UA_BUILD_INTEROP_TESTS)
 option(UA_BUILD_FUZZING "Build the fuzzing executables" OFF)
 mark_as_advanced(UA_BUILD_FUZZING)
 if(UA_BUILD_FUZZING)
@@ -401,7 +479,7 @@ mark_as_advanced(UA_BUILD_OSS_FUZZ)
 
 # Android platform message
 if(ANDROID_NDK_TOOLCHAIN_INCLUDED)
-	MESSAGE("Platform is ${CMAKE_SYSTEM_NAME}")
+    MESSAGE("Platform is ${CMAKE_SYSTEM_NAME}")
 endif()
 
 ##########################
@@ -412,13 +490,6 @@ endif()
 set(UA_DYNAMIC_LINKING OFF)
 if(BUILD_SHARED_LIBS)
   set(UA_DYNAMIC_LINKING ON)
-  if(UA_ENABLE_DISCOVERY_MULTICAST)
-      set(MDNSD_DYNAMIC_LINKING ON)
-  endif()
-endif()
-
-if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
-    MESSAGE(WARNING "UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS is enabled. The feature is under development and marked as EXPERIMENTAL")
 endif()
 
 if(UA_ENABLE_SUBSCRIPTIONS_EVENTS AND (NOT UA_ENABLE_SUBSCRIPTIONS))
@@ -436,13 +507,18 @@ endif()
 
 set(open62541_LIBRARIES "")
 set(open62541_PUBLIC_LIBRARIES "")
+set(pkgcfg_libsprivate "")
+set(pkgcfg_requiresprivate "")
 if("${UA_ARCHITECTURE}" STREQUAL "posix")
     list(APPEND open62541_LIBRARIES "m")
+    list(APPEND pkgcfg_libsprivate "-lm")
     if(UA_MULTITHREADING GREATER_EQUAL 100 OR UA_BUILD_UNIT_TESTS AND NOT ANDROID_NDK_TOOLCHAIN_INCLUDED)
         list(APPEND open62541_PUBLIC_LIBRARIES "pthread")
+        list(APPEND pkgcfg_libsprivate "-lpthread")
     endif()
     if(NOT APPLE AND (NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD") AND NOT ANDROID_NDK_TOOLCHAIN_INCLUDED)
         list(APPEND open62541_LIBRARIES "rt")
+        list(APPEND pkgcfg_libsprivate "-lrt")
     endif()
 elseif("${UA_ARCHITECTURE}" STREQUAL "win32")
     list(APPEND open62541_LIBRARIES "ws2_32")
@@ -454,6 +530,7 @@ if(UA_ENABLE_ENCRYPTION_OPENSSL)
     # https://cmake.org/cmake/help/v3.13/module/FindOpenSSL.html
     find_package(OpenSSL REQUIRED)
     list(APPEND open62541_LIBRARIES "${OPENSSL_LIBRARIES}")
+    list(APPEND pkgcfg_requiresprivate "openssl")
     if(WIN32)
         # Add bestcrypt for windows systems
         list(APPEND open62541_LIBRARIES bcrypt)
@@ -464,6 +541,7 @@ if(UA_ENABLE_ENCRYPTION_LIBRESSL)
     # See https://github.com/libressl-portable/portable/blob/master/FindLibreSSL.cmake
     find_package(LibreSSL REQUIRED)
     list(APPEND open62541_LIBRARIES ${LIBRESSL_LIBRARIES})
+    list(APPEND pkgcfg_requiresprivate "openssl")
     if(WIN32)
         # Add bestcrypt for random generator and ws2_32 for crypto
         list(APPEND open62541_LIBRARIES ws2_32 bcrypt)
@@ -476,6 +554,7 @@ if(UA_ENABLE_ENCRYPTION_MBEDTLS)
     # defined in /tools/cmake/FindMbedTLS.cmake.
     find_package(MbedTLS REQUIRED)
     list(APPEND open62541_LIBRARIES ${MBEDTLS_LIBRARIES})
+    list(APPEND pkgcfg_requiresprivate "mbedtls")
     if(WIN32)
         # Add bestcrypt for windows systems
         list(APPEND open62541_LIBRARIES bcrypt)
@@ -484,6 +563,105 @@ endif()
 
 if(UA_ENABLE_TPM2_SECURITY)
     list(APPEND open62541_LIBRARIES ${TPM2_LIB})
+    list(APPEND pkgcfg_requiresprivate "tpm2-pkcs11")
+endif()
+
+if(UA_ENABLE_LWS)
+    find_package(libwebsockets 4.3 REQUIRED)
+    list(APPEND open62541_LIBRARIES ${LIBWEBSOCKETS_LIBRARIES})
+    if(UA_ENABLE_HTTP_COMPRESSION)
+        find_package(ZLIB REQUIRED)
+        list(APPEND open62541_LIBRARIES ZLIB::ZLIB)
+        list(APPEND pkgcfg_requiresprivate "zlib")
+    endif()
+
+    # libwebsockets 5.x conditionally adds trailing ABI padding to
+    # lws_context_creation_info when __STRICT_ANSI__ is not defined. Binary
+    # distribution packages are normally built in a GNU dialect, while
+    # open62541 otherwise uses strict C99. Compile only the LWS adapter boundary
+    # in GNU99 so both sides agree on the public structure layout. A library
+    # built with the smaller strict layout safely ignores the trailing padding.
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+        set_source_files_properties(
+            ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_lws.c
+            ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http.c
+            ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_client.c
+            ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_server.c
+            ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_websocket_lws.c
+            ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_mqtt_lws.c
+            PROPERTIES COMPILE_OPTIONS "-std=gnu99")
+    endif()
+
+    include(CheckCSourceCompiles)
+    include(CMakePushCheckState)
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_INCLUDES ${LIBWEBSOCKETS_INCLUDE_DIR})
+    check_c_source_compiles("#include <lws_config.h>
+        #if !defined(LWS_WITH_TLS) || defined(LWS_WITH_MBEDTLS) || \
+            defined(USE_WOLFSSL) || defined(LWS_WITH_BORINGSSL) || \
+            defined(LWS_WITH_AWSLC)
+        # error libwebsockets does not use OpenSSL
+        #endif
+        int main(void) { return 0; }" UA_LWS_USES_OPENSSL)
+
+    if(UA_ENABLE_LWS_MQTT)
+        check_c_source_compiles("#include <lws_config.h>
+            #if !defined(LWS_ROLE_MQTT)
+            # error libwebsockets does not include the MQTT role
+            #endif
+            int main(void) { return 0; }" UA_LWS_HAS_MQTT)
+        if(NOT UA_LWS_HAS_MQTT)
+            message(FATAL_ERROR "UA_ENABLE_LWS_MQTT requires libwebsockets "
+                                "built with LWS_ROLE_MQTT=ON")
+        endif()
+    endif()
+    cmake_pop_check_state()
+
+    if(UA_LWS_USES_OPENSSL)
+        find_package(OpenSSL REQUIRED COMPONENTS SSL)
+        include_directories(${OPENSSL_INCLUDE_DIR})
+        list(APPEND open62541_LIBRARIES OpenSSL::SSL)
+        list(APPEND pkgcfg_requiresprivate "openssl")
+    endif()
+endif()
+
+if(UA_ENABLE_EVENTLOOP_GLIB)
+    find_package(PkgConfig REQUIRED)
+    pkg_search_module(GLIB2 REQUIRED glib-2.0)
+    include_directories(${GLIB2_INCLUDE_DIRS})
+    list(APPEND open62541_LIBRARIES ${GLIB2_LIBRARIES})
+    list(APPEND pkgcfg_requiresprivate "glib-2.0")
+endif()
+
+if(MINGW)
+    # GCC stack protector support
+    list(APPEND open62541_LIBRARIES ws2_32 ssp)
+endif()
+
+if(UA_ENABLE_DISCOVERY_MULTICAST_AVAHI)
+    find_package(PkgConfig REQUIRED)
+    pkg_search_module(AVAHI REQUIRED avahi-client)
+    include_directories(${AVAHI_INCLUDE_DIRS})
+    list(APPEND open62541_PUBLIC_LIBRARIES "${AVAHI_LIBRARIES}")
+    list(APPEND open62541_LIBRARIES ${AVAHI_LIBRARIES})
+endif()
+
+if(UA_ARCHITECTURE_LWIP)
+    # Assume lwip is provided as a library.
+    # Directly include the source files here if required.
+    #
+    # Example settings (POSIX Port):
+    # LWIP_INCLUDE_DIRS ../lwip/contrib/ports/unix/port/include;
+    #                   ../lwip/contrib/ports/unix/posixlib;
+    #                   ../lwip/contrib/ports/unix/posixlib/include;
+    #                   ../lwip/src/include
+    # LWIP_LIBRARIES    ../lwip/contrib/ports/unix/lib/build/liblwip.so
+    if(NOT UA_LWIP_EXTERNAL)
+        find_package(LWIP REQUIRED)
+    endif()
+    if(LWIP_LIBRARIES)
+        list(APPEND open62541_LIBRARIES ${LWIP_LIBRARIES})
+    endif()
 endif()
 
 #####################
@@ -511,24 +689,54 @@ function(add_cc_flag CC_FLAG)
     endif()
 endfunction()
 
-if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+if((CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang") AND
+    NOT ${UA_ARCHITECTURE} STREQUAL "zephyr")
+
     check_add_cc_flag("-std=c99")   # C99 mode
     check_add_cc_flag("-pipe")      # Avoid writing temporary files (for compiler speed)
     check_add_cc_flag("-Wall")      # Warnings
     check_add_cc_flag("-Wextra")    # More warnings
     check_add_cc_flag("-Wpedantic") # Standard compliance
+    #check_add_cc_flag("-Wshadow")  # still disabled per default
     if(UA_FORCE_WERROR)
         check_add_cc_flag("-Werror") # All warnings are errors
         check_add_cc_flag("-Wunused-command-line-argument") # Warning for command line args instead of error
     endif()
 
-    check_add_cc_flag("-Wno-static-in-inline") # Clang doesn't like the use of static inline methods inside static inline methods
-    check_add_cc_flag("-Wno-overlength-strings") # May happen in the nodeset compiler when complex values are directly encoded
-    check_add_cc_flag("-Wno-unused-parameter") # some methods may require unused arguments to cast to a method pointer
-    check_add_cc_flag("-Wno-maybe-uninitialized") # too many false positives
+    # Some methods need unused arguments to conform with a defined method pointer signature
+    check_add_cc_flag("-Wno-unused-parameter")
+
+    # Clang 22 added -Wcast-function-type-mismatch to -Wextra; suppress the parent group.
+    # add_cc_flag bypasses check_c_compiler_flag which can give false negatives under -Werror.
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND
+       CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "13.0")
+        add_cc_flag("-Wno-cast-function-type")
+    else()
+        check_add_cc_flag("-Wno-cast-function-type")
+    endif()
+
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+        # Clang 22 flags __COUNTER__ as -Wc2y-extensions under -Wpedantic
+        # -std=c99.
+        check_add_cc_flag("-Wno-c2y-extensions")
+
+        # Newer glibc versions use _Generic in string.h headers
+        # for const-qualified overloads. Clang reports this as
+        # -Wc11-extensions when compiling in -std=c99 mode.
+        check_add_cc_flag("-Wno-c11-extensions")
+    endif()
+
+    # Overlength strings may occur in generated code and are not harmful
+    check_add_cc_flag("-Wno-overlength-strings")
 
     # Use a strict subset of the C and C++ languages
     check_add_cc_flag("-Wc++-compat")
+
+    # Wc++-compat enables additional goto/jump restrictions.
+    # But modern compilers do a detailed analysis of values
+    # are actually used uninitialized after a jump:
+    # TODO: The following flag should not be required
+    check_add_cc_flag("-Wno-jump-misses-init")
 
     # Check that format strings (printf/scanf) are sane
     check_add_cc_flag("-Wformat")
@@ -538,23 +746,37 @@ if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # Check prototype definitions
     check_add_cc_flag("-Wmissing-prototypes")
     check_add_cc_flag("-Wstrict-prototypes")
+
     check_add_cc_flag("-Wredundant-decls")
 
     check_add_cc_flag("-Wuninitialized")
     check_add_cc_flag("-Winit-self")
     check_add_cc_flag("-Wcast-qual")
     check_add_cc_flag("-Wstrict-overflow")
+
     check_add_cc_flag("-Wnested-externs")
     check_add_cc_flag("-Wmultichar")
     check_add_cc_flag("-Wundef")
     check_add_cc_flag("-fno-strict-aliasing") # fewer compiler assumptions about pointer types
     check_add_cc_flag("-fexceptions") # recommended for multi-threaded C code, also in combination with C++ code
 
+    # Tree-shaking so that only used functions and data get linked into static binaries
+    # To be used in combination with --gc-sections below
+    check_add_cc_flag("-ffunction-sections")
+    check_add_cc_flag("-fdata-sections")
+
     # Generate position-independent code for shared libraries (adds a performance penalty)
     if(BUILD_SHARED_LIBS)
         add_cc_flag("-fPIC")
     endif()
 
+    # Hardened build (stack protection, etc.)
+    # See the GCC docs on which precise flags this enables.
+    if(UA_ENABLE_HARDENING)
+        check_add_cc_flag("-fhardened")
+    endif()
+
+    # Threading support
     if(UA_MULTITHREADING GREATER_EQUAL 100 AND NOT WIN32)
         check_add_cc_flag("-pthread")
     endif()
@@ -570,63 +792,61 @@ if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # Coverage
     if(UA_ENABLE_COVERAGE)
         check_add_cc_flag("--coverage")
-        if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang")
             check_add_cc_flag("-fprofile-instr-generate")
             check_add_cc_flag("-fcoverage-mapping")
+            check_add_cc_flag("-fprofile-arcs")
+            check_add_cc_flag("-ftest-coverage")
         endif()
     endif()
 
-    if(NOT MINGW AND NOT UA_BUILD_OSS_FUZZ)
-        if(UA_ENABLE_HARDENING)
-            check_add_cc_flag("-fstack-protector-strong") # more performant stack protector, available since gcc 4.9
-            check_add_cc_flag("-fstack-clash-protection") # increased reliability of stack overflow detection, available since gcc 8
-            # future use (control flow integrity protection)
-            if(NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD")
-                check_add_cc_flag("-mcet")
-                check_add_cc_flag("-fcf-protection")
-            endif()
-        endif()
-
-        # IPO requires too much memory for unit tests
-        # GCC docu recommends to compile all files with the same options, therefore ignore it completely
-        if(NOT UA_BUILD_UNIT_TESTS AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
-            # needed to check if IPO is supported (check needs cmake > 3.9)
-            if("${CMAKE_VERSION}" VERSION_GREATER 3.9)
-                cmake_policy(SET CMP0069 NEW) # needed as long as required cmake < 3.9
-                include(CheckIPOSupported)
-                check_ipo_supported(RESULT CC_HAS_IPO) # Inter Procedural Optimization / Link Time Optimization (should be same as -flto)
-                if(CC_HAS_IPO AND NOT UA_DEBUG)
-                    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-                endif()
-            endif()
+    # Inter Procedural Optimization / Link Time Optimization (should be same as -flto)
+    # IPO requires too much memory for unit tests
+    # GCC docu recommends to compile all files with the same options, therefore ignore it completely
+    if(NOT UA_DEBUG AND NOT UA_BUILD_UNIT_TESTS AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT CC_HAS_IPO)
+        if(CC_HAS_IPO)
+            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
         endif()
     endif()
 
     # Linker
     set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS "") # cmake sets -rdynamic by default
+    if(APPLE)
+        set(CMAKE_C_LINK_FLAGS "${CMAKE_C_LINK_FLAGS} -Wl,-dead_strip")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-dead_strip")
+    else()
+        set(CMAKE_C_LINK_FLAGS "${CMAKE_C_LINK_FLAGS} -Wl,--gc-sections")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections")
+    endif()
 
     # Debug
     if(UA_ENABLE_DEBUG_SANITIZER AND BUILD_TYPE_LOWER_CASE STREQUAL "debug" AND UNIX AND NOT UA_BUILD_OSS_FUZZ AND
-       CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT UA_ENABLE_UNIT_TESTS_MEMCHECK)
+       CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT UA_ENABLE_UNIT_TESTS_MEMCHECK)
         # Add default sanitizer settings when using clang and Debug build.
         # This allows e.g. CLion to find memory locations for SegFaults
-        message(STATUS "Sanitizer enabled")
-        set(SANITIZER_FLAGS "-g -fno-omit-frame-pointer -gline-tables-only -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=leak -fsanitize=undefined")
+        set(SANITIZER_FLAGS "-g -fno-omit-frame-pointer -fsanitize=address,undefined")
         if(CMAKE_CXX_COMPILER_VERSION AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10.0)
             set(SANITIZER_FLAGS "${SANITIZER_FLAGS} -fsanitize-coverage=trace-pc-guard")
         endif()
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SANITIZER_FLAGS}")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SANITIZER_FLAGS}")
-    endif()
-
-    if(NOT MINGW AND UA_ENABLE_HARDENING AND ((CMAKE_BUILD_TYPE STREQUAL "Release") OR (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")))
-        check_add_cc_flag("-D_FORTIFY_SOURCE=2") # run-time buffer overflow detection (needs at least -O1)
+        set(CMAKE_REQUIRED_FLAGS_BACKUP "${CMAKE_REQUIRED_FLAGS}")
+        set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${SANITIZER_FLAGS}")
+        check_c_compiler_flag("${SANITIZER_FLAGS}" CC_HAS_DEBUG_SANITIZER)
+        set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS_BACKUP}")
+        unset(CMAKE_REQUIRED_FLAGS_BACKUP)
+        if(CC_HAS_DEBUG_SANITIZER)
+            message(STATUS "Sanitizer enabled")
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SANITIZER_FLAGS}")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SANITIZER_FLAGS}")
+        else()
+            message(STATUS "Sanitizer disabled: compiler does not support ${SANITIZER_FLAGS}")
+        endif()
+        unset(CC_HAS_DEBUG_SANITIZER CACHE)
     endif()
 
     # Strip release builds
     if(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel" OR CMAKE_BUILD_TYPE STREQUAL "Release")
-        check_add_cc_flag("-ffunction-sections")
-        check_add_cc_flag("-fdata-sections")
         check_add_cc_flag("-fno-unwind-tables")
         check_add_cc_flag("-fno-asynchronous-unwind-tables")
         check_add_cc_flag("-fno-math-errno")
@@ -639,13 +859,6 @@ if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
         if(NOT OS9)
             set(CMAKE_C_LINK_FLAGS "${CMAKE_C_LINK_FLAGS} -s")
             set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -s")
-        endif()
-        if(APPLE)
-            set(CMAKE_C_LINK_FLAGS "${CMAKE_C_LINK_FLAGS} -Wl,-dead_strip")
-            set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-dead_strip")
-        else()
-            set(CMAKE_C_LINK_FLAGS "${CMAKE_C_LINK_FLAGS} -Wl,--gc-sections")
-            set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections")
         endif()
         if(NOT WIN32 AND NOT CYGWIN AND NOT APPLE)
             # these settings reduce the binary size by ~2kb
@@ -675,7 +888,7 @@ if(MSVC)
 endif()
 
 if(UA_BUILD_FUZZING OR UA_BUILD_OSS_FUZZ)
-    set(UA_ENABLE_MALLOC_SINGLETON ON)
+    add_compile_definitions(UA_ARCH_HEADER="${PROJECT_SOURCE_DIR}/tests/fuzz/fuzz_arch.h")
 endif()
 
 #########################
@@ -687,26 +900,6 @@ file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/src_generated")
 
 # Generate the config.h
 configure_file(include/open62541/config.h.in ${PROJECT_BINARY_DIR}/src_generated/open62541/config.h)
-
-if(UA_ENABLE_DISCOVERY_MULTICAST)
-  include(GenerateExportHeader)
-    set(MDNSD_LOGLEVEL 300 CACHE STRING "Level at which logs shall be reported" FORCE)
-    
-    # create a "fake" empty library to generate the export header macros
-    if (APPLE)
-    	add_library(libmdnsd INTERFACE ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/mdnsd.h)
-    else()
-    	add_library(libmdnsd ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/mdnsd.h)
-    endif()
-    
-    set_property(TARGET libmdnsd PROPERTY LINKER_LANGUAGE C)
-    set_property(TARGET libmdnsd PROPERTY DEFINE_SYMBOL "MDNSD_DYNAMIC_LINKING_EXPORT")
-    configure_file("deps/mdnsd/libmdnsd/mdnsd_config_extra.in"
-                   "${PROJECT_BINARY_DIR}/src_generated/mdnsd_config_extra")
-    file(READ "${PROJECT_BINARY_DIR}/src_generated/mdnsd_config_extra" MDNSD_CONFIG_EXTRA)
-    generate_export_header(libmdnsd EXPORT_FILE_NAME "${PROJECT_BINARY_DIR}/src_generated/mdnsd_config.h"
-                           BASE_NAME MDNSD DEFINE_NO_DEPRECATED CUSTOM_CONTENT_FROM_VARIABLE MDNSD_CONFIG_EXTRA)
-endif()
 
 # Exported headers
 set(exported_headers ${PROJECT_BINARY_DIR}/src_generated/open62541/config.h
@@ -721,15 +914,17 @@ set(exported_headers ${PROJECT_BINARY_DIR}/src_generated/open62541/config.h
                      ${PROJECT_SOURCE_DIR}/include/open62541/plugin/certificategroup.h
                      ${PROJECT_SOURCE_DIR}/include/open62541/plugin/securitypolicy.h
                      ${PROJECT_SOURCE_DIR}/include/open62541/plugin/eventloop.h
-                     ${PROJECT_SOURCE_DIR}/include/open62541/plugin/nodestore.h
                      ${PROJECT_SOURCE_DIR}/include/open62541/plugin/historydatabase.h
-                     ${PROJECT_SOURCE_DIR}/include/open62541/server_pubsub.h
-                     ${PROJECT_SOURCE_DIR}/include/open62541/pubsub.h
                      ${PROJECT_SOURCE_DIR}/include/open62541/client.h
-                     ${PROJECT_SOURCE_DIR}/include/open62541/server.h
-                     ${PROJECT_SOURCE_DIR}/include/open62541/client_highlevel.h
+                     ${PROJECT_SOURCE_DIR}/include/open62541/client_highlevel_async.h
                      ${PROJECT_SOURCE_DIR}/include/open62541/client_subscriptions.h
-                     ${PROJECT_SOURCE_DIR}/include/open62541/client_highlevel_async.h)
+                     ${PROJECT_SOURCE_DIR}/include/open62541/client_highlevel.h
+                     ${PROJECT_SOURCE_DIR}/include/open62541/server_pubsub.h
+                     ${PROJECT_SOURCE_DIR}/include/open62541/server.h
+                     ${PROJECT_SOURCE_DIR}/include/open62541/driver/alarms_conditions.h
+                     ${PROJECT_SOURCE_DIR}/include/open62541/driver/mdns.h
+                     ${PROJECT_SOURCE_DIR}/include/open62541/pubsub.h
+                     ${PROJECT_SOURCE_DIR}/include/open62541/plugin/nodestore.h)
 
 # Main Library
 
@@ -738,41 +933,59 @@ set(lib_headers ${PROJECT_SOURCE_DIR}/deps/open62541_queue.h
                 ${PROJECT_SOURCE_DIR}/deps/libc_time.h
                 ${PROJECT_SOURCE_DIR}/deps/base64.h
                 ${PROJECT_SOURCE_DIR}/deps/dtoa.h
+                ${PROJECT_SOURCE_DIR}/deps/musl_inet_pton.h
                 ${PROJECT_SOURCE_DIR}/deps/mp_printf.h
+                ${PROJECT_SOURCE_DIR}/deps/utf8.h
                 ${PROJECT_SOURCE_DIR}/deps/itoa.h
+                ${PROJECT_SOURCE_DIR}/deps/yxml.h
                 ${PROJECT_SOURCE_DIR}/deps/ziptree.h
+                ${PROJECT_SOURCE_DIR}/deps/parse_num.h
                 ${PROJECT_SOURCE_DIR}/src/ua_types_encoding_binary.h
-                ${PROJECT_SOURCE_DIR}/src/util/ua_util_internal.h
                 ${PROJECT_BINARY_DIR}/src_generated/open62541/transport_generated.h
                 ${PROJECT_SOURCE_DIR}/src/ua_securechannel.h
+                ${PROJECT_SOURCE_DIR}/src/util/ua_util_internal.h
+                ${PROJECT_SOURCE_DIR}/src/util/nodeset_loader/ua_nodeset_loader_internal.h
                 ${PROJECT_SOURCE_DIR}/src/server/ua_session.h
                 ${PROJECT_SOURCE_DIR}/src/server/ua_subscription.h
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services.h
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server_async.h
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server_internal.h
-                ${PROJECT_SOURCE_DIR}/src/client/ua_client_internal.h
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_networkmessage.h
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_internal.h
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_keystorage.h)
+                ${PROJECT_SOURCE_DIR}/src/client/ua_client_internal.h)
+
+if(UA_ENABLE_AMALGAMATION OR (UA_ENABLE_ENCRYPTION AND UA_ARCHITECTURE_WIN32))
+    list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/deps/tr_dirent.h)
+endif()
 
 set(lib_sources ${PROJECT_SOURCE_DIR}/src/ua_types.c
+                ${PROJECT_SOURCE_DIR}/src/ua_types_definition.c
                 ${PROJECT_SOURCE_DIR}/src/ua_types_encoding_binary.c
                 ${PROJECT_BINARY_DIR}/src_generated/open62541/types_generated.c
                 ${PROJECT_BINARY_DIR}/src_generated/open62541/transport_generated.c
                 ${PROJECT_BINARY_DIR}/src_generated/open62541/statuscodes.c
                 ${PROJECT_SOURCE_DIR}/src/util/ua_util.c
+                ${PROJECT_SOURCE_DIR}/src/util/ua_types_lex.c
+                ${PROJECT_SOURCE_DIR}/src/util/ua_encryptedsecret.c
+                ${PROJECT_SOURCE_DIR}/src/util/nodeset_loader/ua_nodeset.c
+                ${PROJECT_SOURCE_DIR}/src/util/nodeset_loader/ua_nodeset_loader.c
+                ${PROJECT_SOURCE_DIR}/src/util/nodeset_loader/ua_nodeset_loader_apply.c
                 ${PROJECT_SOURCE_DIR}/src/ua_securechannel.c
                 ${PROJECT_SOURCE_DIR}/src/ua_securechannel_crypto.c
                 # server
                 ${PROJECT_SOURCE_DIR}/src/server/ua_session.c
-                ${PROJECT_SOURCE_DIR}/src/server/ua_nodes.c
+                ${PROJECT_SOURCE_DIR}/src/server/ua_server_nodes.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server_ns0.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server_ns0_diagnostics.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server_config.c
-                ${PROJECT_SOURCE_DIR}/src/server/ua_server_binary.c
+                ${PROJECT_SOURCE_DIR}/src/server/ua_transport_tcp.c
+                ${PROJECT_SOURCE_DIR}/src/server/ua_transport_tcp_reverse.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server_utils.c
+                ${PROJECT_SOURCE_DIR}/src/server/ua_server_auditing.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_server_async.c
+                ${PROJECT_SOURCE_DIR}/src/server/ua_subscription.c
+                ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_datachange.c
+                ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_event.c
+                ${PROJECT_SOURCE_DIR}/drivers/alarms_conditions.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services_view.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services_method.c
@@ -782,109 +995,278 @@ set(lib_sources ${PROJECT_SOURCE_DIR}/src/ua_types.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services_subscription.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services_monitoreditem.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services_securechannel.c
-                ${PROJECT_SOURCE_DIR}/src/server/ua_services_nodemanagement.c
-                # pubsub
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_networkmessage_binary.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_connection.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_dataset.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_writer.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_writergroup.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_reader.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_readergroup.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_manager.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_ns0.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_keystorage.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_securitygroup.c
-                ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_config.c
-                # client
-                ${PROJECT_SOURCE_DIR}/src/client/ua_client.c
-                ${PROJECT_SOURCE_DIR}/src/client/ua_client_connect.c
-                ${PROJECT_SOURCE_DIR}/src/client/ua_client_discovery.c
-                ${PROJECT_SOURCE_DIR}/src/client/ua_client_highlevel.c
-                ${PROJECT_SOURCE_DIR}/src/client/ua_client_subscriptions.c
-                # dependencies
+                ${PROJECT_SOURCE_DIR}/src/server/ua_services_nodemanagement.c)
+
+if(UA_ENABLE_DRIVER_GDS_RECEIVER)
+    list(APPEND exported_headers
+         ${PROJECT_SOURCE_DIR}/include/open62541/driver/gds_receiver.h)
+    list(APPEND lib_headers
+         ${PROJECT_SOURCE_DIR}/drivers/gds_receiver/gds_receiver_internal.h)
+    list(APPEND lib_sources
+         ${PROJECT_SOURCE_DIR}/drivers/gds_receiver/gds_receiver.c
+         ${PROJECT_SOURCE_DIR}/drivers/gds_receiver/gds_receiver_ns0.c)
+endif()
+
+if(UA_ENABLE_RBAC)
+    # RBAC uses the well-known TrustedApplication role and the matching
+    # IdentityCriteriaType value. Both are missing from tools/schema, which is
+    # an older revision than the ua-nodeset submodule used for FULL.
+    # TODO: lift the restriction by aligning tools/schema with that revision.
+    if(NOT UA_NAMESPACE_ZERO STREQUAL "FULL")
+        message(FATAL_ERROR "RBAC requires UA_NAMESPACE_ZERO=FULL")
+    endif()
+    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_server_rbac.c)
+    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_server_ns0_rbac.c)
+    list(APPEND internal_headers ${PROJECT_SOURCE_DIR}/src/server/ua_server_rbac.h)
+endif()
+
+list(APPEND lib_sources
+     ${PROJECT_SOURCE_DIR}/src/server/ua_transport_ws.c
+     ${PROJECT_SOURCE_DIR}/src/ua_securechannel_http.c
+     ${PROJECT_SOURCE_DIR}/src/server/ua_transport_http.c)
+
+# Dependencies
+set(lib_sources ${lib_sources}
                 ${PROJECT_SOURCE_DIR}/deps/libc_time.c
                 ${PROJECT_SOURCE_DIR}/deps/pcg_basic.c
                 ${PROJECT_SOURCE_DIR}/deps/base64.c
                 ${PROJECT_SOURCE_DIR}/deps/dtoa.c
+                ${PROJECT_SOURCE_DIR}/deps/musl_inet_pton.c
                 ${PROJECT_SOURCE_DIR}/deps/mp_printf.c
+                ${PROJECT_SOURCE_DIR}/deps/utf8.c
                 ${PROJECT_SOURCE_DIR}/deps/itoa.c
-                ${PROJECT_SOURCE_DIR}/deps/ziptree.c)
+                ${PROJECT_SOURCE_DIR}/deps/yxml.c
+                ${PROJECT_SOURCE_DIR}/deps/ziptree.c
+                ${PROJECT_SOURCE_DIR}/deps/parse_num.c)
 
 if(UA_GENERATED_NAMESPACE_ZERO)
     list(APPEND lib_headers ${PROJECT_BINARY_DIR}/src_generated/open62541/namespace0_generated.h)
     list(APPEND lib_sources ${PROJECT_BINARY_DIR}/src_generated/open62541/namespace0_generated.c)
 endif()
 
-if(UA_ENABLE_PARSING)
-    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/util/ua_types_lex.c)
-    if(UA_ENABLE_SUBSCRIPTIONS_EVENTS)
-        list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_parser.h)
-        list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_parser.c
-                                ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_lex.c
-                                ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_grammar.c)
+if(UA_ENABLE_DISCOVERY OR UA_ENABLE_AMALGAMATION)
+    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/client/ua_client.c
+                            ${PROJECT_SOURCE_DIR}/src/client/ua_client_connect.c
+                            ${PROJECT_SOURCE_DIR}/src/client/ua_client_connect_http.c
+                            ${PROJECT_SOURCE_DIR}/src/client/ua_client_discovery.c
+                            ${PROJECT_SOURCE_DIR}/src/client/ua_client_highlevel.c
+                            ${PROJECT_SOURCE_DIR}/src/client/ua_client_subscriptions.c
+                            ${PROJECT_SOURCE_DIR}/src/client/ua_client_util.c)
+endif()
+
+if(UA_ENABLE_SUBSCRIPTIONS_EVENTS)
+    if(NOT UA_ENABLE_JSON_ENCODING)
+        message(FATAL_ERROR "Event Filter Parsing require JSON to be enabled")
+    endif()
+    list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_parser.h)
+    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_server_modelchange.c
+                            ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_parser.c
+                            ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_lex.c
+                            ${PROJECT_SOURCE_DIR}/src/util/ua_eventfilter_grammar.c)
+endif()
+
+if(UA_ENABLE_DIAGNOSTICS)
+    # ua_server_ns0_diagnostics.c looks up struct members by name via
+    # UA_DataType_getStructMember, which only exists with type descriptions
+    if(NOT UA_ENABLE_TYPEDESCRIPTION)
+        message(FATAL_ERROR "Diagnostics require type descriptions to be enabled")
     endif()
 endif()
 
 if(UA_ENABLE_JSON_ENCODING)
+    if(NOT UA_ENABLE_TYPEDESCRIPTION)
+        message(FATAL_ERROR "JSON encoding requires parsing and type descriptions to be enabled")
+    endif()
     list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/deps/cj5.h
-                            ${PROJECT_SOURCE_DIR}/deps/parse_num.h
                             ${PROJECT_SOURCE_DIR}/src/ua_types_encoding_json.h)
     list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/deps/cj5.c
-                            ${PROJECT_SOURCE_DIR}/deps/parse_num.c
-                            ${PROJECT_SOURCE_DIR}/src/ua_types_encoding_json.c
-                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_networkmessage_json.c)
+                            ${PROJECT_SOURCE_DIR}/src/ua_types_encoding_json.c)
+    if(UA_ENABLE_PUBSUB)
+        list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_networkmessage_json.c)
+    endif()
+endif()
+
+if(UA_ENABLE_PUBSUB)
+    list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_networkmessage.h
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_internal.h
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_keystorage.h)
+
+    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_networkmessage_binary.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_connection.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_dataset.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_writer.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_writergroup.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_reader.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_readergroup.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_manager.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_ns0.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_ns0_sks.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_keystorage.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_securitygroup.c
+                            ${PROJECT_SOURCE_DIR}/src/pubsub/ua_pubsub_config.c)
 endif()
 
 if(UA_ENABLE_XML_ENCODING)
-    if(NOT UA_ENABLE_JSON_ENCODING)
-        list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/deps/parse_num.h)
-        list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/deps/parse_num.c)
+    if(NOT UA_ENABLE_TYPEDESCRIPTION)
+        message(FATAL_ERROR "XML encoding requires parsing and type descriptions to be enabled")
     endif()
     list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/src/ua_types_encoding_xml.h)
     list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/ua_types_encoding_xml.c)
-endif()
-
-if(UA_ENABLE_SUBSCRIPTIONS)
-    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_subscription.c
-                            ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_datachange.c)
-    if(UA_ENABLE_SUBSCRIPTIONS_EVENTS)
-        if(UA_NAMESPACE_ZERO STREQUAL "MINIMAL")
-            message(FATAL_ERROR "Events require at least the reduced Namespace Zero")
-        endif()
-        list(APPEND lib_sources
-                    ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_event.c
-                    ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_eventfilter.c)
-        if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
-            list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_alarms_conditions.c)
-        endif()
-    endif()
+else()
+    message(WARNING "UA_ENABLE_XML_ENCODING is not enabled. Value attributes will not be extracted from XML.")
 endif()
 
 if(UA_DEBUG_DUMP_PKGS)
     list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/plugins/ua_debug_dump_pkgs.c)
 endif()
 
-if(UA_ENABLE_DISCOVERY_MULTICAST)
-    # prepend in list, otherwise it complains that winsock2.h has to be included before windows.h
+if(UA_ENABLE_DISCOVERY_MULTICAST_MDNSD)
+    if(NOT UA_ARCHITECTURE_POSIX)
+        message(FATAL_ERROR "The bundled mdnsd discovery driver requires UA_ARCHITECTURE=posix")
+    endif()
+
+    # Copy mdnsd libmdnsd files into src_generated/mdnsd/.
+    set(MDNSD_GENERATED_DIR "${PROJECT_BINARY_DIR}/src_generated/mdnsd")
+    file(MAKE_DIRECTORY "${MDNSD_GENERATED_DIR}")
+
+    set(MDNSD_LIBMDNSD_HEADERS 1035.h xht.h sdtxt.h inet.h mdnsd.h)
+    set(MDNSD_LIBMDNSD_SOURCES 1035.c xht.c sdtxt.c inet.c mdnsd.c log.c)
+
+    foreach(_f IN LISTS MDNSD_LIBMDNSD_HEADERS MDNSD_LIBMDNSD_SOURCES)
+        configure_file(
+            "${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/${_f}"
+            "${MDNSD_GENERATED_DIR}/${_f}"
+            COPYONLY)
+        file(READ "${MDNSD_GENERATED_DIR}/${_f}" _content)
+        # Ensure open62541/config.h (which sets _GNU_SOURCE etc.) is included
+        # before any system header, then remove any original config.h include.
+        string(PREPEND _content "#include \"open62541/config.h\"\n")
+        string(REGEX REPLACE "#include \"config\\.h\"\n?" "" _content "${_content}")
+        string(REGEX REPLACE "([^A-Za-z0-9_])class([^A-Za-z0-9_])" "\\1clazz\\2"
+               _content "${_content}")
+        string(REGEX REPLACE "([^A-Za-z0-9_])class([^A-Za-z0-9_])" "\\1clazz\\2"
+               _content "${_content}")
+        string(REGEX REPLACE "([^A-Za-z0-9_])new([^A-Za-z0-9_])" "\\1new_\\2"
+               _content "${_content}")
+        string(REGEX REPLACE "([^A-Za-z0-9_])new([^A-Za-z0-9_])" "\\1new_\\2"
+               _content "${_content}")
+        if(_f STREQUAL "mdnsd.h")
+            string(REPLACE "#define DBG(fmt, args...)  mdnsd_log(LOG_DEBUG, \"%s(): \" fmt, __func__, ##args)"
+                           "#define DBG(fmt, ...)  mdnsd_log(LOG_DEBUG, \"%s(): \" fmt, __func__, __VA_ARGS__)"
+                           _content "${_content}")
+            string(REPLACE "#define INFO(fmt, args...) mdnsd_log(LOG_INFO, \"%s(): \" fmt, __func__, ##args)"
+                           "#define INFO(fmt, ...) mdnsd_log(LOG_INFO, \"%s(): \" fmt, __func__, __VA_ARGS__)"
+                           _content "${_content}")
+            string(REPLACE "#define NOTE(fmt, args...) mdnsd_log(LOG_NOTICE, fmt, ##args)"
+                           "#define NOTE(...) mdnsd_log(LOG_NOTICE, __VA_ARGS__)"
+                           _content "${_content}")
+            string(REPLACE "#define WARN(fmt, args...) mdnsd_log(LOG_WARNING, fmt, ##args)"
+                           "#define WARN(...) mdnsd_log(LOG_WARNING, __VA_ARGS__)"
+                           _content "${_content}")
+            string(REPLACE "#define ERR(fmt, args...)  mdnsd_log(LOG_ERR, fmt, ##args)"
+                           "#define ERR(...)  mdnsd_log(LOG_ERR, __VA_ARGS__)"
+                           _content "${_content}")
+        endif()
+        if(_f STREQUAL "xht.c")
+            string(REPLACE
+[=[	_xht_set(h, ckey, cval, 1);]=]
+[=[	if (!_xht_set(h, ckey, cval, 1)) {
+		free(ckey);
+		free(cval);
+	}]=]
+                _content "${_content}")
+        elseif(_f STREQUAL "mdnsd.c")
+            string(REPLACE
+[=[		c->rr.rdname = strdup(r->known.ns.name);]=]
+[=[		if (!r->known.ns.name) {
+			free(c->rr.rdata);
+			free(c->rr.name);
+			free(c);
+			return 1;
+		}
+		c->rr.rdname = strdup(r->known.ns.name);]=]
+                _content "${_content}")
+            string(REPLACE
+[=[		c->rr.rdname = strdup(r->known.srv.name);]=]
+[=[		if (!r->known.srv.name) {
+			free(c->rr.rdata);
+			free(c->rr.name);
+			free(c);
+			return 1;
+		}
+		c->rr.rdname = strdup(r->known.srv.name);]=]
+                _content "${_content}")
+            string(REPLACE
+[=[	memset(buf, 0, sizeof(buf));]=]
+[=[	memset(buf, 0, sizeof(buf));
+	memset(&from, 0, sizeof(from));]=]
+                _content "${_content}")
+            string(REPLACE
+[=[static bool _is_local_ipv4(mdns_daemon_t *d, struct in_addr ip)]=]
+[=[static bool _is_local_ipv4(mdns_daemon_t *d, const struct in_addr *ip)]=]
+                _content "${_content}")
+            string(REPLACE
+[=[	if (ip.s_addr == d->addr.s_addr)]=]
+[=[	if (ip->s_addr == d->addr.s_addr)]=]
+                _content "${_content}")
+            string(REPLACE
+[=[		if (sin->sin_addr.s_addr == ip.s_addr)]=]
+[=[		if (sin->sin_addr.s_addr == ip->s_addr)]=]
+                _content "${_content}")
+            string(REPLACE
+[=[	return _is_local_ipv4(d, ((const struct sockaddr_in *)from)->sin_addr);]=]
+[=[	if (inet_family(from) != AF_INET)
+		return false;
+
+	const struct sockaddr_in *sin4 = (const struct sockaddr_in *)from;
+	return _is_local_ipv4(d, &sin4->sin_addr);]=]
+                _content "${_content}")
+        endif()
+        file(WRITE "${MDNSD_GENERATED_DIR}/${_f}" "${_content}")
+    endforeach()
+
+    file(WRITE "${MDNSD_GENERATED_DIR}/config.h"
+         "#include \"open62541/config.h\"\n")
+
+    # Suppress warnings from the generated (upstream) mdnsd C files.
+    set_source_files_properties(
+        ${MDNSD_GENERATED_DIR}/1035.c
+        ${MDNSD_GENERATED_DIR}/xht.c
+        ${MDNSD_GENERATED_DIR}/sdtxt.c
+        ${MDNSD_GENERATED_DIR}/inet.c
+        ${MDNSD_GENERATED_DIR}/mdnsd.c
+        ${MDNSD_GENERATED_DIR}/log.c
+        PROPERTIES COMPILE_FLAGS
+            "-Wno-c++-compat -Wno-variadic-macros -Wno-pedantic -Wno-implicit-function-declaration -Wno-nested-externs -Wno-int-to-pointer-cast -Wno-format-nonliteral -Wno-pointer-sign")
+    set_source_files_properties(
+        ${PROJECT_SOURCE_DIR}/drivers/discovery_mdns_mdnsd.c
+        PROPERTIES COMPILE_FLAGS
+            "-Wno-variadic-macros")
+
     list(APPEND lib_headers
-         ${PROJECT_BINARY_DIR}/src_generated/mdnsd_config.h
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/1035.h
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/xht.h
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/sdtxt.h
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/mdnsd.h)
+        ${MDNSD_GENERATED_DIR}/1035.h
+        ${MDNSD_GENERATED_DIR}/xht.h
+        ${MDNSD_GENERATED_DIR}/sdtxt.h
+        ${MDNSD_GENERATED_DIR}/inet.h
+        ${MDNSD_GENERATED_DIR}/mdnsd.h)
     list(APPEND lib_sources
-         ${PROJECT_SOURCE_DIR}/src/server/ua_discovery_mdns.c
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/1035.c
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/xht.c
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/sdtxt.c
-         ${PROJECT_SOURCE_DIR}/deps/mdnsd/libmdnsd/mdnsd.c)
+        ${PROJECT_SOURCE_DIR}/drivers/discovery_mdns_mdnsd.c
+        ${MDNSD_GENERATED_DIR}/1035.c
+        ${MDNSD_GENERATED_DIR}/xht.c
+        ${MDNSD_GENERATED_DIR}/sdtxt.c
+        ${MDNSD_GENERATED_DIR}/inet.c
+        ${MDNSD_GENERATED_DIR}/mdnsd.c
+        ${MDNSD_GENERATED_DIR}/log.c)
+endif()
+
+if(UA_ENABLE_DISCOVERY_MULTICAST_AVAHI)
+    list(APPEND lib_sources
+         ${PROJECT_SOURCE_DIR}/drivers/discovery_mdns_avahi.c)
 endif()
 
 if(UA_BUILD_FUZZING OR UA_BUILD_OSS_FUZZ)
     list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/tests/fuzz/custom_memory_manager.c)
 endif()
-
 
 # Plugins
 set(plugin_headers ${PROJECT_SOURCE_DIR}/plugins/include/open62541/plugin/accesscontrol_default.h
@@ -899,29 +1281,134 @@ set(plugin_headers ${PROJECT_SOURCE_DIR}/plugins/include/open62541/plugin/access
 set(plugin_sources ${PROJECT_SOURCE_DIR}/plugins/ua_log_stdout.c
                    ${PROJECT_SOURCE_DIR}/plugins/ua_accesscontrol_default.c
                    ${PROJECT_SOURCE_DIR}/plugins/ua_nodestore_ziptree.c
-                   ${PROJECT_SOURCE_DIR}/plugins/ua_nodestore_hashmap.c
                    ${PROJECT_SOURCE_DIR}/plugins/ua_config_default.c
                    ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_certificategroup_none.c
                    ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_securitypolicy_none.c)
 
-# Always add the POSIX eventloop. The files internally check for the configured architecture
-list(APPEND plugin_sources
-     ${PROJECT_SOURCE_DIR}/arch/clock.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_common/timer.h
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_common/timer.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_common/eventloop_common.h
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_common/eventloop_common.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix/eventloop_posix.h
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix/eventloop_posix.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix/eventloop_posix_tcp.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix/eventloop_posix_udp.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix/eventloop_posix_eth.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_posix/eventloop_posix_interrupt.c
-     ${PROJECT_SOURCE_DIR}/arch/eventloop_common/eventloop_mqtt.c)
+# Add clock implementation based on the base architecture
+if(UA_ARCHITECTURE_POSIX OR UA_ENABLE_AMALGAMATION)
+    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/arch/posix/clock_posix.c)
+endif()
+if(UA_ARCHITECTURE_WIN32 OR UA_ENABLE_AMALGAMATION)
+    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/arch/win32/clock_win32.c)
+endif()
 
-# For file based server configuration
+if(UA_ARCHITECTURE_ZEPHYR)
+    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/arch/zephyr/clock_zephyr.c)
+endif()
+
+if(UA_ARCHITECTURE_FREERTOS)
+    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/arch/freertos/clock_freertos.c)
+endif()
+
+# Add eventloop and common files (mutually exclusive based on eventloop type)
+if(UA_ARCHITECTURE_LWIP)
+    # LWIP eventloop (for freertos-lwip or posix-lwip)
+    list(APPEND plugin_sources
+            ${PROJECT_SOURCE_DIR}/arch/common/timer.h
+            ${PROJECT_SOURCE_DIR}/arch/common/timer.c
+            ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.h
+            ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.c
+            ${PROJECT_SOURCE_DIR}/arch/lwip/eventloop_lwip.h
+            ${PROJECT_SOURCE_DIR}/arch/lwip/eventloop_lwip.c
+            ${PROJECT_SOURCE_DIR}/arch/lwip/eventloop_lwip_tcp.c
+            ${PROJECT_SOURCE_DIR}/arch/lwip/eventloop_lwip_udp.c)
+elseif(UA_ARCHITECTURE_ZEPHYR)
+    # Zephyr eventloop
+    list(APPEND plugin_sources
+         ${PROJECT_SOURCE_DIR}/arch/common/timer.h
+         ${PROJECT_SOURCE_DIR}/arch/common/timer.c
+         ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.h
+         ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.c
+         ${PROJECT_SOURCE_DIR}/arch/zephyr/eventloop_zephyr.h
+         ${PROJECT_SOURCE_DIR}/arch/zephyr/eventloop_zephyr.c
+         ${PROJECT_SOURCE_DIR}/arch/zephyr/eventloop_zephyr_tcp.c)
+elseif(UA_ARCHITECTURE_WIN32)
+    # Win32 IOCP event loop
+    list(APPEND plugin_sources
+         ${PROJECT_SOURCE_DIR}/arch/common/timer.h
+         ${PROJECT_SOURCE_DIR}/arch/common/timer.c
+         ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.h
+         ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.c
+         ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp.h
+         ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp.c
+         ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp_tcp.c
+         ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp_udp.c
+         ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp_interrupt.c)
+elseif(UA_ARCHITECTURE_POSIX OR UA_ENABLE_AMALGAMATION)
+    # POSIX eventloop (default for amalgamation)
+    list(APPEND plugin_sources
+         ${PROJECT_SOURCE_DIR}/arch/common/timer.h
+         ${PROJECT_SOURCE_DIR}/arch/common/timer.c
+         ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.h
+         ${PROJECT_SOURCE_DIR}/arch/common/eventloop_common.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix.h
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_tcp.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_udp.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_eth.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_interrupt.c)
+    if(UA_ENABLE_AMALGAMATION)
+        list(APPEND plugin_sources
+             ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp.h
+             ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp.c
+             ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp_tcp.c
+             ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp_udp.c
+             ${PROJECT_SOURCE_DIR}/arch/win32/eventloop_iocp_interrupt.c)
+    endif()
+    if(UA_ENABLE_EVENTLOOP_GLIB)
+        list(APPEND plugin_sources
+             ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_glib.h
+             ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_glib.c
+             ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_glib_interrupt.c)
+    endif()
+endif()
+
+if(UA_ARCHITECTURE_FREERTOS)
+    # Assume the FreeRTOS POSIX "Simulator".
+    # Change this to directly include the source files if required.
+    set(FREERTOS_KERNEL_PATH "~/software/FreeRTOSv202411.00/FreeRTOS/Source" CACHE STRING "")
+    set(FREERTOS_PORT_PATH "~/software/FreeRTOSv202411.00/FreeRTOS/Demo/Posix_GCC" CACHE STRING "")
+    include(arch/freertos/freertos.cmake)
+    include_directories(${FREERTOS_PORT_PATH} "${FREERTOS_KERNEL_PATH}/include")
+    include_directories("${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/Posix")
+    add_compile_definitions(projCOVERAGE_TEST=0)
+    add_compile_definitions(projENABLE_TRACING=0)
+    list(APPEND open62541_LIBRARIES freertos_config freertos_kernel)
+endif()
+
+if(UA_ENABLE_LWS)
+    list(APPEND plugin_sources
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_lws.h
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_internal.h
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_client.c
+         ${PROJECT_SOURCE_DIR}/deps/picohttpparser.h
+         ${PROJECT_SOURCE_DIR}/deps/picohttpparser.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_parser.h
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_parser.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_compression.h
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_compression.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_http_server.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_websocket_lws.c
+         ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_lws.c)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        set_source_files_properties(
+            ${PROJECT_SOURCE_DIR}/deps/picohttpparser.c
+            PROPERTIES COMPILE_OPTIONS "-Wno-undef")
+    endif()
+    if(UA_ENABLE_LWS_MQTT)
+        list(APPEND plugin_sources
+             ${PROJECT_SOURCE_DIR}/arch/posix/eventloop_posix_mqtt_lws.c)
+    endif()
+endif()
+
+if(UA_ENABLE_MQTT)
+    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/arch/common/eventloop_mqtt.c)
+endif()
+
+# For file based server and client configuration
 if(UA_ENABLE_JSON_ENCODING)
-    list(APPEND plugin_headers ${PROJECT_SOURCE_DIR}/plugins/include/open62541/server_config_file_based.h)
     list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/plugins/ua_config_json.c)
 endif()
 
@@ -947,35 +1434,57 @@ endif()
 # Always include encryption plugins into the amalgamation
 # Use guards in the files to ensure that UA_ENABLE_ENCRYPTON_MBEDTLS and UA_ENABLE_ENCRYPTION_OPENSSL are honored.
 
-if((UNIX AND UA_ENABLE_ENCRYPTION) OR UA_ENABLE_AMALGAMATION)
-    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_certificategroup_filestore.c
+if(((UNIX OR UA_ARCHITECTURE_WIN32) AND UA_ENABLE_ENCRYPTION) OR UA_ENABLE_AMALGAMATION)
+    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_filestore_common.h
+                               ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_filestore_common.c
+                               ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_certificategroup_filestore.c
                                ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_securitypolicy_filestore.c)
 endif()
 
 if(UA_ENABLE_ENCRYPTION_MBEDTLS OR UA_ENABLE_AMALGAMATION)
-    list(APPEND plugin_sources
+    list(INSERT plugin_sources 0
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_common.h
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_mbedtls_compat.h
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_ecc.h
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_rsa.h)
+    list(APPEND plugin_sources
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_mbedtls_compat.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_common.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_ecc.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_rsa.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_basic128rsa15.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_basic256.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_basic256sha256.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_aes128sha256rsaoaep.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_aes256sha256rsapss.c
-         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_pubsub_aes128ctr.c
-         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_pubsub_aes256ctr.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_pubsub_aesctr.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_eccnistp256.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_eccnistp384.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_eccbrainpoolp256r1.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_eccbrainpoolp384r1.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/create_certificate.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/certificategroup.c)
 endif()
 
 if(UA_ENABLE_ENCRYPTION_OPENSSL OR UA_ENABLE_ENCRYPTION_LIBRESSL OR UA_ENABLE_AMALGAMATION)
+    list(INSERT plugin_sources 0
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_common.h)
     list(APPEND plugin_sources
-         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_common.h
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_common.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_basic128rsa15.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_basic256.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_basic256sha256.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_aes128sha256rsaoaep.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_aes256sha256rsapss.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_pubsub_aesctr.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_eccnistp256.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_eccnistp256_aesgcm.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_eccnistp256_chachapoly.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_eccnistp384.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_eccbrainpoolp256r1.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_eccbrainpoolp384r1.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_ecccurve25519.c
+         ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_ecccurve448.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/create_certificate.c
          ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/certificategroup.c)
 endif()
@@ -987,148 +1496,138 @@ if(UA_ENABLE_TPM2_SECURITY)
 endif()
 
 if(UA_ENABLE_DISCOVERY)
-    list(APPEND lib_headers ${PROJECT_SOURCE_DIR}/src/server/ua_discovery.h)
-    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_discovery.c)
-endif()
-
-if(UA_ENABLE_NODESETLOADER)
-    # This is required because of issues with policy CMP0077.
-    # Source: https://stackoverflow.com/a/54404924
-    option(ENABLE_BUILD_INTO_OPEN62541 "make nodesetLoader part of the open62541 library" off)
-    set(ENABLE_BUILD_INTO_OPEN62541 on)
-
-    add_subdirectory(${PROJECT_SOURCE_DIR}/deps/nodesetLoader)
-
-    list(APPEND lib_sources ${NODESETLOADER_SOURCES})
-    list(APPEND plugin_headers ${PROJECT_SOURCE_DIR}/plugins/include/open62541/plugin/nodesetloader.h)
-    list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/plugins/ua_nodesetloader.c)
-    list(APPEND open62541_LIBRARIES ${NODESETLOADER_DEPS_LIBS})
+    list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_server_discovery.c)
 endif()
 
 #########################
 # Generate source files #
 #########################
 
-# Nodeset files combined into NS0 generated file
-set(UA_FILE_NODESETS) # List of nodeset-xml files to be considered in the generated information model
-set(UA_NODESET_DIR ${PROJECT_SOURCE_DIR}/deps/ua-nodeset CACHE STRING "The path to the node-set directory (e.g. from https://github.com/OPCFoundation/UA-Nodeset)")
+ # List of nodeset-xml files to be considered in the generated information model
+set(UA_NS0_NODESETS)
 
 if(UA_NAMESPACE_ZERO STREQUAL "FULL")
     # Use the "full" schema files also for datatypes and statuscodes
     set(UA_SCHEMA_DIR ${UA_NODESET_DIR}/Schema CACHE INTERNAL "")
 
-    # Set the full Nodeset for NS0.
-    # Use a new variable UA_FILE_NS0_INTERNAL so we don't pollute the options.
-    if(UA_FILE_NS0)
-        set(UA_FILE_NS0_INTERNAL ${UA_FILE_NS0})
-    else()
-        set(UA_FILE_NS0_INTERNAL ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.xml CACHE INTERNAL "")
-    endif()
+    # Set the full ns0 nodeset
+    list(APPEND UA_NS0_NODESETS Opc.Ua.NodeSet2.xml)
 
     # Check that the submodule was checked out or manually downloaded into the folder
-    if(NOT EXISTS "${UA_FILE_NS0_INTERNAL}")
-        message(STATUS "Submodule update")
-        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
-                        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-                        RESULT_VARIABLE GIT_SUBMOD_RESULT)
-        if(NOT GIT_SUBMOD_RESULT EQUAL "0")
-            message(FATAL_ERROR "git submodule update --init --recursive failed with ${GIT_SUBMOD_RESULT}")
-        endif()
+    if(NOT EXISTS ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.xml)
+        message(FATAL_ERROR "UA_NAMESPACE_ZERO=FULL requires the OPC UA NodeSet "
+                            "dependency. Fetch submodules or set UA_NODESET_DIR "
+                            "to a local UA-Nodeset checkout. To fetch the "
+                            "bundled dependency, run: git submodule update "
+                            "--init --recursive deps/ua-nodeset")
     endif()
 else()
     # Directory with the schema files for installation
     set(UA_SCHEMA_DIR ${PROJECT_SOURCE_DIR}/tools/schema CACHE INTERNAL "")
 
-    # Set the reduced Nodeset for NS0.
-    # Use a new variable UA_FILE_NS0_INTERNAL so we don't pollute the options.
-    if(UA_FILE_NS0)
-        set(UA_FILE_NS0_INTERNAL ${UA_FILE_NS0})
-    else()
-        set(UA_FILE_NS0_INTERNAL ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.Reduced.xml CACHE INTERNAL "")
-    endif()
+    # Set the reduced Nodeset for NS0
+    list(APPEND UA_NS0_NODESETS Opc.Ua.NodeSet2.Reduced.xml)
 
     # Set feature-specific datatypes definitions and nodesets
-    set(UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_minimal.txt
+    set(UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_minimal.txt
                           ${UA_SCHEMA_DIR}/datatypes_discovery.txt)
 
     if(UA_ENABLE_METHODCALLS)
-        list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_method.txt)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_method.txt)
     endif()
 
     if(UA_ENABLE_DIAGNOSTICS)
-        list(APPEND UA_FILE_NODESETS ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.DiagnosticsMinimal.xml)
-        list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_diagnostics.txt)
+        list(APPEND UA_NS0_NODESETS Opc.Ua.NodeSet2.DiagnosticsMinimal.xml)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_diagnostics.txt)
     endif()
 
-    if(UA_ENABLE_SUBSCRIPTIONS)
-        list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_subscriptions.txt)
-    endif()
-
-    if(UA_ENABLE_SUBSCRIPTIONS_EVENTS)
-        list(APPEND UA_FILE_NODESETS ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.EventsMinimal.xml)
-    endif()
-
-    if(UA_ENABLE_HISTORIZING)
-        list(APPEND UA_FILE_NODESETS ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.HistorizingMinimal.xml)
-        list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_historizing.txt)
-    endif()
-
-    if(UA_ENABLE_QUERY)
-        list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_query.txt)
-    endif()
-
-    if(UA_ENABLE_PUBSUB)
-        list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_pubsub.txt)
-        if(UA_ENABLE_PUBSUB_INFORMATIONMODEL)
-            list(APPEND UA_FILE_NODESETS ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.PubSubMinimal.xml)
+    if(UA_ENABLE_DRIVER_GDS_RECEIVER)
+        if(NOT UA_NAMESPACE_ZERO STREQUAL "FULL")
+            message(FATAL_ERROR "PushManagement needs the full Namespace Zero")
+        endif()
+        if(NOT UA_ENABLE_ENCRYPTION)
+            message(FATAL_ERROR "PushManagement cannot be used with disabled UA_ENABLE_ENCRYPTION")
         endif()
     endif()
 
-	if(UA_ENABLE_DA)
-		list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_dataaccess.txt)
-        list(APPEND UA_FILE_NODESETS ${UA_SCHEMA_DIR}/Opc.Ua.NodeSet2.Part8_Subset.xml)
+    if(UA_ENABLE_SUBSCRIPTIONS)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_subscriptions.txt)
+    endif()
+
+    if(UA_ENABLE_SUBSCRIPTIONS_EVENTS)
+        list(APPEND UA_NS0_NODESETS Opc.Ua.NodeSet2.EventsMinimal.xml)
+    endif()
+
+    if(UA_ENABLE_HISTORIZING)
+        list(APPEND UA_NS0_NODESETS Opc.Ua.NodeSet2.HistorizingMinimal.xml)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_historizing.txt)
+    endif()
+
+    if(UA_ENABLE_QUERY)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_query.txt)
+    endif()
+
+    if(UA_ENABLE_PUBSUB)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_pubsub.txt)
+        if(UA_ENABLE_PUBSUB_INFORMATIONMODEL)
+            list(APPEND UA_NS0_NODESETS Opc.Ua.NodeSet2.PubSubMinimal.xml)
+        endif()
+    endif()
+
+    if(UA_ENABLE_DA)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_dataaccess.txt)
+        list(APPEND UA_NS0_NODESETS Opc.Ua.NodeSet2.Part8_Subset.xml)
     endif()
 
     if(UA_ENABLE_TYPEDESCRIPTION)
-        list(APPEND UA_FILE_DATATYPES ${UA_SCHEMA_DIR}/datatypes_typedescription.txt)
+        list(APPEND UA_NS0_DATATYPES ${UA_SCHEMA_DIR}/datatypes_typedescription.txt)
     endif()
 endif()
 
-list(INSERT UA_FILE_NODESETS 0 "${UA_FILE_NS0_INTERNAL}")
-set(UA_FILE_NODEIDS ${UA_SCHEMA_DIR}/NodeIds.csv)
-set(UA_FILE_STATUSCODES ${UA_SCHEMA_DIR}/StatusCode.csv)
-set(UA_FILE_TYPES_BSD ${UA_SCHEMA_DIR}/Opc.Ua.Types.bsd)
+set(UA_NS0_NODEIDS ${UA_SCHEMA_DIR}/NodeIds.csv)
+set(UA_NS0_STATUSCODES ${UA_SCHEMA_DIR}/StatusCode.csv)
+set(UA_NS0_TYPES_BSD ${UA_SCHEMA_DIR}/Opc.Ua.Types.bsd)
 
 # Generate all datatypes -> reset the lists used for filtering
 if(UA_ENABLE_DATATYPES_ALL)
-    unset(UA_FILE_DATATYPES)
+    unset(UA_NS0_DATATYPES)
 endif()
+
+# Regenerate the variables in open62541Config.cmake
+unset(open62541_TOOLS_DIR CACHE)
+unset(open62541_SCHEMA_DIR CACHE)
+unset(open62541_NS0_NODESETS CACHE)
+
+set(UA_NS0_NODESET_FILES "")
+foreach(f ${UA_NS0_NODESETS})
+    list(APPEND UA_NS0_NODESET_FILES ${UA_SCHEMA_DIR}/${f})
+endforeach()
+include(open62541Macros)
 
 # standard-defined data types
 ua_generate_datatypes(BUILTIN GEN_DOC NAME "types" TARGET_SUFFIX "types" NAMESPACE_IDX 0
-                      FILE_CSV "${UA_FILE_NODEIDS}"
-                      FILES_BSD "${UA_FILE_TYPES_BSD}"
-                      FILES_SELECTED ${UA_FILE_DATATYPES})
+                      FILE_CSV "${UA_NS0_NODEIDS}"
+                      FILES_BSD "${UA_NS0_TYPES_BSD}"
+                      FILES_SELECTED ${UA_NS0_DATATYPES})
 
 # transport data types
 ua_generate_datatypes(INTERNAL NAME "transport" TARGET_SUFFIX "transport" NAMESPACE_IDX 1
-                      FILE_CSV "${UA_FILE_NODEIDS}"
-                      IMPORT_BSD "TYPES#${UA_FILE_TYPES_BSD}"
+                      FILE_CSV "${UA_NS0_NODEIDS}"
+                      IMPORT_BSD "TYPES#${UA_NS0_TYPES_BSD}"
                       FILES_BSD "${PROJECT_SOURCE_DIR}/tools/schema/Custom.Opc.Ua.Transport.bsd"
                       FILES_SELECTED "${PROJECT_SOURCE_DIR}/tools/schema/datatypes_transport.txt")
 
 # statuscode explanation
 add_custom_command(OUTPUT ${PROJECT_BINARY_DIR}/src_generated/open62541/statuscodes.h
                           ${PROJECT_BINARY_DIR}/src_generated/open62541/statuscodes.c
-                   PRE_BUILD
                    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/generate_statuscode_descriptions.py
-                           ${UA_FILE_STATUSCODES} ${PROJECT_BINARY_DIR}/src_generated/open62541/statuscodes
+                           ${UA_NS0_STATUSCODES} ${PROJECT_BINARY_DIR}/src_generated/open62541/statuscodes
                    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_statuscode_descriptions.py
-                           ${UA_FILE_STATUSCODES})
+                           ${UA_NS0_STATUSCODES})
 
 # Header containing defines for all NodeIds
 ua_generate_nodeid_header(NAME "nodeids" ID_PREFIX "NS0" TARGET_SUFFIX "ids-ns0"
-                          FILE_CSV "${UA_FILE_NODEIDS}")
+                          FILE_CSV "${UA_NS0_NODEIDS}")
 
 # we need a custom target to avoid that the generator is called concurrently and
 # thus overwriting files while the other thread is compiling
@@ -1140,60 +1639,70 @@ add_custom_target(open62541-generator-statuscode DEPENDS
 if(UA_ENABLE_AMALGAMATION)
     # single-file release
     add_custom_command(OUTPUT ${PROJECT_BINARY_DIR}/open62541.h
-                       PRE_BUILD
                        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
                                ${OPEN62541_VERSION} ${CMAKE_CURRENT_BINARY_DIR}/open62541.h
-                               ${exported_headers} ${NODESETLOADER_PUBLIC_HEADERS} ${plugin_headers}
+                               ${exported_headers} ${plugin_headers}
                        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
                                ${exported_headers} ${plugin_headers})
 
     add_custom_command(OUTPUT ${PROJECT_BINARY_DIR}/open62541.c
-                       PRE_BUILD
                        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
                                ${OPEN62541_VERSION} ${CMAKE_CURRENT_BINARY_DIR}/open62541.c
-                               ${lib_headers} ${NODESETLOADER_PRIVATE_HEADERS} ${lib_sources} ${plugin_sources}
+                               ${lib_headers} ${lib_sources} ${plugin_sources}
                        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py ${lib_headers}
                                ${lib_sources} ${plugin_sources})
 
-    add_custom_target(open62541-amalgamation DEPENDS ${PROJECT_BINARY_DIR}/open62541.c
-                                                     ${PROJECT_BINARY_DIR}/open62541.h)
+    add_custom_target(open62541-amalgamation ALL DEPENDS ${PROJECT_BINARY_DIR}/open62541.c
+                                                         ${PROJECT_BINARY_DIR}/open62541.h)
 endif()
 
 # Generated NS0
-ua_generate_nodeset(NAME "ns0" FILE ${UA_FILE_NODESETS}
-                    INTERNAL BLACKLIST ${UA_FILE_NS0_BLACKLIST}
-                    IGNORE "${PROJECT_SOURCE_DIR}/tools/nodeset_compiler/NodeID_NS0_Base.txt"
-                    DEPENDS_TARGET "open62541-generator-types")
+if(NOT UA_NAMESPACE_ZERO STREQUAL "NONE")
+    ua_generate_nodeset(NAME "ns0" FILE ${UA_NS0_NODESET_FILES}
+                        INTERNAL BLACKLIST ${UA_NS0_BLACKLIST}
+                        IGNORE "${PROJECT_SOURCE_DIR}/tools/nodeset_compiler/NodeID_NS0_Base.txt"
+                        DEPENDS_TARGET "open62541-generator-types")
 
-# Stack protector and optimization are disabled for the huge ns0 file to speed up the compilation
-if(UA_NAMESPACE_ZERO STREQUAL "FULL" AND NOT MSVC)
-    set_source_files_properties(${PROJECT_BINARY_DIR}/src_generated/open62541/namespace0_generated.c
-                                PROPERTIES COMPILE_FLAGS "-fno-stack-protector -O0")
-endif()
-
-if(UA_ENABLE_NODESET_INJECTOR)
-    message(STATUS "Nodesetinjector feature enabled")
-    cmake_minimum_required(VERSION 3.20)
-    add_custom_command(OUTPUT ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.h
-                       ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.c PRE_BUILD
-                       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/nodeset_injector/generate_nodesetinjector.py
-                       ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector)
-    add_custom_target(open62541-generator-nodesetinjector DEPENDS
-                      ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.c
-                      ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.h)
-    set(UA_NODESETINJECTOR_GENERATORS "")
-    set(UA_NODESETINJECTOR_SOURCE_FILES "")
-    set(UA_NODESETINJECTOR_EXAMPLE_NAMES "")
-    set(UA_NODESETINJECTOR_TEST_NAMES "")
+    # Stack protector and optimization are disabled for the huge ns0 file to speed up the compilation
+    if(UA_NAMESPACE_ZERO STREQUAL "FULL" AND NOT MSVC)
+        set_source_files_properties(${PROJECT_BINARY_DIR}/src_generated/open62541/namespace0_generated.c
+                                    PROPERTIES COMPILE_FLAGS "-fno-stack-protector -O0")
+    endif()
 endif()
 
 # Group the code generation targets into one target
-add_custom_target(open62541-code-generation DEPENDS open62541-generator-types
-                                                    open62541-generator-transport
-                                                    open62541-generator-statuscode
-                                                    open62541-generator-namespace)
+if(NOT UA_NAMESPACE_ZERO STREQUAL "NONE")
+    add_custom_target(open62541-code-generation DEPENDS open62541-generator-types
+                                                        open62541-generator-transport
+                                                        open62541-generator-statuscode
+                                                        open62541-generator-namespace)
+else()
+    add_custom_target(open62541-code-generation DEPENDS open62541-generator-types
+                                                        open62541-generator-transport
+                                                        open62541-generator-statuscode)
+endif()
+
+# Generate Nodeset injector source files
 if(UA_ENABLE_NODESET_INJECTOR)
+    message(STATUS "Nodesetinjector feature enabled")
+    set(UA_NODESETINJECTOR_SOURCE_FILES "") # List is appended from within ua_generate_nodeset
+    set(UA_NODESETINJECTOR_NAMES "") # Ordered list of AUTOLOAD namespace names
+
+    add_custom_target(open62541-generator-nodesetinjector)
     add_dependencies(open62541-code-generation open62541-generator-nodesetinjector)
+
+    add_subdirectory(tools/nodeset_injector)
+
+    add_custom_command(OUTPUT ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.h
+                              ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.c
+                       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/nodeset_injector/generate_nodesetinjector.py
+                                                     ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector
+                                                     ${UA_NODESETINJECTOR_NAMES})
+
+    set_source_files_properties(${UA_NODESETINJECTOR_SOURCE_FILES} PROPERTIES GENERATED 1)
+    list(APPEND lib_headers ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.h)
+    list(APPEND lib_sources ${PROJECT_BINARY_DIR}/src_generated/open62541/nodesetinjector.c
+                            ${UA_NODESETINJECTOR_SOURCE_FILES})
 endif()
 
 #####################
@@ -1206,8 +1715,16 @@ assign_source_group(${lib_headers} ${lib_sources})
 assign_source_group(${plugin_headers} ${plugin_sources})
 
 # Define the target libraries
-add_library(open62541-object OBJECT ${lib_sources} ${lib_headers} ${exported_headers})
-add_library(open62541-plugins OBJECT ${plugin_sources} ${plugin_headers})
+if(${UA_ARCHITECTURE} STREQUAL "zephyr")
+    zephyr_library_named(open62541-object)
+    zephyr_library_named(open62541-plugins)
+    target_sources(open62541-object PRIVATE ${lib_sources} ${lib_headers} ${exported_headers})
+    target_sources(open62541-plugins PRIVATE ${plugin_sources} ${plugin_headers})
+else()
+    add_library(open62541-object OBJECT ${lib_sources} ${lib_headers} ${exported_headers})
+    add_library(open62541-plugins OBJECT ${plugin_sources} ${plugin_headers})
+endif()
+
 add_library(open62541 $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
 
 add_dependencies(open62541-object open62541-code-generation)
@@ -1217,6 +1734,18 @@ add_dependencies(open62541-plugins open62541-code-generation)
 if(UA_ENABLE_COVERAGE)
     add_coverage(open62541-object)
     add_coverage(open62541-plugins)
+
+    get_target_property(UA_COVERAGE_OBJECT_SOURCES open62541-object SOURCES)
+    set(UA_COVERAGE_DRIVER_SOURCES)
+    foreach(source ${UA_COVERAGE_OBJECT_SOURCES})
+        if(source MATCHES "^${PROJECT_SOURCE_DIR}/drivers/")
+            list(APPEND UA_COVERAGE_DRIVER_SOURCES ${source})
+        endif()
+    endforeach()
+    if(NOT UA_COVERAGE_DRIVER_SOURCES)
+        message(FATAL_ERROR "Coverage tracking must include sources from the "
+                            "drivers directory")
+    endif()
 endif()
 
 # Private include directories
@@ -1228,9 +1757,16 @@ function(include_directories_private)
 endfunction()
 
 include_directories_private("${PROJECT_SOURCE_DIR}/deps")
+if(UA_ENABLE_DISCOVERY_MULTICAST_MDNSD)
+    include_directories_private("${PROJECT_BINARY_DIR}/src_generated/mdnsd")
+endif()
 
+if(UA_ARCHITECTURE_LWIP)
+    include_directories_private(${LWIP_INCLUDE_DIRS})
+endif()
 if(UA_ENABLE_ENCRYPTION_MBEDTLS)
-    include_directories_private(${MBEDTLS_INCLUDE_DIRS})
+    target_include_directories(open62541-object SYSTEM PRIVATE ${MBEDTLS_INCLUDE_DIRS})
+    target_include_directories(open62541-plugins SYSTEM PRIVATE ${MBEDTLS_INCLUDE_DIRS})
 endif()
 if(UA_ENABLE_ENCRYPTION_OPENSSL)
     include_directories_private(${OPENSSL_INCLUDE_DIR})
@@ -1238,8 +1774,8 @@ endif()
 if(UA_ENABLE_ENCRYPTION_LIBRESSL)
     include_directories_private(${LIBRESSL_INCLUDE_DIR})
 endif()
-if(UA_ENABLE_NODESETLOADER)
-    include_directories_private(${NODESETLOADER_PRIVATE_INCLUDES})
+if(UA_ENABLE_LWS)
+    include_directories_private(${LIBWEBSOCKETS_INCLUDE_DIR})
 endif()
 
 # Public include directories
@@ -1254,10 +1790,6 @@ include_directories_public("${PROJECT_SOURCE_DIR}/include"
                            "${PROJECT_SOURCE_DIR}/plugins/include"
                            "${PROJECT_BINARY_DIR}/src_generated")
 
-if(UA_ENABLE_NODESETLOADER)
-    include_directories_public(${NODESETLOADER_PUBLIC_INCLUDES})
-endif()
-
 # Ensure that the open62541::open62541 alias can be used inside open62541's build
 add_library(open62541::open62541 ALIAS open62541)
 
@@ -1265,9 +1797,8 @@ add_library(open62541::open62541 ALIAS open62541)
 target_compile_definitions(open62541-object PRIVATE -DUA_DYNAMIC_LINKING_EXPORT)
 target_compile_definitions(open62541-plugins PRIVATE -DUA_DYNAMIC_LINKING_EXPORT)
 target_compile_definitions(open62541 PRIVATE -DUA_DYNAMIC_LINKING_EXPORT)
-if(UA_ENABLE_DISCOVERY_MULTICAST)
-    target_compile_definitions(open62541-object PRIVATE -DMDNSD_DYNAMIC_LINKING_EXPORT)
-    target_compile_definitions(open62541 PRIVATE -DMDNSD_DYNAMIC_LINKING_EXPORT)
+if(UA_NODESET_INJECTOR_NEEDS_ROLESET)
+    target_compile_definitions(open62541-object PRIVATE -DUA_NODESET_INJECTOR_NEEDS_ROLESET)
 endif()
 
 # Prevent Wincrypt override warning.
@@ -1304,12 +1835,83 @@ if(UA_BUILD_UNIT_TESTS)
     add_subdirectory(tests)
 endif()
 
+# Build the interop targets standalone (no Check framework, no full examples)
+# when only interop tests are needed.
+if(UA_BUILD_INTEROP_TESTS AND NOT UA_BUILD_UNIT_TESTS)
+    if(UA_ENABLE_JSON_ENCODING)
+        add_executable(check_interop_json
+            tests/interop/json/check_interop_json.c)
+        target_link_libraries(check_interop_json open62541::open62541)
+        set_target_properties(check_interop_json PROPERTIES
+            FOLDER "tests"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
+    endif()
+
+    add_executable(interop_server
+        tests/interop/interop_server.c
+        tests/interop/common/interop_server_common.c)
+    target_link_libraries(interop_server open62541::open62541)
+    if(UA_ENABLE_ENCRYPTION_MBEDTLS)
+        target_include_directories(interop_server SYSTEM PRIVATE ${MBEDTLS_INCLUDE_DIRS})
+    endif()
+    set_target_properties(interop_server PROPERTIES
+        FOLDER "tests"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
+
+    add_executable(check_interop_client
+        tests/interop/check_interop_client.c
+        tests/interop/common/interop_client_common.c)
+    target_link_libraries(check_interop_client open62541::open62541)
+    set_target_properties(check_interop_client PROPERTIES
+        FOLDER "tests"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
+
+    if(UA_ENABLE_LWS)
+        add_executable(interop_server_https
+            tests/interop/http/interop_server_https.c
+            tests/interop/common/interop_server_common.c)
+        target_link_libraries(interop_server_https open62541::open62541)
+        if(UA_ENABLE_ENCRYPTION_MBEDTLS)
+            target_include_directories(interop_server_https SYSTEM PRIVATE ${MBEDTLS_INCLUDE_DIRS})
+        endif()
+        set_target_properties(interop_server_https PROPERTIES
+            FOLDER "tests"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
+
+        add_executable(check_interop_client_https
+            tests/interop/http/check_interop_client_https.c)
+        target_link_libraries(check_interop_client_https open62541::open62541)
+        set_target_properties(check_interop_client_https PROPERTIES
+            FOLDER "tests"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
+
+        add_executable(interop_server_wss
+            tests/interop/websocket/interop_server_wss.c
+            tests/interop/common/interop_server_common.c)
+        target_link_libraries(interop_server_wss open62541::open62541)
+        if(UA_ENABLE_ENCRYPTION_MBEDTLS)
+            target_include_directories(interop_server_wss SYSTEM PRIVATE ${MBEDTLS_INCLUDE_DIRS})
+        endif()
+        set_target_properties(interop_server_wss PROPERTIES
+            FOLDER "tests"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
+
+        add_executable(check_interop_client_wss
+            tests/interop/websocket/check_interop_client_wss.c
+            tests/interop/common/interop_client_common.c)
+        target_link_libraries(check_interop_client_wss open62541::open62541)
+        set_target_properties(check_interop_client_wss PROPERTIES
+            FOLDER "tests"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
+    endif()
+endif()
+
 if(UA_BUILD_FUZZING OR UA_BUILD_OSS_FUZZ OR UA_BUILD_FUZZING_CORPUS)
     add_subdirectory(tests/fuzz)
 endif()
 
 if(UA_BUILD_TOOLS)
-    add_subdirectory(tools/ua-tool)
+    add_subdirectory(tools/ua-cli)
     if(UA_ENABLE_JSON_ENCODING)
         add_subdirectory(tools/ua2json)
     endif()
@@ -1327,16 +1929,38 @@ endif()
 # Enable shared library with `-DBUILD_SHARED_LIBS=ON`
 
 # export library (either static or shared depending on BUILD_SHARED_LIBS)
+# On the FreeRTOS architecture the open62541 target links against build-only
+# targets (freertos_kernel/freertos_config) that are not part of any export
+# set, so exporting the target fails at configure time. The same applies when
+# open62541 is consumed as a Zephyr module: the target then links the
+# Zephyr-provided mbedTLS targets (mbedTLSBase/mbedTLSX509/mbedTLSCrypto),
+# which are likewise not in any export set of ours. Still install the library
+# artifacts, but leave the target out of the export set in both cases.
+if(UA_ARCHITECTURE_FREERTOS OR ZEPHYR_BASE)
+install(TARGETS open62541
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+else()
 install(TARGETS open62541
         EXPORT open62541Targets
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION include)
+endif()
 
 set(open62541_install_tools_dir share/open62541)
 set(open62541_install_schema_dir share/open62541/schema)
+set(open62541_install_ns0_nodesets "")
+foreach(f ${UA_NS0_NODESETS})
+    list(APPEND open62541_install_ns0_nodesets "\${open62541_SCHEMA_DIR}/${f}")
+endforeach()
 
+# Create the CMake package files (open62541Config.cmake, ConfigVersion,
+# Targets). open62541Config.cmake includes open62541Targets.cmake, so they
+# must be installed together or not at all.
+if(NOT UA_ARCHITECTURE_FREERTOS AND NOT ZEPHYR_BASE)
 # Create open62541Config.cmake
 include(CMakePackageConfigHelpers)
 set(cmake_configfile_install ${CMAKE_INSTALL_LIBDIR}/cmake/open62541)
@@ -1365,6 +1989,7 @@ install(EXPORT open62541Targets
 export(TARGETS open62541
        NAMESPACE open62541::
        FILE ${CMAKE_CURRENT_BINARY_DIR}/open62541Targets.cmake)
+endif() # NOT UA_ARCHITECTURE_FREERTOS AND NOT ZEPHYR_BASE
 
 # Generate and install open62541.pc
 set(pkgcfgpubliclibs "")
@@ -1378,9 +2003,15 @@ if(BUILD_SHARED_LIBS)
     endforeach()
 endif()
 
+if(UA_ENABLE_AMALGAMATION)
+    set(PC_EXTRA_CFLAGS "-DUA_ENABLE_AMALGAMATION")
+endif()
+
+string(REPLACE ";" " " pkgcfg_requiresprivate "${pkgcfg_requiresprivate}")
+string(REPLACE ";" " " pkgcfg_libsprivate "${pkgcfg_libsprivate}")
 configure_file(tools/open62541.pc.in ${PROJECT_BINARY_DIR}/src_generated/open62541.pc @ONLY)
 
-if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT UA_ARCHITECTURE_FREERTOS)
     install(FILES "${PROJECT_BINARY_DIR}/src_generated/open62541.pc"
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 endif()
@@ -1407,9 +2038,11 @@ install(DIRECTORY ${UA_SCHEMA_DIR}/
         PERMISSIONS OWNER_READ GROUP_READ)
 
 # Install python tools
-set(UA_install_tools_files "tools/generate_datatypes.py"
+set(UA_install_tools_files "tools/generate_bsd.py"
+                           "tools/generate_datatypes.py"
                            "tools/generate_nodeid_header.py"
-                           "tools/generate_statuscode_descriptions.py")
+                           "tools/generate_statuscode_descriptions.py"
+                           "tools/generate_bsd.py")
 install(FILES ${UA_install_tools_files} DESTINATION ${open62541_install_tools_dir}
         PERMISSIONS OWNER_READ OWNER_EXECUTE GROUP_READ GROUP_EXECUTE)
 
@@ -1442,12 +2075,13 @@ set_target_properties(open62541 PROPERTIES FOLDER "open62541/lib")
 set_target_properties(open62541-object PROPERTIES FOLDER "open62541/lib")
 set_target_properties(open62541-plugins PROPERTIES FOLDER "open62541/lib")
 
-set_target_properties(open62541-generator-namespace PROPERTIES FOLDER "open62541/generators")
+if(NOT UA_NAMESPACE_ZERO STREQUAL "NONE")
+    set_target_properties(open62541-generator-namespace PROPERTIES FOLDER "open62541/generators")
+endif()
 set_target_properties(open62541-generator-statuscode PROPERTIES FOLDER "open62541/generators")
 set_target_properties(open62541-generator-transport PROPERTIES FOLDER "open62541/generators")
 set_target_properties(open62541-generator-types PROPERTIES FOLDER "open62541/generators")
+
 if(UA_ENABLE_NODESET_INJECTOR)
     set_target_properties(open62541-generator-nodesetinjector PROPERTIES FOLDER "open62541/generators")
-    add_subdirectory(tools/nodeset_injector)
-    set(UA_NODESETINJECTOR_GENERATORS ${UA_NODESETINJECTOR_GENERATORS} PARENT_SCOPE)
 endif()

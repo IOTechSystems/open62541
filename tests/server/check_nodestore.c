@@ -7,6 +7,9 @@
 #include <open62541/plugin/nodestore_default.h>
 #include "open62541/plugin/nodestore.h"
 #include "open62541/types_generated.h"
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+#include "server/ua_subscription.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,18 +20,14 @@
 #include <pthread.h>
 #endif
 
-UA_Nodestore ns;
+UA_Nodestore *ns;
 
 static void setupZipTree(void) {
-    UA_Nodestore_ZipTree(&ns);
-}
-
-static void setupHashMap(void) {
-    UA_Nodestore_HashMap(&ns);
+    ns = UA_Nodestore_ZipTree();
 }
 
 static void teardown(void) {
-    ns.clear(ns.context);
+    ns->free(ns);
 }
 
 static int zeroCnt = 0;
@@ -39,104 +38,102 @@ static void checkZeroVisitor(void *context, const UA_Node* node) {
 }
 
 static UA_Node* createNode(UA_UInt16 nsid, UA_UInt32 id) {
-    UA_Node *p = ns.newNode(&ns.context, UA_NODECLASS_VARIABLE);
-    p->head.nodeId.identifierType = UA_NODEIDTYPE_NUMERIC;
-    p->head.nodeId.namespaceIndex = nsid;
-    p->head.nodeId.identifier.numeric = id;
+    UA_Node *p = ns->newNode(ns, UA_NODECLASS_VARIABLE);
+    p->head.nodeId = UA_NODEID_NUMERIC(nsid, id);
     p->head.nodeClass = UA_NODECLASS_VARIABLE;
     return p;
 }
 
 START_TEST(replaceExistingNode) {
     UA_Node* n1 = createNode(0,2253);
-    ns.insertNode(ns.context, n1, NULL);
+    ns->insertNode(ns, n1, NULL);
     UA_NodeId in1 = UA_NODEID_NUMERIC(0, 2253);
     UA_Node* n2;
-    ns.getNodeCopy(ns.context, &in1, &n2);
-    UA_StatusCode retval = ns.replaceNode(ns.context, n2);
+    ns->getNodeCopy(ns, &in1, &n2);
+    UA_StatusCode retval = ns->replaceNode(ns, n2);
     ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
 }
 END_TEST
 
 START_TEST(replaceOldNode) {
     UA_Node* n1 = createNode(0,2253);
-    ns.insertNode(ns.context, n1, NULL);
+    ns->insertNode(ns, n1, NULL);
     UA_NodeId in1 = UA_NODEID_NUMERIC(0,2253);
     UA_Node* n2;
     UA_Node* n3;
-    ns.getNodeCopy(ns.context, &in1, &n2);
-    ns.getNodeCopy(ns.context, &in1, &n3);
+    ns->getNodeCopy(ns, &in1, &n2);
+    ns->getNodeCopy(ns, &in1, &n3);
 
     /* shall succeed */
-    UA_StatusCode retval = ns.replaceNode(ns.context, n2);
+    UA_StatusCode retval = ns->replaceNode(ns, n2);
     ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
 
     /* shall fail */
-    retval = ns.replaceNode(ns.context, n3);
+    retval = ns->replaceNode(ns, n3);
     ck_assert_int_ne(retval, UA_STATUSCODE_GOOD);
 }
 END_TEST
 
 START_TEST(findNodeInUA_NodeStoreWithSingleEntry) {
     UA_Node* n1 = createNode(0,2253);
-    ns.insertNode(ns.context, n1, NULL);
+    ns->insertNode(ns, n1, NULL);
     UA_NodeId in1 = UA_NODEID_NUMERIC(0,2253);
-    const UA_Node* nr = ns.getNode(ns.context, &in1, ~(UA_UInt32)0,
-                                   UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    const UA_Node* nr = ns->getNode(ns, &in1, ~(UA_UInt32)0,
+                                    UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
     ck_assert_uint_eq((uintptr_t)n1, (uintptr_t)nr);
-    ns.releaseNode(ns.context, nr);
+    ns->releaseNode(ns, nr);
 }
 END_TEST
 
 START_TEST(failToFindNodeInOtherUA_NodeStore) {
     UA_Node* n1 = createNode(0,2255);
-    ns.insertNode(ns.context, n1, NULL);
+    ns->insertNode(ns, n1, NULL);
     UA_NodeId in1 = UA_NODEID_NUMERIC(1, 2255);
-    const UA_Node* nr = ns.getNode(ns.context, &in1, ~(UA_UInt32)0,
-                                   UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    const UA_Node* nr = ns->getNode(ns, &in1, ~(UA_UInt32)0,
+                                    UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
     ck_assert_uint_eq((uintptr_t)nr, 0);
 }
 END_TEST
 
 START_TEST(findNodeInUA_NodeStoreWithSeveralEntries) {
     UA_Node* n1 = createNode(0,2253);
-    ns.insertNode(ns.context, n1, NULL);
+    ns->insertNode(ns, n1, NULL);
     UA_Node* n2 = createNode(0,2255);
-    ns.insertNode(ns.context, n2, NULL);
+    ns->insertNode(ns, n2, NULL);
     UA_Node* n3 = createNode(0,2257);
-    ns.insertNode(ns.context, n3, NULL);
+    ns->insertNode(ns, n3, NULL);
     UA_Node* n4 = createNode(0,2200);
-    ns.insertNode(ns.context, n4, NULL);
+    ns->insertNode(ns, n4, NULL);
     UA_Node* n5 = createNode(0,1);
-    ns.insertNode(ns.context, n5, NULL);
+    ns->insertNode(ns, n5, NULL);
     UA_Node* n6 = createNode(0,12);
-    ns.insertNode(ns.context, n6, NULL);
+    ns->insertNode(ns, n6, NULL);
 
     UA_NodeId in3 = UA_NODEID_NUMERIC(0, 2257);
-    const UA_Node* nr = ns.getNode(ns.context, &in3, ~(UA_UInt32)0,
-                                   UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    const UA_Node* nr = ns->getNode(ns, &in3, ~(UA_UInt32)0,
+                                    UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
     ck_assert_uint_eq((uintptr_t)nr, (uintptr_t)n3);
-    ns.releaseNode(ns.context, nr);
+    ns->releaseNode(ns, nr);
 }
 END_TEST
 
 START_TEST(iterateOverUA_NodeStoreShallNotVisitEmptyNodes) {
     UA_Node* n1 = createNode(0,2253);
-    ns.insertNode(ns.context, n1, NULL);
+    ns->insertNode(ns, n1, NULL);
     UA_Node* n2 = createNode(0,2255);
-    ns.insertNode(ns.context, n2, NULL);
+    ns->insertNode(ns, n2, NULL);
     UA_Node* n3 = createNode(0,2257);
-    ns.insertNode(ns.context, n3, NULL);
+    ns->insertNode(ns, n3, NULL);
     UA_Node* n4 = createNode(0,2200);
-    ns.insertNode(ns.context, n4, NULL);
+    ns->insertNode(ns, n4, NULL);
     UA_Node* n5 = createNode(0,1);
-    ns.insertNode(ns.context, n5, NULL);
+    ns->insertNode(ns, n5, NULL);
     UA_Node* n6 = createNode(0,12);
-    ns.insertNode(ns.context, n6, NULL);
+    ns->insertNode(ns, n6, NULL);
 
     zeroCnt = 0;
     visitCnt = 0;
-    ns.iterate(ns.context, checkZeroVisitor, NULL);
+    ns->iterate(ns, checkZeroVisitor, NULL);
     ck_assert_int_eq(zeroCnt, 0);
     ck_assert_int_eq(visitCnt, 6);
 }
@@ -145,27 +142,27 @@ END_TEST
 START_TEST(findNodeInExpandedNamespace) {
     for(UA_UInt32 i = 0; i < 200; i++) {
         UA_Node* n = createNode(0,i);
-        ns.insertNode(ns.context, n, NULL);
+        ns->insertNode(ns, n, NULL);
     }
     // when
     UA_Node *n2 = createNode(0,25);
-    const UA_Node* nr = ns.getNode(ns.context, &n2->head.nodeId, ~(UA_UInt32)0,
-                                   UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    const UA_Node* nr = ns->getNode(ns, &n2->head.nodeId, ~(UA_UInt32)0,
+                                    UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
     ck_assert_int_eq(nr->head.nodeId.identifier.numeric, n2->head.nodeId.identifier.numeric);
-    ns.releaseNode(ns.context, nr);
-    ns.deleteNode(ns.context, n2);
+    ns->releaseNode(ns, nr);
+    ns->deleteNode(ns, n2);
 }
 END_TEST
 
 START_TEST(iterateOverExpandedNamespaceShallNotVisitEmptyNodes) {
     for(UA_UInt32 i = 0; i < 200; i++) {
         UA_Node* n = createNode(0,i+1);
-        ns.insertNode(ns.context, n, NULL);
+        ns->insertNode(ns, n, NULL);
     }
     // when
     zeroCnt = 0;
     visitCnt = 0;
-    ns.iterate(ns.context, checkZeroVisitor, NULL);
+    ns->iterate(ns, checkZeroVisitor, NULL);
     // then
     ck_assert_int_eq(zeroCnt, 0);
     ck_assert_int_eq(visitCnt, 200);
@@ -174,19 +171,19 @@ END_TEST
 
 START_TEST(failToFindNonExistentNodeInUA_NodeStoreWithSeveralEntries) {
     UA_Node* n1 = createNode(0,2253);
-    ns.insertNode(ns.context, n1, NULL);
+    ns->insertNode(ns, n1, NULL);
     UA_Node* n2 = createNode(0,2255);
-    ns.insertNode(ns.context, n2, NULL);
+    ns->insertNode(ns, n2, NULL);
     UA_Node* n3 = createNode(0,2257);
-    ns.insertNode(ns.context, n3, NULL);
+    ns->insertNode(ns, n3, NULL);
     UA_Node* n4 = createNode(0,2200);
-    ns.insertNode(ns.context, n4, NULL);
+    ns->insertNode(ns, n4, NULL);
     UA_Node* n5 = createNode(0,1);
-    ns.insertNode(ns.context, n5, NULL);
+    ns->insertNode(ns, n5, NULL);
 
     UA_NodeId id = UA_NODEID_NUMERIC(0, 12);
-    const UA_Node* nr = ns.getNode(ns.context, &id, ~(UA_UInt32)0,
-                                   UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    const UA_Node* nr = ns->getNode(ns, &id, ~(UA_UInt32)0,
+                                    UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
     ck_assert_uint_eq((uintptr_t)nr, 0);
 }
 END_TEST
@@ -210,9 +207,9 @@ static void *profileGetThread(void *arg) {
     for(UA_Int32 x = 0; x<test->rounds; x++) {
         for(UA_Int32 i=test->min_val; i<max_val; i++) {
             id.identifier.numeric = (UA_UInt32)(i+1);
-            const UA_Node* n = ns.getNode(ns.context, &id, ~(UA_UInt32)0,
-                                          UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
-            ns.releaseNode(ns.context, n);
+            const UA_Node* n = ns->getNode(ns, &id, ~(UA_UInt32)0,
+                                           UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+            ns->releaseNode(ns, n);
         }
     }
     return NULL;
@@ -227,7 +224,7 @@ START_TEST(profileGetDelete) {
 
     for(UA_UInt32 i = 0; i < N; i++) {
         UA_Node *n = createNode(0,i+1);
-        ns.insertNode(ns.context, n, NULL);
+        ns->insertNode(ns, n, NULL);
     }
 
 #if UA_MULTITHREADING >= 200
@@ -246,9 +243,9 @@ START_TEST(profileGetDelete) {
     UA_NodeId id = UA_NODEID_NULL;
     for(size_t i = 0; i < N; i++) {
         id.identifier.numeric = (UA_UInt32)i+1;
-        const UA_Node *node = ns.getNode(ns.context, &id, ~(UA_UInt32)0,
-                                         UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
-        ns.releaseNode(ns.context, node);
+        const UA_Node *node = ns->getNode(ns, &id, ~(UA_UInt32)0,
+                                          UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+        ns->releaseNode(ns, node);
     }
     end = clock();
     printf("Time for single-threaded %d create/get/delete in a namespace: %fs.\n", N,
@@ -256,6 +253,187 @@ START_TEST(profileGetDelete) {
 #endif
 }
 END_TEST
+
+/* --- Extended coverage tests --- */
+
+START_TEST(insertAndDeleteNode) {
+    UA_Node *n = createNode(0, 5000);
+    UA_StatusCode retval = ns->insertNode(ns, n, NULL);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Remove the node from the store */
+    UA_NodeId id = UA_NODEID_NUMERIC(0, 5000);
+    retval = ns->removeNode(ns, &id);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Should be gone */
+    const UA_Node *nr = ns->getNode(ns, &id, ~(UA_UInt32)0,
+                                    UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    ck_assert_ptr_eq(nr, NULL);
+} END_TEST
+
+START_TEST(insertDuplicateNode) {
+    UA_Node *n1 = createNode(0, 6000);
+    UA_StatusCode retval = ns->insertNode(ns, n1, NULL);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Try to insert another node with the same NodeId */
+    UA_Node *n2 = createNode(0, 6000);
+    retval = ns->insertNode(ns, n2, NULL);
+    ck_assert_int_ne(retval, UA_STATUSCODE_GOOD);
+} END_TEST
+
+START_TEST(getNodeCopy_modifyAndReplace) {
+    UA_Node *n = createNode(0, 7000);
+    ns->insertNode(ns, n, NULL);
+
+    UA_NodeId id = UA_NODEID_NUMERIC(0, 7000);
+    UA_Node *copy;
+    UA_StatusCode retval = ns->getNodeCopy(ns, &id, &copy);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Modify the copy */
+    copy->head.browseName = UA_QUALIFIEDNAME_ALLOC(0, "ModifiedName");
+
+    /* Replace with the modified copy */
+    retval = ns->replaceNode(ns, copy);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Verify the change */
+    const UA_Node *nr = ns->getNode(ns, &id, ~(UA_UInt32)0,
+                                    UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    ck_assert_ptr_ne(nr, NULL);
+    UA_QualifiedName expected = UA_QUALIFIEDNAME(0, "ModifiedName");
+    ck_assert(UA_QualifiedName_equal(&nr->head.browseName, &expected));
+    ns->releaseNode(ns, nr);
+} END_TEST
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+
+START_TEST(nodeCopy_doesNotCopyMonitoredItems) {
+    UA_Node *source = createNode(0, 7001);
+    source->head.monitoredItems = (UA_MonitoredItem*)(uintptr_t)0x01;
+
+    UA_Node *copy = ns->newNode(ns, UA_NODECLASS_VARIABLE);
+    UA_StatusCode retval = UA_Node_copy(source, copy);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_ptr_eq(copy->head.monitoredItems, NULL);
+    ck_assert_ptr_eq(source->head.monitoredItems,
+                     (UA_MonitoredItem*)(uintptr_t)0x01);
+
+    ns->deleteNode(ns, copy);
+    ns->deleteNode(ns, source);
+} END_TEST
+
+START_TEST(replaceNode_movesMonitoredItems) {
+    UA_Node *source = createNode(0, 7002);
+    UA_MonitoredItem monitoredItem;
+    memset(&monitoredItem, 0, sizeof(monitoredItem));
+    source->head.monitoredItems = &monitoredItem;
+    UA_StatusCode retval = ns->insertNode(ns, source, NULL);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_NodeId id = UA_NODEID_NUMERIC(0, 7002);
+    UA_Node *copy = NULL;
+    retval = ns->getNodeCopy(ns, &id, &copy);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_ptr_eq(copy->head.monitoredItems, NULL);
+
+    retval = ns->replaceNode(ns, copy);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+    const UA_Node *replaced = ns->getNode(ns, &id, ~(UA_UInt32)0,
+                                          UA_REFERENCETYPESET_ALL,
+                                          UA_BROWSEDIRECTION_BOTH);
+    ck_assert_ptr_ne(replaced, NULL);
+    ck_assert_ptr_eq(replaced->head.monitoredItems,
+                     &monitoredItem);
+    ck_assert_ptr_eq(monitoredItem.nodeListNext, NULL);
+    ns->releaseNode(ns, replaced);
+} END_TEST
+
+#endif
+
+START_TEST(getNodeCopy_nonExistent) {
+    UA_NodeId id = UA_NODEID_NUMERIC(0, 99999);
+    UA_Node *copy;
+    UA_StatusCode retval = ns->getNodeCopy(ns, &id, &copy);
+    ck_assert_int_ne(retval, UA_STATUSCODE_GOOD);
+} END_TEST
+
+START_TEST(newNodeAllClasses) {
+    /* Create and insert nodes of different classes */
+    UA_NodeClass classes[] = {
+        UA_NODECLASS_OBJECT,
+        UA_NODECLASS_VARIABLE,
+        UA_NODECLASS_METHOD,
+        UA_NODECLASS_OBJECTTYPE,
+        UA_NODECLASS_VARIABLETYPE,
+        UA_NODECLASS_DATATYPE,
+        UA_NODECLASS_REFERENCETYPE,
+        UA_NODECLASS_VIEW
+    };
+    for(size_t i = 0; i < 8; i++) {
+        UA_Node *n = ns->newNode(ns, classes[i]);
+        ck_assert_ptr_ne(n, NULL);
+        n->head.nodeId = UA_NODEID_NUMERIC(0, (UA_UInt32)(8000 + i));
+        n->head.nodeClass = classes[i];
+        UA_StatusCode retval = ns->insertNode(ns, n, NULL);
+        ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+    }
+
+    /* Verify all can be retrieved */
+    for(size_t i = 0; i < 8; i++) {
+        UA_NodeId id = UA_NODEID_NUMERIC(0, (UA_UInt32)(8000 + i));
+        const UA_Node *nr = ns->getNode(ns, &id, ~(UA_UInt32)0,
+                                        UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+        ck_assert_ptr_ne(nr, NULL);
+        ck_assert_int_eq(nr->head.nodeClass, classes[i]);
+        ns->releaseNode(ns, nr);
+    }
+} END_TEST
+
+START_TEST(insertNodeWithOutNodeId) {
+    /* Insert with outNodeId to capture the assigned ID */
+    UA_Node *n = createNode(0, 9000);
+    UA_NodeId outId;
+    UA_NodeId_init(&outId);
+    UA_StatusCode retval = ns->insertNode(ns, n, &outId);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(outId.identifier.numeric, 9000);
+    UA_NodeId_clear(&outId);
+} END_TEST
+
+START_TEST(iterateEmptyStore) {
+    zeroCnt = 0;
+    visitCnt = 0;
+    ns->iterate(ns, checkZeroVisitor, NULL);
+    ck_assert_int_eq(visitCnt, 0);
+    ck_assert_int_eq(zeroCnt, 0);
+} END_TEST
+
+START_TEST(removeNodeThenFind) {
+    /* Insert two nodes, remove one, verify the other is still there */
+    UA_Node *n1 = createNode(0, 10001);
+    ns->insertNode(ns, n1, NULL);
+    UA_Node *n2 = createNode(0, 10002);
+    ns->insertNode(ns, n2, NULL);
+
+    /* Remove first node */
+    UA_NodeId id1 = UA_NODEID_NUMERIC(0, 10001);
+    UA_StatusCode retval = ns->removeNode(ns, &id1);
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* First should be gone, second should remain */
+    const UA_Node *nr1 = ns->getNode(ns, &id1, ~(UA_UInt32)0,
+                                     UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    ck_assert_ptr_eq(nr1, NULL);
+
+    UA_NodeId id2 = UA_NODEID_NUMERIC(0, 10002);
+    const UA_Node *nr2 = ns->getNode(ns, &id2, ~(UA_UInt32)0,
+                                     UA_REFERENCETYPESET_ALL, UA_BROWSEDIRECTION_BOTH);
+    ck_assert_ptr_ne(nr2, NULL);
+    ns->releaseNode(ns, nr2);
+} END_TEST
 
 static Suite * namespace_suite (void) {
     Suite *s = suite_create ("UA_NodeStore");
@@ -286,31 +464,21 @@ static Suite * namespace_suite (void) {
     tcase_add_test (tc_profile, profileGetDelete);
     suite_add_tcase (s, tc_profile);
 
-    TCase* tc_find_hm = tcase_create ("Find-HashMap");
-    tcase_add_checked_fixture(tc_find_hm, setupHashMap, teardown);
-    tcase_add_test (tc_find_hm, findNodeInUA_NodeStoreWithSingleEntry);
-    tcase_add_test (tc_find_hm, findNodeInUA_NodeStoreWithSeveralEntries);
-    tcase_add_test (tc_find_hm, findNodeInExpandedNamespace);
-    tcase_add_test (tc_find_hm, failToFindNonExistentNodeInUA_NodeStoreWithSeveralEntries);
-    tcase_add_test (tc_find_hm, failToFindNodeInOtherUA_NodeStore);
-    suite_add_tcase (s, tc_find_hm);
-
-    TCase *tc_replace_hm = tcase_create("Replace-HashMap");
-    tcase_add_checked_fixture(tc_replace_hm, setupHashMap, teardown);
-    tcase_add_test (tc_replace_hm, replaceExistingNode);
-    tcase_add_test (tc_replace_hm, replaceOldNode);
-    suite_add_tcase (s, tc_replace_hm);
-
-    TCase* tc_iterate_hm = tcase_create ("Iterate-HashMap");
-    tcase_add_checked_fixture(tc_iterate_hm, setupHashMap, teardown);
-    tcase_add_test (tc_iterate_hm, iterateOverUA_NodeStoreShallNotVisitEmptyNodes);
-    tcase_add_test (tc_iterate_hm, iterateOverExpandedNamespaceShallNotVisitEmptyNodes);
-    suite_add_tcase (s, tc_iterate_hm);
-
-    TCase* tc_profile_hm = tcase_create ("Profile-HashMap");
-    tcase_add_checked_fixture(tc_profile_hm, setupHashMap, teardown);
-    tcase_add_test (tc_profile_hm, profileGetDelete);
-    suite_add_tcase (s, tc_profile_hm);
+    TCase* tc_ext = tcase_create ("Extended-ZipTree");
+    tcase_add_checked_fixture(tc_ext, setupZipTree, teardown);
+    tcase_add_test (tc_ext, insertAndDeleteNode);
+    tcase_add_test (tc_ext, insertDuplicateNode);
+    tcase_add_test (tc_ext, getNodeCopy_modifyAndReplace);
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+    tcase_add_test (tc_ext, nodeCopy_doesNotCopyMonitoredItems);
+    tcase_add_test (tc_ext, replaceNode_movesMonitoredItems);
+#endif
+    tcase_add_test (tc_ext, getNodeCopy_nonExistent);
+    tcase_add_test (tc_ext, newNodeAllClasses);
+    tcase_add_test (tc_ext, insertNodeWithOutNodeId);
+    tcase_add_test (tc_ext, iterateEmptyStore);
+    tcase_add_test (tc_ext, removeNodeThenFind);
+    suite_add_tcase (s, tc_ext);
 
     return s;
 }

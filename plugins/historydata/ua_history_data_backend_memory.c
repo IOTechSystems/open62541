@@ -322,9 +322,15 @@ UA_DataValue_backend_copyRange(const UA_DataValue *src, UA_DataValue *dst,
                                const UA_NumericRange range)
 {
     memcpy(dst, src, sizeof(UA_DataValue));
-    if (src->hasValue)
-        return UA_Variant_copyRange(&src->value, &dst->value, range);
-    return UA_STATUSCODE_BADDATAUNAVAILABLE;
+    UA_Variant_init(&dst->value);
+
+    if (!src->hasValue)
+        return UA_STATUSCODE_BADDATAUNAVAILABLE;
+
+    UA_StatusCode retval = UA_Variant_copyRange(&src->value, &dst->value, range);
+    if (retval != UA_STATUSCODE_GOOD)
+        UA_Variant_clear(&dst->value);
+    return retval;
 }
 
 static UA_StatusCode
@@ -356,13 +362,19 @@ copyDataValues_backend_memory(UA_Server *server,
     size_t index = startIndex;
     size_t counter = 0;
     size_t skipedValues = 0;
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
     if (reverse) {
         while (index >= endIndex && index < item->storeEnd && counter < maxValues) {
             if (skipedValues++ >= skip) {
                 if (range.dimensionsSize > 0) {
-                    UA_DataValue_backend_copyRange(&item->dataStore[index]->value, &values[counter], range);
+                    retval = UA_DataValue_backend_copyRange(&item->dataStore[index]->value, &values[counter], range);
                 } else {
-                    UA_DataValue_copy(&item->dataStore[index]->value, &values[counter]);
+                    retval = UA_DataValue_copy(&item->dataStore[index]->value, &values[counter]);
+                }
+                if (retval != UA_STATUSCODE_GOOD) {
+                    if (providedValues)
+                        *providedValues = counter;
+                    return retval;
                 }
                 ++counter;
             }
@@ -372,9 +384,14 @@ copyDataValues_backend_memory(UA_Server *server,
         while (index <= endIndex && counter < maxValues) {
             if (skipedValues++ >= skip) {
                 if (range.dimensionsSize > 0) {
-                    UA_DataValue_backend_copyRange(&item->dataStore[index]->value, &values[counter], range);
+                    retval = UA_DataValue_backend_copyRange(&item->dataStore[index]->value, &values[counter], range);
                 } else {
-                    UA_DataValue_copy(&item->dataStore[index]->value, &values[counter]);
+                    retval = UA_DataValue_copy(&item->dataStore[index]->value, &values[counter]);
+                }
+                if (retval != UA_STATUSCODE_GOOD) {
+                    if (providedValues)
+                        *providedValues = counter;
+                    return retval;
                 }
                 ++counter;
             }
@@ -784,6 +801,12 @@ getHistoryData_service_Circular(UA_Server *server,
                                                         &addFirst,
                                                         &addLast,
                                                         &reverse);
+    /* Reject a forged continuation-point skip value that would underflow the
+     * subtraction below. */
+    if(skip > _resultSize) {
+        *resultSize = 0;
+        return UA_STATUSCODE_BADCONTINUATIONPOINTINVALID;
+    }
     *resultSize = _resultSize - skip;
     if(*resultSize > maxSize) {
         *resultSize = maxSize;
@@ -820,6 +843,11 @@ getHistoryData_service_Circular(UA_Server *server,
                 valueSize = _resultSize - skip - addLast;
             }
         }
+        /* Never instruct the backend to copy more values than the result buffer
+         * was allocated to hold. */
+        size_t remainingCapacity = *resultSize - counter;
+        if(valueSize > remainingCapacity)
+            valueSize = remainingCapacity;
         UA_StatusCode ret = UA_STATUSCODE_GOOD;
         if(valueSize > 0)
             ret = backend->copyDataValues(server,

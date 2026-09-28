@@ -581,6 +581,20 @@ format_string_loop(output_t *output, const char *format, va_list args) {
                 break;
             }
 
+            case 'Q': {
+                UA_String buf = UA_STRING_NULL;
+                UA_QualifiedName qn = va_arg(args, UA_QualifiedName);
+                UA_StatusCode res = UA_QualifiedName_print(&qn, &buf);
+                if(res == UA_STATUSCODE_GOOD) {
+                    out_(output, (const char*)buf.data, buf.length);
+                    UA_String_clear(&buf);
+                } else {
+                    out_rev_(output, ")rre(", 5, width, flags);
+                }
+                format++;
+                break;
+            }
+
             default:
                 putchar_(output, *format);
                 format++;
@@ -591,17 +605,15 @@ format_string_loop(output_t *output, const char *format, va_list args) {
 
 int
 mp_vsnprintf(char *s, size_t n, const char *format, va_list arg) {
-    // Check that the inputs are sane
-    if(!s || n < 1)
-        return -1;
-
     // Format the string
     output_t out = {s, 0, n};
     format_string_loop(&out, format, arg);
 
     // Write the string-terminating '\0' character
-    size_t null_char_pos = out.pos < out.max_chars ? out.pos : out.max_chars - 1;
-    out.buffer[null_char_pos] = '\0';
+    if(n > 1) {
+        size_t null_char_pos = out.pos < n ? out.pos : n - 1;
+        out.buffer[null_char_pos] = '\0';
+    }
 
     // Return written chars without terminating \0
     return (int)out.pos;

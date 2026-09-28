@@ -215,6 +215,319 @@ START_TEST(parseNegInf) {
     ck_assert_msg(val == -INFINITY, "val: %f", val);
 } END_TEST
 
+/* Regression tests for GHSA-38g6-5hfj-2fj7: cj5_get_str() must leave its
+ * output buffer NUL-terminated on every return path, not just on success.
+ * BuildInfo_parseJson() and its siblings in plugins/ua_config_json.c
+ * allocate the buffer with exactly UA_malloc(tok.size + 1) bytes and use it
+ * with strcmp()/"%s" logging without checking cj5_get_str()'s return code,
+ * so an unterminated buffer is read out of bounds.
+ *
+ * Note: cj5_parse()'s tokenizer already rejects most malformed \u escapes
+ * (e.g. "\u12") before cj5_get_str() is ever reached. The bug is only
+ * reachable through an unpaired/truncated UTF-16 surrogate pair, where the
+ * tokenizer's lookahead succeeds but cj5_get_str()'s stricter, token-local
+ * revalidation fails. */
+START_TEST(getStrTruncatedSurrogateIsTerminated) {
+    const char *json = "{'a':\"\\uD800\"}";
+    cj5_token tokens[16];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 16, NULL);
+    ck_assert_int_eq(r.error, CJ5_ERROR_NONE);
+
+    unsigned int idx = 2; /* the value string "\uD800" */
+    ck_assert_int_eq(tokens[idx].type, CJ5_TOKEN_STRING);
+
+    char *buf = (char*)malloc(tokens[idx].size + 1); /* exactly like UA_malloc(tok.size+1) */
+    unsigned int outlen = 0;
+    cj5_error_code err = cj5_get_str(&r, idx, buf, &outlen);
+    ck_assert_int_eq(err, CJ5_ERROR_INVALID);
+
+    /* buf must be a valid, in-bounds C string regardless of the error */
+    ck_assert_uint_eq(strlen(buf), outlen);
+    ck_assert_uint_le(outlen, tokens[idx].size);
+    ck_assert_int_ne(strcmp(buf, "productUri"), 0); /* the exact BuildInfo_parseJson() pattern */
+    free(buf);
+} END_TEST
+
+START_TEST(getStrUnpairedLowSurrogateIsTerminated) {
+    const char *json = "{'a':\"\\uDC00\"}";
+    cj5_token tokens[16];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 16, NULL);
+    ck_assert_int_eq(r.error, CJ5_ERROR_NONE);
+
+    unsigned int idx = 2;
+    char *buf = (char*)malloc(tokens[idx].size + 1);
+    unsigned int outlen = 0;
+    cj5_error_code err = cj5_get_str(&r, idx, buf, &outlen);
+    ck_assert_int_eq(err, CJ5_ERROR_INVALID);
+    ck_assert_uint_eq(strlen(buf), outlen);
+    free(buf);
+} END_TEST
+
+START_TEST(getStrSurrogateBadContinuationIsTerminated) {
+    const char *json = "{'a':\"\\uD800XX\"}";
+    cj5_token tokens[16];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 16, NULL);
+    ck_assert_int_eq(r.error, CJ5_ERROR_NONE);
+
+    unsigned int idx = 2;
+    char *buf = (char*)malloc(tokens[idx].size + 1);
+    unsigned int outlen = 0;
+    cj5_error_code err = cj5_get_str(&r, idx, buf, &outlen);
+    ck_assert_int_eq(err, CJ5_ERROR_INVALID);
+    ck_assert_uint_eq(strlen(buf), outlen);
+    free(buf);
+} END_TEST
+
+/* Direct unit test of the very first early-return path (wrong token type),
+ * which is not reachable through cj5_parse() from a real document but is
+ * part of cj5_get_str()'s public contract. */
+START_TEST(getStrWrongTokenTypeIsTerminated) {
+    const char *json = "{'a':42}";
+    cj5_token tokens[16];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 16, NULL);
+    ck_assert_int_eq(r.error, CJ5_ERROR_NONE);
+
+    unsigned int idx = 2; /* the NUMBER token 42, not a string */
+    ck_assert_int_eq(tokens[idx].type, CJ5_TOKEN_NUMBER);
+
+    char *buf = (char*)malloc(tokens[idx].size + 1);
+    unsigned int outlen = 0;
+    cj5_error_code err = cj5_get_str(&r, idx, buf, &outlen);
+    ck_assert_int_eq(err, CJ5_ERROR_INVALID);
+    ck_assert_uint_eq(strlen(buf), 0);
+    free(buf);
+} END_TEST
+
+/* Positive control: a valid surrogate pair must still decode correctly.
+ * Guards against the fix accidentally breaking legitimate Unicode input. */
+START_TEST(getStrValidSurrogatePairStillWorks) {
+    const char *json = "{'a':\"\\uD834\\uDD1E\"}"; /* U+1D11E, MUSICAL SYMBOL G CLEF */
+    cj5_token tokens[16];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 16, NULL);
+    ck_assert_int_eq(r.error, CJ5_ERROR_NONE);
+
+    unsigned int idx = 2;
+    char *buf = (char*)malloc(tokens[idx].size + 1);
+    unsigned int outlen = 0;
+    cj5_error_code err = cj5_get_str(&r, idx, buf, &outlen);
+    ck_assert_int_eq(err, CJ5_ERROR_NONE);
+    ck_assert_uint_eq(outlen, 4); /* 4-byte UTF-8 encoding of U+1D11E */
+    ck_assert_uint_eq(strlen(buf), 4);
+    free(buf);
+} END_TEST
+
+/* Additional coverage tests */
+
+START_TEST(parseTokenOverflow) {
+    /* More tokens needed than buffer allows */
+    const char *json = "{'a':1, 'b':2, 'c':3}";
+    cj5_token tokens[2]; /* Too small */
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 2, NULL);
+    ck_assert(r.error == CJ5_ERROR_OVERFLOW);
+    ck_assert_uint_gt(r.num_tokens, 2);
+} END_TEST
+
+START_TEST(parseEmptyObject) {
+    const char *json = "{}";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    ck_assert(tokens[0].type == CJ5_TOKEN_OBJECT);
+    ck_assert_uint_eq(tokens[0].size, 0);
+} END_TEST
+
+START_TEST(parseEmptyArray) {
+    const char *json = "[]";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    ck_assert(tokens[0].type == CJ5_TOKEN_ARRAY);
+    ck_assert_uint_eq(tokens[0].size, 0);
+} END_TEST
+
+START_TEST(parseNegativeNumber) {
+    const char *json = "-42";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    int64_t val = 0;
+    cj5_get_int(&r, 0, &val);
+    ck_assert_int_eq(val, -42);
+} END_TEST
+
+START_TEST(parseExponentNumber) {
+    const char *json = "1.5e10";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    double val = 0;
+    cj5_get_float(&r, 0, &val);
+    ck_assert(fabs(val - 1.5e10) < 1.0);
+} END_TEST
+
+START_TEST(parseHexNumber) {
+    const char *json = "0xFF";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    uint64_t val = 0;
+    cj5_get_uint(&r, 0, &val);
+    ck_assert_uint_eq(val, 255);
+} END_TEST
+
+START_TEST(parseStringEscapes) {
+    /* Test various escape sequences */
+    const char *json = "'hello\\nworld\\t!'";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    char buf[64];
+    cj5_get_str(&r, 0, buf, NULL);
+    ck_assert(strchr(buf, '\n') != NULL);
+    ck_assert(strchr(buf, '\t') != NULL);
+} END_TEST
+
+START_TEST(parseGetBoolWrongType) {
+    const char *json = "42";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    bool val = false;
+    cj5_error_code err = cj5_get_bool(&r, 0, &val);
+    ck_assert(err != CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseGetFloatWrongType) {
+    const char *json = "true";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    double val = 0;
+    cj5_error_code err = cj5_get_float(&r, 0, &val);
+    ck_assert(err != CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseFindOnNonObject) {
+    const char *json = "[1, 2, 3]";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    unsigned int idx = 0;
+    cj5_error_code err = cj5_find(&r, &idx, "a");
+    ck_assert(err != CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseTrailingComma) {
+    /* JSON5 allows trailing comma */
+    const char *json = "{'a':1, 'b':2,}";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseSingleLineComment) {
+    const char *json = "{'a':1 // comment\n, 'b':2}";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseMultiLineComment) {
+    const char *json = "{'a':1 /* comment */, 'b':2}";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseHashComment) {
+    const char *json = "{'a':1 # comment\n, 'b':2}";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseNanValue) {
+    const char *json = "NaN";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    double val = 0;
+    cj5_get_float(&r, 0, &val);
+    ck_assert(val != val); /* NaN != NaN */
+} END_TEST
+
+START_TEST(parseZeroInteger) {
+    const char *json = "0";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    int64_t val = 42;
+    cj5_get_int(&r, 0, &val);
+    ck_assert_int_eq(val, 0);
+} END_TEST
+
+START_TEST(parseSkipObject) {
+    const char *json = "{'a':{'b':1}, 'c':2}";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+
+    /* Skip from the nested object ('a' value) */
+    unsigned int idx = 2; /* index of the inner object */
+    cj5_skip(&r, &idx);
+    /* Should now point to 'c' key */
+    ck_assert_uint_gt(idx, 2);
+} END_TEST
+
+START_TEST(parseDoubleQuotedString) {
+    const char *json = "{\"key\":\"value\"}";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+} END_TEST
+
+START_TEST(parseBoolCaseInsensitive) {
+    /* cj5 is case-sensitive per JSON spec, so uppercase TRUE is not a bool */
+    const char *json = "TRUE";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    /* This may parse as an error or non-bool token */
+    if(r.error == CJ5_ERROR_NONE) {
+        bool val = false;
+        cj5_error_code err = cj5_get_bool(&r, 0, &val);
+        /* If parsed as something other than bool, get_bool returns error */
+        (void)err;
+    }
+} END_TEST
+
+START_TEST(parseNullCaseInsensitive) {
+    /* JSON spec requires lowercase null */
+    const char *json = "NULL";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    /* Uppercase NULL may fail to parse or parse as non-null token */
+    (void)r;
+} END_TEST
+
+START_TEST(parseNestedArray) {
+    const char *json = "[[1,2],[3,4]]";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    ck_assert(tokens[0].type == CJ5_TOKEN_ARRAY);
+} END_TEST
+
+START_TEST(parseGetUnsigned) {
+    const char *json = "42";
+    cj5_token tokens[32];
+    cj5_result r = cj5_parse(json, (unsigned int)strlen(json), tokens, 32, NULL);
+    ck_assert(r.error == CJ5_ERROR_NONE);
+    uint64_t val = 0;
+    cj5_error_code err = cj5_get_uint(&r, 0, &val);
+    ck_assert(err == CJ5_ERROR_NONE);
+    ck_assert_uint_eq(val, 42);
+} END_TEST
+
 static Suite *testSuite_builtin_json(void) {
     TCase *tc_parse= tcase_create("cj5_parse");
     tcase_add_test(tc_parse, parseObject);
@@ -234,9 +547,39 @@ static Suite *testSuite_builtin_json(void) {
     tcase_add_test(tc_parse, parseValueStopEarly);
     tcase_add_test(tc_parse, parseInf);
     tcase_add_test(tc_parse, parseNegInf);
+    tcase_add_test(tc_parse, parseTokenOverflow);
+    tcase_add_test(tc_parse, parseEmptyObject);
+    tcase_add_test(tc_parse, parseEmptyArray);
+    tcase_add_test(tc_parse, parseNegativeNumber);
+    tcase_add_test(tc_parse, parseExponentNumber);
+    tcase_add_test(tc_parse, parseHexNumber);
+    tcase_add_test(tc_parse, parseStringEscapes);
+    tcase_add_test(tc_parse, parseGetBoolWrongType);
+    tcase_add_test(tc_parse, parseGetFloatWrongType);
+    tcase_add_test(tc_parse, parseFindOnNonObject);
+    tcase_add_test(tc_parse, parseTrailingComma);
+    tcase_add_test(tc_parse, parseSingleLineComment);
+    tcase_add_test(tc_parse, parseMultiLineComment);
+    tcase_add_test(tc_parse, parseHashComment);
+    tcase_add_test(tc_parse, parseNanValue);
+    tcase_add_test(tc_parse, parseZeroInteger);
+    tcase_add_test(tc_parse, parseSkipObject);
+    tcase_add_test(tc_parse, parseDoubleQuotedString);
+    tcase_add_test(tc_parse, parseBoolCaseInsensitive);
+    tcase_add_test(tc_parse, parseNullCaseInsensitive);
+    tcase_add_test(tc_parse, parseNestedArray);
+    tcase_add_test(tc_parse, parseGetUnsigned);
+
+    TCase *tc_get_str = tcase_create("cj5_get_str_termination");
+    tcase_add_test(tc_get_str, getStrTruncatedSurrogateIsTerminated);
+    tcase_add_test(tc_get_str, getStrUnpairedLowSurrogateIsTerminated);
+    tcase_add_test(tc_get_str, getStrSurrogateBadContinuationIsTerminated);
+    tcase_add_test(tc_get_str, getStrWrongTokenTypeIsTerminated);
+    tcase_add_test(tc_get_str, getStrValidSurrogatePairStillWorks);
 
     Suite *s = suite_create("Test JSON decoding with the cj5 library");
     suite_add_tcase(s, tc_parse);
+    suite_add_tcase(s, tc_get_str);
     return s;
 }
 

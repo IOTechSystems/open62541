@@ -153,13 +153,6 @@ int main(int argc, char *argv[]) {
     UA_ClientConfig_setDefault(cc);
 #endif
 
-    /* The application URI must be the same as the one in the certificate.
-     * The script for creating a self-created certificate generates a certificate
-     * with the Uri specified below.*/
-    UA_ApplicationDescription_clear(&cc->clientDescription);
-    cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:open62541.server.application");
-    cc->clientDescription.applicationType = UA_APPLICATIONTYPE_CLIENT;
-
     /* Connect to the server */
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     if(username) {
@@ -182,12 +175,12 @@ int main(int argc, char *argv[]) {
     else
         retval = UA_Client_connect(client, serverurl);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Could not connect");
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "Could not connect");
         UA_Client_delete(client);
         return 0;
     }
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Connected!");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "Connected!");
 
     /* Read the server-time */
     UA_Variant value;
@@ -195,7 +188,7 @@ int main(int argc, char *argv[]) {
     UA_Client_readValueAttribute(client, UA_NS0ID(SERVER_SERVERSTATUS_CURRENTTIME), &value);
     if(UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_DATETIME])) {
         UA_DateTimeStruct dts = UA_DateTime_toStruct(*(UA_DateTime *)value.data);
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                     "The server date is: %02u-%02u-%04u %02u:%02u:%02u.%03u",
                     dts.day, dts.month, dts.year, dts.hour, dts.min, dts.sec, dts.milliSec);
     }

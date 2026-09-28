@@ -7,6 +7,7 @@
  *    Copyright 2016-2017 (c) Stefan Profanter, fortiss GmbH
  *    Copyright 2017 (c) Florian Palm
  *    Copyright 2020 (c) HMS Industrial Networks AB (Author: Jonas Green)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_COMMON_H_
@@ -18,6 +19,8 @@
 _UA_BEGIN_DECLS
 
 /**
+ * .. _common:
+ *
  * Common Definitions
  * ==================
  *
@@ -61,8 +64,10 @@ typedef enum {
     UA_ATTRIBUTEID_ACCESSLEVELEX           = 27
 } UA_AttributeId;
 
-/* Returns a readable attribute name like "NodeId" or "Invalid" if the attribute
- * does not exist */
+/**
+ * Returns a readable attribute name like "NodeId" or "Invalid" if the attribute
+ * does not exist. */
+
 UA_EXPORT const char *
 UA_AttributeId_name(UA_AttributeId attrId);
 
@@ -93,7 +98,8 @@ UA_AttributeId_name(UA_AttributeId attrId);
  * are ANDed for the overall write mask. Part 3: 5.2.7 Table 2 */
 
 #define UA_WRITEMASK_ACCESSLEVEL             (0x01u << 0u)
-#define UA_WRITEMASK_ARRRAYDIMENSIONS        (0x01u << 1u)
+#define UA_WRITEMASK_ARRAYDIMENSIONS         (0x01u << 1u)
+#define UA_WRITEMASK_ARRRAYDIMENSIONS        UA_WRITEMASK_ARRAYDIMENSIONS /* legacy typo alias */
 #define UA_WRITEMASK_BROWSENAME              (0x01u << 2u)
 #define UA_WRITEMASK_CONTAINSNOLOOPS         (0x01u << 3u)
 #define UA_WRITEMASK_DATATYPE                (0x01u << 4u)
@@ -155,7 +161,6 @@ UA_AttributeId_name(UA_AttributeId attrId);
  *
  * Rule Handling
  * -------------
- *
  * The RuleHanding settings define how error cases that result from rules in the
  * OPC UA specification shall be handled. The rule handling can be softened,
  * e.g. to workaround misbehaving implementations or to mitigate the impact of
@@ -171,7 +176,6 @@ typedef enum {
 /**
  * Order
  * -----
- *
  * The Order enum is used to establish an absolute ordering between elements.
  */
 
@@ -180,6 +184,394 @@ typedef enum {
     UA_ORDER_EQ = 0,
     UA_ORDER_MORE = 1
 } UA_Order;
+
+/**
+ * .. _application-notification:
+ *
+ * Application Notification
+ * ------------------------
+ * The ApplicationNotification mechanism is for runtime notifications where the
+ * server/client wants to make the local application aware of state changes and
+ * internal events.
+ *
+ * The identifier for the different notifications is a UA_UInt64 integer. The
+ * high 32bits contain a bitfield for the notification type. The low 32bits are
+ * for detailed differentiation within each type. This allows for easy filtering
+ * with bitwise operations.
+ *
+ * The notifications comes with a key-value map for the payload. Future
+ * additional payload members are added to the end of the payload. So that the
+ * names, type and also index of the payload members is stable. */
+
+typedef uint64_t UA_ApplicationNotificationType;
+
+/* Lifecycle notifications, no payload */
+#define UA_APPLICATIONNOTIFICATIONTYPE_LIFECYCLE          \
+    (0x01ULL << 32)
+#define UA_APPLICATIONNOTIFICATIONTYPE_LIFECYCLE_STARTED  \
+    ((0x01ULL << 32) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_LIFECYCLE_SHUTDOWN \
+    ((0x01ULL << 32) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_LIFECYCLE_STOPPING \
+    ((0x01ULL << 32) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_LIFECYCLE_STOPPED  \
+    ((0x01ULL << 32) | 0x04)
+
+/**
+ * (Server only) Give background information after a SecureChannel is opened
+ * or closed.
+ *
+ * 0:securechannel-id [UInt32]
+ *    Identifier of the SecureChannel to which the Session is connected.
+ * 0:connection-manager-name [String]
+ *    Name of the ConnectionManager (configured in the EventLoop) from which
+ *    the connction was opened.
+ * 0:connection-id [UInt64]
+ *    Identifier of the connection in the context of the EventLoop. This is
+ *    often the socket identifier, but that is not necessarily the case.
+ * 0:remote-address [String]
+ *   Address (hostname or IP that opened the SecureChannel.
+ *
+ * 0:protocol-version [UInt32]
+ *   The version of the UACP protocol requested by the Client.
+ * 0:recv-buffer-size [UInt32]
+ *   The largest buffer (chunk size) we can receive over the channel.
+ * 0:recv-max-message-size [UInt32]
+ *   The maximum size of received messages.
+ * 0:recv-max-chunk-count [UInt32]
+ *   The maximum number of chunks for received messages.
+ * 0:send-buffer-size [UInt32]
+ *   The largest buffer (chunk size) we can send over the channel.
+ * 0:send-max-message-size [UInt32]
+ *   The maximum size of sent messages.
+ * 0:send-max-chunk-count [UInt32]
+ *   The maximum number of chunks for sent messages.
+ * 0:endpoint-url
+ *   The target EndpointUri (for the server) indicated by the client.
+ *
+ * 0:security-mode [MessageSecurityMode]
+ *   The SecurityChannel can be unsigned, signed or signed+encrypted.
+ * 0:security-policy-uri [String]
+ *   Uri of the SecurityPolicy for this SecyrityChannel.
+ * 0:certificate-type-id [NodeId]
+ *   Certificate type used by the SecurityPolicy for this SecureChannel.
+ * 0:remote-certificate [ByteString]
+ *   Certificate used by the remote side during OpenSecureChannel. */
+#define UA_APPLICATIONNOTIFICATIONTYPE_SECURECHANNEL        \
+    (0x02ULL << 32)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SECURECHANNEL_OPENED \
+    ((0x02ULL << 32) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SECURECHANNEL_CLOSED \
+    ((0x02ULL << 32) | 0x02)
+
+/**
+ * (Server only) Give background information for Sessions. The _DEACTIVATE
+ * notification occurs when a Sesssion is unbound from its original
+ * SecureChannel. Either because the SecureChannel is closed or because the
+ * session is activated on another SecureChannel.
+ *
+ * 0:session-id [NodeId]
+ *   Identifier of the Session.
+ * 0:securechannel-id [UInt32]
+ *   Identifier of the SecureChannel on which the Session is activated.
+ *   Zero if the Session is not bound to any SecureChannel.
+ * 0:session-name [String]
+ *   Name of the Session as defined by the client.
+ * 0:client-description [ApplicationDescription]
+ *   Name of the Session as defined by the client.
+ * 0:client-user-id [String]
+ *   User identifier used to activate the session. This is extracted from
+ *   the UserIdentityToken (e.g. username but not the password).
+ * 0:locale-ids [Array of String]
+ *   List of preferred languages.
+ *
+ * Any additional attributes set via UA_Server_setSessionAttribute are
+ * appended to the above list. */
+#define UA_APPLICATIONNOTIFICATIONTYPE_SESSION             \
+    (0x04ULL << 32)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SESSION_CREATED     \
+    ((0x04ULL << 32) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SESSION_ACTIVATED   \
+    ((0x04ULL << 32) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SESSION_DEACTIVATED \
+    ((0x04ULL << 32) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SESSION_CLOSED      \
+    ((0x04ULL << 32) | 0x04)
+
+/**
+ * Processing of a service request or response. The server-side processing
+ * of a request can be asynchronous. The existence of a yet-unfinished async
+ * operation from the request is signaled with the _SERVICE_ASYNC enum. The
+ * _SERVICE_END enum is signalled eventually, once all async operations from
+ * the service request are completed.
+ *
+ * 0:securechannel-id [UInt32]
+ *    Identifier of the SecureChannel to which the Session is connected.
+ * 0:session-id [NodeId]
+ *    Identifier of the Session for/from which the Service is requested.
+ *    This is the ns=0;i=0 NodeId if no Session is bound to the receiving
+ *    SecureChannel.
+ * 0:request-id [UInt32]
+ *    Request/Response correlation identifier. On the server this is zero for
+ *    transports that do not carry a RequestId.
+ * 0:service-type [NodeId]
+ *    DataType identifier for the Request (server) or Response (client). */
+#define UA_APPLICATIONNOTIFICATIONTYPE_SERVICE       \
+    (0x08ULL << 32)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_BEGIN \
+    ((0x08ULL << 32) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_ASYNC \
+    ((0x08ULL << 32) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_END   \
+    ((0x08ULL << 32) | 0x03)
+
+/**
+ * (Server only) Signals the creation or modification of a Subscription.
+ *
+ * 0:session-id [NodeId]
+ *    Identifier of the Session for which the Subscription is created.
+ *    If the subscription is not bound to any Session, then the NodeId
+ *    ns=0;i=0 is returned.
+ * 0:subscription-id [UInt32]
+ *    Identifier of the Subscription (unique for the Session).
+ * 0:publishing-interval [Double]
+ *    Frequence at which accumulated notifications are sent out.
+ * 0:lifetime-count [UInt32]
+ *    Number of consecutive publishing interval with a missing
+ *    PublishRequest before the Subscription is starved (deleted).
+ * 0:max-keepalive-count [UInt32]
+ *    Number of consecutive publishing intervals without a PublishResponse
+ *    before a keepalive is sent.
+ * 0:max-notifications-per-publish [UInt32]
+ *    Number of notifications that can be in a PublishResponse.
+ * 0:priority [Byte]
+ *    Higher-priority subscriptions send out PublishResponses first.
+ * 0:publishing-enabled [Boolean]
+ *    What the name says. */
+#define UA_APPLICATIONNOTIFICATIONTYPE_SUBSCRIPTION                \
+    (0x10ULL << 32)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SUBSCRIPTION_CREATED        \
+    ((0x10ULL << 32) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SUBSCRIPTION_MODIFIED       \
+    ((0x10ULL << 32) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SUBSCRIPTION_PUBLISHINGMODE \
+    ((0x10ULL << 32) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SUBSCRIPTION_TRANSFERRED    \
+    ((0x10ULL << 32) | 0x04)
+#define UA_APPLICATIONNOTIFICATIONTYPE_SUBSCRIPTION_DELETED        \
+    ((0x10ULL << 32) | 0x05)
+
+/**
+ * (Server only) Signals the creation or modification of a MonitoredItem.
+ *
+ * 0:session-id [NodeId]
+ *    Identifier of the Session for which the Subscription is created.
+ *    If the subscription is not bound to any Session, then the NodeId
+ *    ns=0;i=0 is returned.
+ * 0:subscription-id [UInt32]
+ *    Identifier of the Subscription (unique for the Session).
+ * 0:monitoreditem-id [UInt32]
+ *    Identifier of the MonitoredItem (unique for the Subscription).
+ * 0:target-node [NodeId]
+ *    Identifier of the Node that is monitored.
+ * 0:attribute-id [UInt32]
+ *    Node-attribute that is being monitored.
+ *    Conforms to the values from the UA_AttributeId enum.
+ * 0:index-range [String]
+ *    Defines if only part of an array value is monitored.
+ * 0:timestamps-to-return [TimestampsToReturn]
+ *    Enum with the options SOURCE | SERVER | BOTH | NEITHER.
+ * 0:monitorimg-mode [MonitoringMode]
+ *    Enum with the options DISABLED | SAMPLING | REPORTING.
+ * 0:client-handle [UInt32]
+ *   Client-supplied identifier of the MonitoredItem.
+ * 0:samping-interval [Double]
+ *    Interval to evaluate the MonitoredItem in milliseconds.
+ * 0:filter [Empty | DataChangeFilter | EventFilter | AggregateFilter]
+ *    The filter used to emit notifications.
+ * 0:queue-size [UInt32]
+ *    Maximum number of notifications waiting to be published.
+ * 0:discard-oldest [Boolean]
+ *    When the queue overflows, delete the newest or the oldest
+ *    notification. */
+#define UA_APPLICATIONNOTIFICATIONTYPE_MONITOREDITEM                \
+    (0x20ULL << 32)
+#define UA_APPLICATIONNOTIFICATIONTYPE_MONITOREDITEM_CREATED        \
+    ((0x20ULL << 32) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_MONITOREDITEM_MODIFIED       \
+    ((0x20ULL << 32) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_MONITOREDITEM_MONITORINGMODE \
+    ((0x20ULL << 32) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_MONITOREDITEM_DELETED        \
+    ((0x20ULL << 32) | 0x04)
+
+/**
+ * (Server only) Signals the creation of an audit event.
+ *
+ * The key-value map for audit application notifications follows the properties
+ * defined for the AuditEventType and its subtypes. The key-string is the
+ * human-readable encoding for the SimpleAttributeOperand of the event
+ * properties (value attribute only). The properties should be looked up from
+ * their string-key and not via their order-index in the key-value map.
+ *
+ * Examples properties are (datatype in brackets):
+ *
+ * - /ActionTimeStamp [DateTime]
+ * - /Status          [Boolean]
+ * - /ServerId        [String]
+ *
+ * See the definition of the AuditEventType and its subtypes in part 5 of the
+ * OPC UA specification. Below follows the hierarchy of the event types.
+ * Properties from the super-type are inherited.
+ *
+ * - AuditEventType
+ *
+ *   - AuditSecurityEventType
+ *
+ *     - AuditChannelEventType
+ *
+ *       - AuditOpenSecureChannelEventType
+ *
+ *     - AuditSessionEventType
+ *
+ *       - AuditCreateSessionEventType
+ *       - AuditActivateSessionEventType
+ *       - AuditCancelEventType
+ *
+ *     - AuditCertificateEventType
+ *
+ *       - AuditCertificateDataMismatchEventType
+ *       - AuditCertificateExpiredEventType
+ *       - AuditCertificateInvalidEventType
+ *       - AuditCertificateUntrustedEventType
+ *       - AuditCertificateRevokedEventType
+ *       - AuditCertificateMismatchEventType
+ *
+ *   - AuditNodeManagementEventType
+ *
+ *     - AuditAddNodesEventType
+ *     - AuditDeleteNodesEventType
+ *     - AuditAddReferencesEventType
+ *     - AuditDeleteReferencesEventType
+ *
+ *   - AuditUpdateEventType
+ *
+ *     - AuditWriteUpdateEventType
+ *     - AuditHistoryUpdateEventType
+ *
+ *   - AuditUpdateMethodEventType
+ *   - AuditClientEventType
+ *
+ *     - AuditClientUpdateMethodResultEventType */
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT                                   \
+    (0x40ULL << 32)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY                          \
+    ((0x40ULL << 32) | (0x01 << 16))
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CHANNEL                  \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x01 << 8))
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CHANNEL_OPEN             \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x01 << 8) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_SESSION                  \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x02 << 8))
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_SESSION_CREATE           \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x02 << 8) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_SESSION_ACTIVATE         \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x02 << 8) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_SESSION_CANCEL           \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x02 << 8) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CERTIFICATE              \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x04 << 8))
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CERTIFICATE_DATAMISMATCH \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x04 << 8) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CERTIFICATE_EXPIRED      \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x04 << 8) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CERTIFICATE_INVALID      \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x04 << 8) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CERTIFICATE_UNTRUSTED    \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x04 << 8) | 0x04)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CERTIFICATE_REVOKED      \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x04 << 8) | 0x05)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_SECURITY_CERTIFICATE_MISMATCH     \
+    ((0x40ULL << 32) | (0x01 << 16) | (0x04 << 8) | 0x06)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_NODE                              \
+    ((0x40ULL << 32) | (0x02 << 16))
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_NODE_ADD                          \
+    ((0x40ULL << 32) | (0x02 << 16) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_NODE_DELETE                       \
+    ((0x40ULL << 32) | (0x02 << 16) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_NODE_ADDREFERENCES                \
+    ((0x40ULL << 32) | (0x02 << 16) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_NODE_DELETEREFERENCES             \
+    ((0x40ULL << 32) | (0x02 << 16) | 0x04)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_UPDATE                            \
+    ((0x40ULL << 32) | (0x04 << 16))
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_UPDATE_WRITE                      \
+    ((0x40ULL << 32) | (0x04 << 16) | 0x01)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_UPDATE_HISTORY                    \
+    ((0x40ULL << 32) | (0x04 << 16) | 0x02)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_UPDATE_METHOD                     \
+    ((0x40ULL << 32) | (0x04 << 16) | 0x03)
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_CLIENT                            \
+    ((0x40ULL << 32) | (0x08 << 16))
+#define UA_APPLICATIONNOTIFICATIONTYPE_AUDIT_CLIENT_UPDATEMETHOD               \
+    ((0x40ULL << 32) | (0x08 << 16) | 0x01)
+
+/**
+ * (Server only) Signals for the Discovery service set.
+ *
+ * We uniquely identify servers by the combination of the following
+ * information. This is used to decide whether to update an existing
+ * record or whether to create a new one.
+ *
+ * - For FindServers: ServerUri + one matching DiscoveryUrl
+ * - For FindServerOnNetwork: ServerName + DiscoveryUrl
+ */
+
+#define UA_APPLICATIONNOTIFICATIONTYPE_DISCOVERY (0x80ULL << 32)
+
+/* A server was added via the RegisterServer service or the local API.
+ * Updates and removals are also notified.
+ *
+ * 0:registered-server [RegisteredServer]
+ *    Received server information.
+ * 0:discovery-configuration [Array of ExtensionObject]
+ *    Additional data, typically a UA_MdnsDiscoveryConfiguration.
+ * 0:server-added [Boolean]
+ *    They entry was newly added.
+ * 0:server-updated [Boolean]
+ *    An existing entry was updated.
+ * 0:server-removed [Boolean]
+ *    The entry was removed.
+ * 0:securechannel-id [UInt32]
+ *    Identifier of the SecureChannel from which the information was
+ *    recieved (0 for locally triggered operations).
+ * 0:session-id [NodeId]
+ *    Identifier of the Session that called the RegisterServer service.
+ *    The Null-NodeId if a SecureChannel without Session made the call. */
+#define UA_APPLICATIONNOTIFICATIONTYPE_DISCOVERY_REGISTERSERVER \
+    ((0x80ULL << 32) | 0x01)
+
+/* Information about a server over multicast DNS or the local API.
+ * Updates over time and removal is also notified (e.g after the DNS
+ * TTL (time-to-live) runs out).
+ *
+ * 0:server-on-network [ServerOnNetwork] Server information received.
+ *    (The RecordId datatype member is defined internally in the
+ *    server. It does not have semantic meaning here.)
+ * 0:remote-address [String]
+ *    IP-address or other host identifier from which the information
+ *    was received.
+ * 0:ttl [UInt32]
+ *    Time-to-live of DNS information. Zero means infinite
+ *    (if the server is not currently getting removed).
+ * 0:server-added [Boolean]
+ *    They entry was added.
+ * 0:server-updated [Boolean]
+ *    An existing entry was updated.
+ * 0:server-removed [Boolean]
+ *    The entry was removed. */
+#define UA_APPLICATIONNOTIFICATIONTYPE_DISCOVERY_SERVERONNETWORK \
+    ((0x80ULL << 32) | 0x02)
 
 /**
  * Connection State
@@ -192,9 +584,10 @@ typedef enum {
                                       fully established */
     UA_CONNECTIONSTATE_ESTABLISHED,/* The socket is open and the connection
                                     * configured */
-    UA_CONNECTIONSTATE_CLOSING     /* The socket is closing down */
+    UA_CONNECTIONSTATE_CLOSING,    /* The socket is closing down */
+    UA_CONNECTIONSTATE_BLOCKING,   /* Listening disabled (e.g. max connections reached) */
+    UA_CONNECTIONSTATE_REOPENING   /* Listening resumed after being blocked */
 } UA_ConnectionState;
-
 
 typedef enum {
     UA_SECURECHANNELSTATE_CLOSED = 0,
@@ -224,7 +617,6 @@ typedef enum {
 /**
  * Statistic Counters
  * ------------------
- *
  * The stack manages statistic counters for SecureChannels and Sessions.
  *
  * The Session layer counters are matching the counters of the
@@ -262,7 +654,6 @@ typedef struct {
 /**
  * Lifecycle States
  * ----------------
- *
  * Generic lifecycle states. The STOPPING state indicates that the lifecycle is
  * being terminated. But it might take time to (asynchronously) perform a
  * graceful shutdown. */
@@ -272,25 +663,6 @@ typedef enum {
     UA_LIFECYCLESTATE_STARTED,
     UA_LIFECYCLESTATE_STOPPING
 } UA_LifecycleState;
-
-/**
- * Forward Declarations
- * --------------------
- * Opaque pointers used in Client, Server and PubSub. */
-
-struct UA_Server;
-typedef struct UA_Server UA_Server;
-
-struct UA_ServerConfig;
-typedef struct UA_ServerConfig UA_ServerConfig;
-
-typedef void (*UA_ServerCallback)(UA_Server *server, void *data);
-
-struct UA_Client;
-typedef struct UA_Client UA_Client;
-
-/**
- * .. include:: util.rst */
 
 _UA_END_DECLS
 

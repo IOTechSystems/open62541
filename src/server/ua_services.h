@@ -10,6 +10,7 @@
  *    Copyright 2015 (c) Christian Fimmers
  *    Copyright 2015-2016 (c) Oleksiy Vasylyev
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_SERVICES_H_
@@ -20,8 +21,10 @@
 
 _UA_BEGIN_DECLS
 
-typedef void (*UA_Service)(UA_Server*, UA_Session*,
-                           const void *request, void *response);
+/* Services return whether they are "done". Otherwise no response is sent.
+ * This then needs to be done asynchronously at a later time. */
+typedef UA_Boolean (*UA_Service)(UA_Server*, UA_Session*,
+                                 const void *request, void *response);
 
 typedef void (*UA_ChannelService)(UA_Server*, UA_SecureChannel*,
                                   const void *request, void *response);
@@ -40,183 +43,225 @@ typedef struct {
 /* Returns NULL if none found */
 UA_ServiceDescription * getServiceDescription(UA_UInt32 requestTypeId);
 
-/** Discovery Service Set **/
-void Service_FindServers(UA_Server *server, UA_Session *session,
-                         const UA_FindServersRequest *request,
-                         UA_FindServersResponse *response);
+/* Decode a complete Binary service request including its type identifier. */
+UA_StatusCode
+decodeBinaryServiceRequest(UA_Server *server, const UA_ByteString *message,
+                           UA_ServiceDescription **description,
+                           UA_Request *request, size_t *requestOffset,
+                           UA_UInt32 *requestTypeId);
 
-void Service_GetEndpoints(UA_Server *server, UA_Session *session,
-                          const UA_GetEndpointsRequest *request,
-                          UA_GetEndpointsResponse *response);
+/** Discovery Service Set **/
+UA_Boolean
+Service_FindServers(UA_Server *server, UA_Session *session,
+                    const void *request /* UA_FindServersRequest */,
+                    void *response /* UA_FindServersResponse */);
+
+UA_Boolean
+Service_GetEndpoints(UA_Server *server, UA_Session *session,
+                     const void *request /* UA_GetEndpointsRequest */,
+                     void *response /* UA_GetEndpointsResponse */);
 
 #ifdef UA_ENABLE_DISCOVERY
 
-void Service_RegisterServer(UA_Server *server, UA_Session *session,
-                            const UA_RegisterServerRequest *request,
-                            UA_RegisterServerResponse *response);
+UA_Boolean
+Service_RegisterServer(UA_Server *server, UA_Session *session,
+                       const void *request /* UA_RegisterServerRequest */,
+                       void *response /* UA_RegisterServerResponse */);
 
-void Service_RegisterServer2(UA_Server *server, UA_Session *session,
-                            const UA_RegisterServer2Request *request,
-                            UA_RegisterServer2Response *response);
+UA_Boolean
+Service_RegisterServer2(UA_Server *server, UA_Session *session,
+                        const void *request /* UA_RegisterServer2Request */,
+                        void *response /* UA_RegisterServer2Response */);
 
-# ifdef UA_ENABLE_DISCOVERY_MULTICAST
-
-void Service_FindServersOnNetwork(UA_Server *server, UA_Session *session,
-                                  const UA_FindServersOnNetworkRequest *request,
-                                  UA_FindServersOnNetworkResponse *response);
-
-# endif /* UA_ENABLE_DISCOVERY_MULTICAST */
+UA_Boolean
+Service_FindServersOnNetwork(UA_Server *server, UA_Session *session,
+                             const void *request /* UA_FindServersOnNetworkRequest */,
+                             void *response /* UA_FindServersOnNetworkResponse */);
 
 #endif /* UA_ENABLE_DISCOVERY */
 
 /** SecureChannel Service Set **/
-void Service_OpenSecureChannel(UA_Server *server, UA_SecureChannel* channel,
-                               UA_OpenSecureChannelRequest *request,
-                               UA_OpenSecureChannelResponse *response);
+void
+Service_OpenSecureChannel(UA_Server *server, UA_SecureChannel* channel,
+                          void *request /* UA_OpenSecureChannelRequest */,
+                          void *response /* UA_OpenSecureChannelResponse */);
 
-void Service_CloseSecureChannel(UA_Server *server, UA_SecureChannel *channel);
+void
+Service_CloseSecureChannel(UA_Server *server, UA_SecureChannel *channel);
 
 /** Session Service Set **/
-void Service_CreateSession(UA_Server *server, UA_SecureChannel *channel,
-                           const UA_CreateSessionRequest *request,
-                           UA_CreateSessionResponse *response);
+void
+Service_CreateSession(UA_Server *server, UA_SecureChannel *channel,
+                      const void *request /* UA_CreateSessionRequest */,
+                      void *response /* UA_CreateSessionResponse */);
 
-void Service_ActivateSession(UA_Server *server, UA_SecureChannel *channel,
-                             const UA_ActivateSessionRequest *request,
-                             UA_ActivateSessionResponse *response);
+void
+Service_ActivateSession(UA_Server *server, UA_SecureChannel *channel,
+                        const void *request /* UA_ActivateSessionRequest */,
+                        void *response /* UA_ActivateSessionResponse */);
 
-void Service_CloseSession(UA_Server *server, UA_SecureChannel *channel,
-                          const UA_CloseSessionRequest *request,
-                          UA_CloseSessionResponse *response);
+void
+Service_CloseSession(UA_Server *server, UA_SecureChannel *channel,
+                     const void *request /* UA_CloseSessionRequest */,
+                     void *response /* UA_CloseSessionResponse */);
 
-void Service_Cancel(UA_Server *server, UA_Session *session,
-                    const UA_CancelRequest *request,
-                    UA_CancelResponse *response);
+UA_Boolean
+Service_Cancel(UA_Server *server, UA_Session *session,
+               const void *request /* UA_CancelRequest */, void *response /* UA_CancelResponse */);
 
 /** NodeManagement Service Set **/
-void Service_AddNodes(UA_Server *server, UA_Session *session,
-                      const UA_AddNodesRequest *request,
-                      UA_AddNodesResponse *response);
+UA_Boolean
+Service_AddNodes(UA_Server *server, UA_Session *session,
+                 const void *request /* UA_AddNodesRequest */,
+                 void *response /* UA_AddNodesResponse */);
 
-void Service_AddReferences(UA_Server *server, UA_Session *session,
-                           const UA_AddReferencesRequest *request,
-                           UA_AddReferencesResponse *response);
+UA_Boolean
+Service_AddReferences(UA_Server *server, UA_Session *session,
+                      const void *request /* UA_AddReferencesRequest */,
+                      void *response /* UA_AddReferencesResponse */);
 
-void Service_DeleteNodes(UA_Server *server, UA_Session *session,
-                         const UA_DeleteNodesRequest *request,
-                         UA_DeleteNodesResponse *response);
+UA_Boolean
+Service_DeleteNodes(UA_Server *server, UA_Session *session,
+                    const void *request /* UA_DeleteNodesRequest */,
+                    void *response /* UA_DeleteNodesResponse */);
 
-void Service_DeleteReferences(UA_Server *server, UA_Session *session,
-                              const UA_DeleteReferencesRequest *request,
-                              UA_DeleteReferencesResponse *response);
+UA_Boolean
+Service_DeleteReferences(UA_Server *server, UA_Session *session,
+                         const void *request /* UA_DeleteReferencesRequest */,
+                         void *response /* UA_DeleteReferencesResponse */);
 
 /** View Service Set **/
-void Service_Browse(UA_Server *server, UA_Session *session,
-                    const UA_BrowseRequest *request,
-                    UA_BrowseResponse *response);
+UA_Boolean
+Service_Browse(UA_Server *server, UA_Session *session,
+               const void *request /* UA_BrowseRequest */, void *response /* UA_BrowseResponse */);
 
-void Service_BrowseNext(UA_Server *server, UA_Session *session,
-                        const UA_BrowseNextRequest *request,
-                        UA_BrowseNextResponse *response);
+UA_Boolean
+Service_BrowseNext(UA_Server *server, UA_Session *session,
+                   const void *request /* UA_BrowseNextRequest */,
+                   void *response /* UA_BrowseNextResponse */);
 
-void Service_TranslateBrowsePathsToNodeIds(UA_Server *server, UA_Session *session,
-             const UA_TranslateBrowsePathsToNodeIdsRequest *request,
-             UA_TranslateBrowsePathsToNodeIdsResponse *response);
+UA_Boolean
+Service_TranslateBrowsePathsToNodeIds(UA_Server *server, UA_Session *session,
+    const void *request /* UA_TranslateBrowsePathsToNodeIdsRequest */,
+    void *response /* UA_TranslateBrowsePathsToNodeIdsResponse */);
 
-void Service_RegisterNodes(UA_Server *server, UA_Session *session,
-                           const UA_RegisterNodesRequest *request,
-                           UA_RegisterNodesResponse *response);
+UA_Boolean
+Service_RegisterNodes(UA_Server *server, UA_Session *session,
+                      const void *request /* UA_RegisterNodesRequest */,
+                      void *response /* UA_RegisterNodesResponse */);
 
-void Service_UnregisterNodes(UA_Server *server, UA_Session *session,
-                             const UA_UnregisterNodesRequest *request,
-                             UA_UnregisterNodesResponse *response);
+UA_Boolean
+Service_UnregisterNodes(UA_Server *server, UA_Session *session,
+                        const void *request /* UA_UnregisterNodesRequest */,
+                        void *response /* UA_UnregisterNodesResponse */);
 
 /** Query Service Set (not implemented) **/
 
 /** Attribute Service Set **/
-void Service_Read(UA_Server *server, UA_Session *session,
-                  const UA_ReadRequest *request,
-                  UA_ReadResponse *response);
+UA_Boolean
+Service_Read(UA_Server *server, UA_Session *session,
+             const void *request /* UA_ReadRequest */, void *response /* UA_ReadResponse */);
 
-void Service_Write(UA_Server *server, UA_Session *session,
-                   const UA_WriteRequest *request,
-                   UA_WriteResponse *response);
+UA_Boolean
+Operation_Read(UA_Server *server, UA_Session *session,
+               UA_TimestampsToReturn ttr,
+               const UA_ReadValueId *rvi, UA_DataValue *dv);
+
+UA_Boolean
+Service_Write(UA_Server *server, UA_Session *session,
+              const void *request /* UA_WriteRequest */, void *response /* UA_WriteResponse */);
+
+UA_Boolean
+Operation_Write(UA_Server *server, UA_Session *session,
+                const UA_WriteValue *wv, UA_StatusCode *result);
 
 #ifdef UA_ENABLE_HISTORIZING
-void Service_HistoryRead(UA_Server *server, UA_Session *session,
-                         const UA_HistoryReadRequest *request,
-                         UA_HistoryReadResponse *response);
+UA_Boolean
+Service_HistoryRead(UA_Server *server, UA_Session *session,
+                    const void *request /* UA_HistoryReadRequest */,
+                    void *response /* UA_HistoryReadResponse */);
 
-void Service_HistoryUpdate(UA_Server *server, UA_Session *session,
-                           const UA_HistoryUpdateRequest *request,
-                           UA_HistoryUpdateResponse *response);
+UA_Boolean
+Service_HistoryUpdate(UA_Server *server, UA_Session *session,
+                      const void *request /* UA_HistoryUpdateRequest */,
+                      void *response /* UA_HistoryUpdateResponse */);
 #endif
 
 /** Method Service Set **/
 #ifdef UA_ENABLE_METHODCALLS
-void Service_Call(UA_Server *server, UA_Session *session,
-                  const UA_CallRequest *request,
-                  UA_CallResponse *response);
+UA_Boolean
+Service_Call(UA_Server *server, UA_Session *session,
+             const void *request /* UA_CallRequest */, void *response /* UA_CallResponse */);
 
-# if UA_MULTITHREADING >= 100
-void Service_CallAsync(UA_Server *server, UA_Session *session, UA_UInt32 requestId,
-                       const UA_CallRequest *request, UA_CallResponse *response,
-                       UA_Boolean *finished);
-#endif
+UA_Boolean
+Operation_CallMethod(UA_Server *server, UA_Session *session,
+                     const UA_CallMethodRequest *request,
+                     UA_CallMethodResult *result);
 #endif
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS
 
 /** MonitoredItem Service Set **/
-void Service_CreateMonitoredItems(UA_Server *server, UA_Session *session,
-                                  const UA_CreateMonitoredItemsRequest *request,
-                                  UA_CreateMonitoredItemsResponse *response);
+UA_Boolean
+Service_CreateMonitoredItems(UA_Server *server, UA_Session *session,
+                             const void *request /* UA_CreateMonitoredItemsRequest */,
+                             void *response /* UA_CreateMonitoredItemsResponse */);
 
-void Service_DeleteMonitoredItems(UA_Server *server, UA_Session *session,
-                                  const UA_DeleteMonitoredItemsRequest *request,
-                                  UA_DeleteMonitoredItemsResponse *response);
+UA_Boolean
+Service_DeleteMonitoredItems(UA_Server *server, UA_Session *session,
+                             const void *request /* UA_DeleteMonitoredItemsRequest */,
+                             void *response /* UA_DeleteMonitoredItemsResponse */);
 
-void Service_ModifyMonitoredItems(UA_Server *server, UA_Session *session,
-                                  const UA_ModifyMonitoredItemsRequest *request,
-                                  UA_ModifyMonitoredItemsResponse *response);
+UA_Boolean
+Service_ModifyMonitoredItems(UA_Server *server, UA_Session *session,
+                             const void *request /* UA_ModifyMonitoredItemsRequest */,
+                             void *response /* UA_ModifyMonitoredItemsResponse */);
 
-void Service_SetMonitoringMode(UA_Server *server, UA_Session *session,
-                               const UA_SetMonitoringModeRequest *request,
-                               UA_SetMonitoringModeResponse *response);
+UA_Boolean
+Service_SetMonitoringMode(UA_Server *server, UA_Session *session,
+                          const void *request /* UA_SetMonitoringModeRequest */,
+                          void *response /* UA_SetMonitoringModeResponse */);
 
-void Service_SetTriggering(UA_Server *server, UA_Session *session,
-                           const UA_SetTriggeringRequest *request,
-                           UA_SetTriggeringResponse *response);
+UA_Boolean
+Service_SetTriggering(UA_Server *server, UA_Session *session,
+                      const void *request /* UA_SetTriggeringRequest */,
+                      void *response /* UA_SetTriggeringResponse */);
 
 /** Subscription Service Set **/
-void Service_CreateSubscription(UA_Server *server, UA_Session *session,
-                                const UA_CreateSubscriptionRequest *request,
-                                UA_CreateSubscriptionResponse *response);
+UA_Boolean
+Service_CreateSubscription(UA_Server *server, UA_Session *session,
+                           const void *request /* UA_CreateSubscriptionRequest */,
+                           void *response /* UA_CreateSubscriptionResponse */);
 
-void Service_ModifySubscription(UA_Server *server, UA_Session *session,
-                                const UA_ModifySubscriptionRequest *request,
-                                UA_ModifySubscriptionResponse *response);
+UA_Boolean
+Service_ModifySubscription(UA_Server *server, UA_Session *session,
+                           const void *request /* UA_ModifySubscriptionRequest */,
+                           void *response /* UA_ModifySubscriptionResponse */);
 
-void Service_SetPublishingMode(UA_Server *server, UA_Session *session,
-                               const UA_SetPublishingModeRequest *request,
-                               UA_SetPublishingModeResponse *response);
+UA_Boolean
+Service_SetPublishingMode(UA_Server *server, UA_Session *session,
+                          const void *request /* UA_SetPublishingModeRequest */,
+                          void *response /* UA_SetPublishingModeResponse */);
 
-/* Special async service. Do not answer if StatusCode == Good. */
-UA_StatusCode
+UA_Boolean
 Service_Publish(UA_Server *server, UA_Session *session,
-                const UA_PublishRequest *request, UA_UInt32 requestId);
+                const void *request /* UA_PublishRequest */,
+                void *response /* UA_PublishResponse */);
 
-void Service_Republish(UA_Server *server, UA_Session *session,
-                       const UA_RepublishRequest *request,
-                       UA_RepublishResponse *response);
+UA_Boolean
+Service_Republish(UA_Server *server, UA_Session *session,
+                  const void *request /* UA_RepublishRequest */,
+                  void *response /* UA_RepublishResponse */);
 
-void Service_DeleteSubscriptions(UA_Server *server, UA_Session *session,
-                                 const UA_DeleteSubscriptionsRequest *request,
-                                 UA_DeleteSubscriptionsResponse *response);
+UA_Boolean
+Service_DeleteSubscriptions(UA_Server *server, UA_Session *session,
+                            const void *request /* UA_DeleteSubscriptionsRequest */,
+                            void *response /* UA_DeleteSubscriptionsResponse */);
 
-void Service_TransferSubscriptions(UA_Server *server, UA_Session *session,
-                                   const UA_TransferSubscriptionsRequest *request,
-                                   UA_TransferSubscriptionsResponse *response);
+UA_Boolean
+Service_TransferSubscriptions(UA_Server *server, UA_Session *session,
+                              const void *request /* UA_TransferSubscriptionsRequest */,
+                              void *response /* UA_TransferSubscriptionsResponse */);
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS */
 

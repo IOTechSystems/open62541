@@ -770,7 +770,7 @@ static YYACTIONTYPE yy_find_reduce_action(
 #else
   assert( stateno<=YY_REDUCE_COUNT );
 #endif
-  i = yy_reduce_ofst[stateno];
+  i = yy_reduce_ofst[stateno]; /* NOLINT(cert-str34-c): Signed parser offset. */
   assert( iLookAhead!=YYNOCODE );
   i += iLookAhead;
 #ifdef YYERRORSYMBOL
@@ -1052,10 +1052,10 @@ static YYACTIONTYPE yy_reduce(
       /* (24) namedOperandAssignmentList ::= namedOperandAssignment (OPTIMIZED OUT) */ assert(yyruleno!=24);
         break;
 /********** End reduce actions ************************************************/
-  };
+  }
   assert( yyruleno<sizeof(yyRuleInfoLhs)/sizeof(yyRuleInfoLhs[0]) );
   yygoto = yyRuleInfoLhs[yyruleno];
-  yysize = yyRuleInfoNRhs[yyruleno];
+  yysize = yyRuleInfoNRhs[yyruleno]; /* NOLINT(cert-str34-c): Signed rule length. */
   yyact = yy_find_reduce_action(yymsp[yysize].stateno,(YYCODETYPE)yygoto);
 
   /* There are no SHIFTREDUCE actions on nonterminals because the table
@@ -1421,7 +1421,7 @@ UA_EventFilter_parse(UA_EventFilter *filter, UA_ByteString content,
             int extractLen = 10;
             if(pos - begin < 10)
                 extractLen = (int)(pos - begin);
-            UA_LOG_ERROR(ctx.logger, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_ERROR(ctx.logger, UA_LOGCATEGORY_APPLICATION,
                          "Could not process token at line %u, column %u: "
                          "%.*s...", line, col, extractLen, content.data + begin);
             res = UA_STATUSCODE_BADINTERNALERROR;
@@ -1438,7 +1438,7 @@ UA_EventFilter_parse(UA_EventFilter *filter, UA_ByteString content,
      * The token could not be read. */
     if(pos < content.length) {
         pos2lines(content, pos, &line, &col);
-        UA_LOG_ERROR(ctx.logger, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(ctx.logger, UA_LOGCATEGORY_APPLICATION,
                      "Token after the end of the EventFilter expression "
                      "at line %u, column %u", line, col);
         res = UA_STATUSCODE_BADINTERNALERROR;

@@ -10,8 +10,9 @@
 #include <open62541/plugin/securitypolicy_default.h>
 
 #include "test_helpers.h"
-#include "ua_pubsub_internal.h"
+#include "pubsub_test_helpers.h"
 #include "ua_server_internal.h"
+#include "ua_pubsub_internal.h"
 
 #include <check.h>
 #include <stdlib.h>
@@ -45,7 +46,7 @@ static void setup(void) {
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(UA_PubSubConnectionConfig));
     connectionConfig.name = UA_STRING("UADP Connection");
-    UA_NetworkAddressUrlDataType networkAddressUrl = {UA_STRING_NULL, UA_STRING("opc.udp://224.0.0.22:4840/")};
+    UA_NetworkAddressUrlDataType networkAddressUrl = UA_PUBSUB_TEST_NETWORKADDRESSURL(UA_PUBSUB_TEST_UDP_MULTICAST_URL_4840);
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri = UA_STRING("http://opcfoundation.org/UA-Profile/Transport/pubsub-udp-uadp");
@@ -75,6 +76,8 @@ START_TEST(SinglePublishDataSetField) {
     writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_UADP;
     retVal |= UA_Server_addWriterGroup(server, connection2, &writerGroupConfig, &writerGroup2);
     retVal |= UA_Server_enableWriterGroup(server, writerGroup2);
+    retVal |= UA_Server_enableAllPubSubComponents(server);
+
     writerGroupConfig.name = UA_STRING("WriterGroup 3");
     writerGroupConfig.publishingInterval = 100;
     writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_UADP;
@@ -83,7 +86,6 @@ START_TEST(SinglePublishDataSetField) {
     writerGroupConfig.securityPolicy = &config->pubSubConfig.securityPolicies[0];
 
     retVal |= UA_Server_addWriterGroup(server, connection2, &writerGroupConfig, &writerGroup3);
-    retVal |= UA_Server_enableWriterGroup(server, writerGroup3);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 
     UA_PublishedDataSetConfig pdsConfig;
@@ -117,6 +119,9 @@ START_TEST(SinglePublishDataSetField) {
     UA_ByteString kn = {UA_AES256CTR_KEYNONCE_LENGTH, keyNonce};
 
     UA_Server_setWriterGroupEncryptionKeys(server, writerGroup3, 1, sk, ek, kn);
+
+    retVal |= UA_Server_enableAllPubSubComponents(server);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 
     UA_PubSubManager *psm = getPSM(server);
     UA_WriterGroup *wg = UA_WriterGroup_find(psm, writerGroup3);

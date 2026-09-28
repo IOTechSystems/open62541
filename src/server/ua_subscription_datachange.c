@@ -15,13 +15,65 @@
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS /* conditional compilation */
 
-/* Detect value changes outside the deadband */
-#define UA_DETECT_DEADBAND(TYPE) do {                           \
-    TYPE v1 = *(const TYPE*)data1;                              \
-    TYPE v2 = *(const TYPE*)data2;                              \
-    TYPE diff = (v1 > v2) ? (TYPE)(v1 - v2) : (TYPE)(v2 - v1);  \
-    return ((UA_Double)diff > deadband);                        \
-} while(false);
+void
+markSemanticsChanged(UA_Server *server, const UA_NodeId *affected) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+
+    const UA_Node *node = UA_NODESTORE_GET(server, affected);
+    if(!node)
+        return;
+
+    if(node->head.nodeClass != UA_NODECLASS_VARIABLE &&
+       node->head.nodeClass != UA_NODECLASS_VARIABLETYPE) {
+        UA_NODESTORE_RELEASE(server, node);
+        return;
+    }
+
+    UA_MonitoredItem *mon = node->head.monitoredItems;
+    for(; mon != NULL; mon = mon->nodeListNext) {
+        if(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_VALUE)
+            continue;
+        mon->semanticsChangedPending = true;
+        if(mon->samplingType == UA_MONITOREDITEMSAMPLINGTYPE_EVENT)
+            UA_MonitoredItem_sample(server, mon);
+    }
+
+    UA_NODESTORE_RELEASE(server, node);
+}
+
+/* Detect value changes outside the deadband.
+ *
+ * Integer types: compute the absolute difference in a wide unsigned type
+ * (UA_UInt64) first, then widen only the *difference* to UA_Double for the
+ * deadband comparison. This avoids both signed integer overflow (e.g.
+ * (UA_SByte)(100 - (-50)) wraps to -106 instead of 150) and the 2^53
+ * precision loss that comes from casting the operands to UA_Double before
+ * subtracting: two huge but close Int64/UInt64 values would each round to a
+ * nearby representable double and the subtraction would accumulate the
+ * rounding error. Computing the exact integer magnitude first keeps the
+ * difference exact (it fits in UA_Double's 53-bit mantissa for any realistic
+ * deadband), so only the (usually small) delta is widened. The (UA_UInt64)
+ * cast of a negative signed value yields the correct unsigned magnitude on
+ * every platform. */
+#define UA_DETECT_DEADBAND(TYPE) do {                                      \
+    TYPE v1 = *(const TYPE*)data1;                                         \
+    TYPE v2 = *(const TYPE*)data2;                                         \
+    UA_UInt64 mag = (v1 > v2) ? (UA_UInt64)v1 - (UA_UInt64)v2               \
+                              : (UA_UInt64)v2 - (UA_UInt64)v1;              \
+    UA_Double diff = (UA_Double)mag;                                       \
+    return (diff > deadband);                                              \
+} while(false)
+
+/* Floating-point types: the integer magnitude approach would truncate the
+ * fractional part, so subtract directly in UA_Double. This is safe from
+ * overflow and exact (Float widens to Double without loss). */
+#define UA_DETECT_DEADBAND_FLOAT(TYPE) do {                                 \
+    TYPE v1 = *(const TYPE*)data1;                                         \
+    TYPE v2 = *(const TYPE*)data2;                                         \
+    UA_Double diff = (v1 > v2) ? (UA_Double)v1 - (UA_Double)v2             \
+                               : (UA_Double)v2 - (UA_Double)v1;            \
+    return (diff > deadband);                                              \
+} while(false)
 
 static UA_Boolean
 detectScalarDeadBand(const void *data1, const void *data2,
@@ -43,9 +95,9 @@ detectScalarDeadBand(const void *data1, const void *data2,
     } else if(type->typeKind == UA_DATATYPEKIND_UINT64) {
         UA_DETECT_DEADBAND(UA_UInt64);
     } else if(type->typeKind == UA_DATATYPEKIND_FLOAT) {
-        UA_DETECT_DEADBAND(UA_Float);
+        UA_DETECT_DEADBAND_FLOAT(UA_Float);
     } else if(type->typeKind == UA_DATATYPEKIND_DOUBLE) {
-        UA_DETECT_DEADBAND(UA_Double);
+        UA_DETECT_DEADBAND_FLOAT(UA_Double);
     } else {
         return false; /* Not a known numerical type */
     }
@@ -54,13 +106,20 @@ detectScalarDeadBand(const void *data1, const void *data2,
 static UA_Boolean
 detectVariantDeadband(const UA_Variant *value, const UA_Variant *oldValue,
                       const UA_Double deadbandValue) {
+    /* Be careful to avoid a NULL access. We could have the value a scalar and
+     * oldValue an empty array. Both define a type and arrayLength == 0. */
     if(value->arrayLength != oldValue->arrayLength)
         return true;
     if(value->type != oldValue->type)
         return true;
+    if(UA_Variant_isScalar(value) != UA_Variant_isScalar(oldValue))
+        return true;
+
+    /* Treat scalars as an array of length 1 and iterate */
     size_t length = 1;
     if(!UA_Variant_isScalar(value))
         length = value->arrayLength;
+
     uintptr_t data = (uintptr_t)value->data;
     uintptr_t oldData = (uintptr_t)oldValue->data;
     UA_UInt32 memSize = value->type->memSize;
@@ -102,6 +161,10 @@ detectValueChange(UA_Server *server, UA_MonitoredItem *mon, const UA_DataValue *
     UA_assert(trigger == UA_DATACHANGETRIGGER_STATUSVALUE ||
               trigger == UA_DATACHANGETRIGGER_STATUSVALUETIMESTAMP);
 
+    /* Can we compare values? */
+    if(dv->hasValue != mon->lastValue.hasValue)
+       return true;
+
     /* Test absolute deadband */
     if(dcf && dcf->deadbandType == UA_DEADBANDTYPE_ABSOLUTE &&
        dv->value.type != NULL && UA_DataType_isNumeric(dv->value.type))
@@ -118,8 +181,6 @@ detectValueChange(UA_Server *server, UA_MonitoredItem *mon, const UA_DataValue *
     }
 
     /* Has the value changed? */
-    if(dv->hasValue != mon->lastValue.hasValue)
-        return true;
     return !UA_equal(&dv->value, &mon->lastValue.value,
                      &UA_TYPES[UA_TYPES_VARIANT]);
 }
@@ -127,11 +188,22 @@ detectValueChange(UA_Server *server, UA_MonitoredItem *mon, const UA_DataValue *
 UA_StatusCode
 UA_MonitoredItem_createDataChangeNotification(UA_Server *server, UA_MonitoredItem *mon,
                                               const UA_DataValue *dv) {
+    if(UA_MonitoredItem_isDeleting(mon))
+        return UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
+
     /* Copy the value */
     UA_DataValue valueCopy;
     UA_StatusCode retval = UA_DataValue_copy(dv, &valueCopy);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
+
+    /* SemanticsChanged is a one-shot notification bit. Keep it out of
+     * lastValue so it neither affects filtering nor causes a second status
+     * change when the bit disappears. */
+    if(mon->semanticsChangedPending) {
+        valueCopy.hasStatus = true;
+        valueCopy.status |= UA_STATUSCODE_SEMANTICSCHANGED;
+    }
 
     /* Allocate a new notification */
     UA_Notification *n = UA_Notification_new();
@@ -145,6 +217,7 @@ UA_MonitoredItem_createDataChangeNotification(UA_Server *server, UA_MonitoredIte
     n->data.dataChange.value = valueCopy;
     n->data.dataChange.clientHandle = mon->parameters.clientHandle;
     UA_Notification_enqueueAndTrigger(server, n);
+    mon->semanticsChangedPending = false;
     return UA_STATUSCODE_GOOD;
 }
 
@@ -154,8 +227,15 @@ UA_MonitoredItem_processSampledValue(UA_Server *server, UA_MonitoredItem *mon,
     UA_assert(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_EVENTNOTIFIER);
     UA_LOCK_ASSERT(&server->serviceMutex);
 
+    /* Application-backed reads can reenter and delete the MonitoredItem. */
+    if(UA_MonitoredItem_isDeleting(mon)) {
+        UA_DataValue_clear(value);
+        return;
+    }
+
     /* Has the value changed (with the filters applied)? */
-    UA_Boolean changed = detectValueChange(server, mon, value);
+    UA_Boolean changed = mon->semanticsChangedPending ||
+        detectValueChange(server, mon, value);
     if(!changed) {
         UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, mon->subscription,
                                   "MonitoredItem %" PRIi32 " | "
@@ -165,6 +245,7 @@ UA_MonitoredItem_processSampledValue(UA_Server *server, UA_MonitoredItem *mon,
     }
 
     /* Prepare a notification and enqueue it */
+    UA_Boolean semanticsChanged = mon->semanticsChangedPending;
     UA_StatusCode res =
         UA_MonitoredItem_createDataChangeNotification(server, mon, value);
     if(res != UA_STATUSCODE_GOOD) {
@@ -179,12 +260,47 @@ UA_MonitoredItem_processSampledValue(UA_Server *server, UA_MonitoredItem *mon,
     /* Move/store the value for filter comparison and TransferSubscription */
     UA_DataValue_clear(&mon->lastValue);
     mon->lastValue = *value;
+
+    /* Call the local callback if the MonitoredItem is not attached to a
+     * subscription. Do this at the very end. Because the callback might delete
+     * the subscription. */
+    if(!mon->subscription) {
+        if(semanticsChanged) {
+            value->hasStatus = true;
+            value->status |= UA_STATUSCODE_SEMANTICSCHANGED;
+        }
+        UA_LocalMonitoredItem *localMon = (UA_LocalMonitoredItem*) mon;
+        void *nodeContext = NULL;
+        getNodeContext(server, mon->itemToMonitor.nodeId, &nodeContext);
+        localMon->callback.dataChangeCallback(server,
+                                              mon->monitoredItemId, localMon->context,
+                                              &mon->itemToMonitor.nodeId, nodeContext,
+                                              mon->itemToMonitor.attributeId, value);
+    }
+}
+
+/* We know the result is a deep-copy. So we can abuse the const result-pointer
+ * and take ownership of the value. */
+static void
+processMonitoredItemAsyncRead(UA_Server *server,
+                              void *asyncOpContext /* UA_MonitoredItem */,
+                              const UA_DataValue *result) {
+    UA_MonitoredItem *mon = (UA_MonitoredItem*)asyncOpContext;
+    mon->outstandingAsyncReads--;
+    UA_DataValue *mut_result = (UA_DataValue*)(uintptr_t)result;
+    if(mut_result->status == UA_STATUSCODE_BADREQUESTCANCELLEDBYREQUEST)
+        return; /* Controlled shut-down */
+    UA_MonitoredItem_processSampledValue(server, mon, mut_result);
+    UA_DataValue_init(mut_result);
 }
 
 void
 UA_MonitoredItem_sample(UA_Server *server, UA_MonitoredItem *mon) {
     UA_LOCK_ASSERT(&server->serviceMutex);
     UA_assert(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_EVENTNOTIFIER);
+
+    if(UA_MonitoredItem_isDeleting(mon))
+        return;
 
     UA_Subscription *sub = mon->subscription;
     UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub, "MonitoredItem %" PRIi32
@@ -194,11 +310,23 @@ UA_MonitoredItem_sample(UA_Server *server, UA_MonitoredItem *mon) {
      * sub->session can be NULL when the subscription is detached. Then
      * readWithSession returns the error-code BADUSERACCESSDENIED. */
     UA_Session *session = (sub) ? sub->session : &server->adminSession;
-    UA_DataValue dv = readWithSession(server, session, &mon->itemToMonitor,
-                                      mon->timestampsToReturn);
 
-    /* Process the sample. This always clears the value. */
-    UA_MonitoredItem_processSampledValue(server, mon, &dv);
+    /* Read the value possibly asynchronous */
+    UA_StatusCode res = UA_STATUSCODE_BADTOOMANYOPERATIONS;
+    if(UA_LIKELY(mon->outstandingAsyncReads < UA_MONITOREDITEM_ASYNC_MAX)) {
+        res = read_async(server, session, &mon->itemToMonitor, mon->timestampsToReturn,
+                         processMonitoredItemAsyncRead, mon, 0);
+    }
+    if(res == UA_STATUSCODE_GOOD) {
+        mon->outstandingAsyncReads++;
+    } else {
+        /* Reading failed, process with the StatusCode */
+        UA_DataValue dv;
+        UA_DataValue_init(&dv);
+        dv.hasStatus = true;
+        dv.status = res;
+        UA_MonitoredItem_processSampledValue(server, mon, &dv);
+    }
 }
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS */

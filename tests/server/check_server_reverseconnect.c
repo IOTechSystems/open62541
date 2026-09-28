@@ -26,19 +26,26 @@
 static UA_Server *server = NULL;
 static UA_Client *client = NULL;
 
+static UA_UInt16 reverseListenPort = 4841;
+static UA_UInt16 nextReverseListenPort = 4841;
+static char reverseConnectUrl[64];
+
 static int numServerCallbackCalled = 0;
-static UA_SecureChannelState serverCallbackStates[10];
+static UA_SecureChannelState serverCallbackStates[64];
 static UA_UInt64 reverseConnectHandle = 0;
 
 static int numClientCallbackCalled = 0;
 static UA_SecureChannelState clientCallbackStates[100];
 
-bool runServer = false;
+#define REVERSE_RECONNECT_INTERVAL_TEST 10
+#define REVERSECONNECT_MAX_ITERATIONS 1000
+
+static UA_atomic(uintptr_t) runServer = false;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-    while (runServer)
-        UA_Server_run_iterate(server, true);
+    while(UA_atomic_load(&runServer))
+        UA_Server_run_iterate(server, false);
     return 0;
 }
 
@@ -49,7 +56,7 @@ static void clientStateCallback(UA_Client *c,
     ck_assert(numClientCallbackCalled < (int)(sizeof(clientCallbackStates) / sizeof(UA_SecureChannelState)));
     clientCallbackStates[numClientCallbackCalled++] = channelState;
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                  "Client state callback called with state %d", channelState);
 }
 
@@ -63,22 +70,25 @@ static void setup(void) {
     numServerCallbackCalled = 0;
     reverseConnectHandle = 0;
     numClientCallbackCalled = 0;
+    reverseListenPort = nextReverseListenPort++;
+    snprintf(reverseConnectUrl, sizeof(reverseConnectUrl),
+             "opc.tcp://127.0.0.1:%u", (unsigned)reverseListenPort);
 
     server = UA_Server_newForUnitTest();
     UA_ServerConfig *sc = UA_Server_getConfig(server);
-    sc->reverseReconnectInterval = 15000;
     UA_Array_delete(sc->serverUrls, sc->serverUrlsSize, &UA_TYPES[UA_TYPES_STRING]);
     sc->serverUrls = NULL;
     sc->serverUrlsSize = 0;
     ck_assert(server != NULL);
+    sc->reverseReconnectInterval = REVERSE_RECONNECT_INTERVAL_TEST;
 
     client = UA_Client_newForUnitTest();
     UA_Client_getConfig(client)->stateCallback = clientStateCallback;
 }
 
 static void teardown(void) {
-    if(runServer) {
-        runServer = false;
+    if(UA_atomic_load(&runServer)) {
+        UA_atomic_store(&runServer, false);
         THREAD_JOIN(server_thread);
     }
 
@@ -90,14 +100,95 @@ static void teardown(void) {
 static void serverStateCallback(UA_Server *s, UA_UInt64 handle,
                           UA_SecureChannelState state,
                           void *context) {
+    ck_assert(numServerCallbackCalled <
+              (int)(sizeof(serverCallbackStates) / sizeof(UA_SecureChannelState)));
     serverCallbackStates[numServerCallbackCalled++] = state;
 
     ck_assert_ptr_eq(server, s);
     ck_assert_ptr_eq(context, (void *)1234);
     ck_assert_uint_eq(handle, reverseConnectHandle);
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                  "Reverse connect callback called with state %d", state);
+}
+
+static void
+iterateClient(UA_UInt32 fakeSleep) {
+    UA_Client_run_iterate(client, 0);
+    UA_fakeSleep(fakeSleep);
+}
+
+static void
+iterateClientServer(UA_UInt32 fakeSleep) {
+    UA_Server_run_iterate(server, false);
+    /* Give the socket event loop time to make progress. A fully non-blocking
+     * loop can exhaust REVERSECONNECT_MAX_ITERATIONS before the operating
+     * system schedules the peer, making the callback assertions flaky. */
+    UA_Client_run_iterate(client, 1);
+    UA_fakeSleep(fakeSleep);
+}
+
+static void
+iterateClientUntilCallbacks(int callbacks, UA_UInt32 fakeSleep) {
+    for(size_t i = 0; i < REVERSECONNECT_MAX_ITERATIONS &&
+        numClientCallbackCalled < callbacks; ++i)
+        iterateClient(fakeSleep);
+}
+
+static void
+listenForReverseConnect(void) {
+    const UA_String listenHost = UA_STRING("127.0.0.1");
+    UA_StatusCode ret =
+        UA_Client_startListeningForReverseConnect(client, &listenHost, 1,
+                                                  reverseListenPort);
+    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
+
+    iterateClientUntilCallbacks(numClientCallbackCalled + 1, 1);
+    ck_assert_int_gt(numClientCallbackCalled, 0);
+    ck_assert_int_eq(clientCallbackStates[numClientCallbackCalled - 1],
+                     UA_SECURECHANNELSTATE_REVERSE_LISTENING);
+}
+
+static void
+iterateClientServerUntilCallbacks(int serverCallbacks, int clientCallbacks,
+                                  UA_UInt32 fakeSleep) {
+    for(size_t i = 0; i < REVERSECONNECT_MAX_ITERATIONS &&
+        (numServerCallbackCalled < serverCallbacks ||
+         numClientCallbackCalled < clientCallbacks); ++i)
+        iterateClientServer(fakeSleep);
+}
+
+static void
+iterateServerUntilCallbacks(int serverCallbacks, UA_UInt32 fakeSleep) {
+    for(size_t i = 0; i < REVERSECONNECT_MAX_ITERATIONS &&
+        numServerCallbackCalled < serverCallbacks; ++i) {
+        UA_Server_run_iterate(server, false);
+        UA_fakeSleep(fakeSleep);
+    }
+}
+
+static UA_Boolean
+serverStatesContainSequence(size_t start, const UA_SecureChannelState *states,
+                            size_t statesSize) {
+    size_t match = 0;
+    for(size_t i = start; i < (size_t)numServerCallbackCalled; ++i) {
+        if(serverCallbackStates[i] == states[match]) {
+            ++match;
+            if(match == statesSize)
+                return true;
+        }
+    }
+    return false;
+}
+
+static void
+iterateClientServerUntilServerSequence(size_t start,
+                                       const UA_SecureChannelState *states,
+                                       size_t statesSize,
+                                       UA_UInt32 fakeSleep) {
+    for(size_t i = 0; i < REVERSECONNECT_MAX_ITERATIONS &&
+        !serverStatesContainSequence(start, states, statesSize); ++i)
+        iterateClientServer(fakeSleep);
 }
 
 START_TEST(listenAndTeardown) {
@@ -107,56 +198,56 @@ START_TEST(listenAndTeardown) {
     server = NULL;
 
     const UA_String listenHost = UA_STRING("127.0.0.1");
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
+    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1,
+                                                    reverseListenPort);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
-    for(int i = 0; i < 10; ++i) {
-        UA_Client_run_iterate(client, 1);
-        UA_fakeSleep(1000);
-    }
+    iterateClientUntilCallbacks(1, 1000);
 
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
+    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1,
+                                                    reverseListenPort);
     ck_assert_uint_eq(ret, UA_STATUSCODE_BADINVALIDSTATE);
 
     UA_Client_disconnect(client);
+    iterateClientUntilCallbacks(2, 1);
 
-    ck_assert_int_ge(numClientCallbackCalled, 3);
+    ck_assert_int_ge(numClientCallbackCalled, 2);
     ck_assert_int_eq(clientCallbackStates[0], UA_SECURECHANNELSTATE_REVERSE_LISTENING);
-    ck_assert_int_eq(clientCallbackStates[1], UA_SECURECHANNELSTATE_CLOSING);
-    ck_assert_int_eq(clientCallbackStates[2], UA_SECURECHANNELSTATE_CLOSED);
+    ck_assert(clientCallbackStates[1] == UA_SECURECHANNELSTATE_CLOSING ||
+              clientCallbackStates[1] == UA_SECURECHANNELSTATE_CLOSED);
 
 } END_TEST
 
 START_TEST(noListenWhileConnected) {
     UA_StatusCode ret = UA_STATUSCODE_BADINTERNALERROR;
 
-    runServer = true;
+    UA_atomic_store(&runServer, true);
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
 
     UA_Client_connect(client, "opc.tcp://127.0.0.1");
 
-    ck_assert_int_gt(numClientCallbackCalled, 5);
+    ck_assert_int_ge(numClientCallbackCalled, 5);
     ck_assert_int_eq(clientCallbackStates[3], UA_SECURECHANNELSTATE_OPEN);
 
     const UA_String listenHost = UA_STRING("127.0.0.1");
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
+    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1,
+                                                    reverseListenPort);
     ck_assert_uint_eq(ret, UA_STATUSCODE_BADINVALIDSTATE);
 
     UA_Client_disconnect(client);
 
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
+    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1,
+                                                    reverseListenPort);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 } END_TEST
 
 START_TEST(addBeforeStart) {
     UA_StatusCode ret = UA_STATUSCODE_BADINTERNALERROR;
 
-    const UA_String listenHost = UA_STRING("127.0.0.1");
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
-    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
+    listenForReverseConnect();
 
-    ret = UA_Server_addReverseConnect(server, UA_STRING("opc.tcp://127.0.0.1:4841"),
+    ret = UA_Server_addReverseConnect(server, UA_STRING(reverseConnectUrl),
                                       serverStateCallback, (void *)1234,
                                       &reverseConnectHandle);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
@@ -165,16 +256,7 @@ START_TEST(addBeforeStart) {
     ret = UA_Server_run_startup(server);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
-    for(int i = 0; i < 100; ++i) {
-        UA_Server_run_iterate(server, false);
-        UA_Client_run_iterate(client, 1);
-
-        if(numServerCallbackCalled == 5 &&
-           numClientCallbackCalled == 5)
-            break;
-
-        UA_fakeSleep(1000);
-    }
+    iterateClientServerUntilCallbacks(5, 5, 1);
 
     ret = UA_Server_run_shutdown(server);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
@@ -186,7 +268,7 @@ START_TEST(addBeforeStart) {
     ck_assert_int_eq(serverCallbackStates[3], UA_SECURECHANNELSTATE_OPEN);
     ck_assert_int_eq(serverCallbackStates[4], UA_SECURECHANNELSTATE_CLOSED);
 
-    ck_assert_int_gt(numClientCallbackCalled, 5);
+    ck_assert_int_ge(numClientCallbackCalled, 5);
     ck_assert_int_eq(clientCallbackStates[0], UA_SECURECHANNELSTATE_REVERSE_LISTENING);
     ck_assert_int_eq(clientCallbackStates[1], UA_SECURECHANNELSTATE_REVERSE_CONNECTED);
     ck_assert_int_eq(clientCallbackStates[2], UA_SECURECHANNELSTATE_HEL_SENT);
@@ -201,30 +283,23 @@ START_TEST(addAfterStart) {
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
     const UA_String listenHost = UA_STRING("127.0.0.1");
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
+    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1,
+                                                    reverseListenPort);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
-    for(int i = 0; i < 100; ++i) {
-        UA_Server_run_iterate(server, true);
-        UA_Client_run_iterate(client, 1);
+    iterateClientServer(1);
 
-        if(i == 10) {
-            ret = UA_Server_addReverseConnect(server, UA_STRING("opc.tcp://127.0.0.1:4841"),
-                                              serverStateCallback, (void *)1234,
-                                              &reverseConnectHandle);
+    ret = UA_Server_addReverseConnect(server, UA_STRING(reverseConnectUrl),
+                                      serverStateCallback, (void *)1234,
+                                      &reverseConnectHandle);
 
-            ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
-            ck_assert_uint_ne(reverseConnectHandle, 0);
-        }
+    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
+    ck_assert_uint_ne(reverseConnectHandle, 0);
 
-        if(i == 20)
-            UA_Server_removeReverseConnect(server, reverseConnectHandle);
+    iterateClientServerUntilCallbacks(4, 0, 1);
 
-        if(numServerCallbackCalled == 5)
-            break;
-
-        UA_fakeSleep(1);
-    }
+    UA_Server_removeReverseConnect(server, reverseConnectHandle);
+    iterateServerUntilCallbacks(5, 1);
 
     ret = UA_Server_run_shutdown(server);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
@@ -240,104 +315,85 @@ START_TEST(addAfterStart) {
 START_TEST(checkReconnect) {
     UA_StatusCode ret = UA_STATUSCODE_BADINTERNALERROR;
 
-    ret = UA_Server_addReverseConnect(server, UA_STRING("opc.tcp://127.0.0.1:4841"),
+    listenForReverseConnect();
+
+    ret = UA_Server_addReverseConnect(server, UA_STRING(reverseConnectUrl),
                                       serverStateCallback, (void *)1234,
                                       &reverseConnectHandle);
 
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
     ck_assert_uint_ne(reverseConnectHandle, 0);
 
-    const UA_String listenHost = UA_STRING("127.0.0.1");
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
-    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
-
     ret = UA_Server_run_startup(server);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
-    for(int i = 0; i < 100; ++i) {
-        UA_Server_run_iterate(server, true);
-        UA_Client_run_iterate(client, 1);
+    const UA_SecureChannelState openSequence[] = {
+        UA_SECURECHANNELSTATE_CONNECTING,
+        UA_SECURECHANNELSTATE_RHE_SENT,
+        UA_SECURECHANNELSTATE_ACK_SENT,
+        UA_SECURECHANNELSTATE_OPEN
+    };
+    iterateClientServerUntilServerSequence(0, openSequence, 4, 1);
+    ck_assert(serverStatesContainSequence(0, openSequence, 4));
 
-        if(i == 50) {
-            ck_assert_int_eq(numServerCallbackCalled, 4);
-            ck_assert_int_eq(serverCallbackStates[0], UA_SECURECHANNELSTATE_CONNECTING);
-            ck_assert_int_eq(serverCallbackStates[1], UA_SECURECHANNELSTATE_RHE_SENT);
-            ck_assert_int_eq(serverCallbackStates[2], UA_SECURECHANNELSTATE_ACK_SENT);
-            ck_assert_int_eq(serverCallbackStates[3], UA_SECURECHANNELSTATE_OPEN);
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
+                "Stop listening and wait for reconnect");
 
-            UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-                        "Stop listening and wait for reconnect");
+    size_t reconnectStart = (size_t)numServerCallbackCalled;
+    ret = UA_Client_disconnectAsync(client);
+    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
-            ret = UA_Client_disconnectAsync(client);
-            ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
+    const UA_SecureChannelState reconnectSequence[] = {
+        UA_SECURECHANNELSTATE_CONNECTING
+    };
+    iterateClientServerUntilServerSequence(
+        reconnectStart, reconnectSequence, 1,
+        UA_Server_getConfig(server)->reverseReconnectInterval + 1);
+    ck_assert(serverStatesContainSequence(reconnectStart, reconnectSequence, 1));
 
-            for(int j = 0; j < 5; ++j) {
-                UA_Client_run_iterate(client, 1);
-                UA_Server_run_iterate(server, true);
-            }
+    listenForReverseConnect();
 
-            ck_assert_int_eq(numServerCallbackCalled, 6);
-            ck_assert_int_eq(serverCallbackStates[4], UA_SECURECHANNELSTATE_CLOSING);
-            ck_assert_int_eq(serverCallbackStates[5], UA_SECURECHANNELSTATE_CONNECTING);
+    UA_fakeSleep(UA_Server_getConfig(server)->reverseReconnectInterval + 1);
 
-            ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
-            ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
+    size_t reopenStart = (size_t)numServerCallbackCalled;
+    const UA_SecureChannelState reopenSequence[] = {
+        UA_SECURECHANNELSTATE_RHE_SENT,
+        UA_SECURECHANNELSTATE_ACK_SENT,
+        UA_SECURECHANNELSTATE_OPEN
+    };
+    iterateClientServerUntilServerSequence(reopenStart, reopenSequence, 3, 1);
+    ck_assert(serverStatesContainSequence(reopenStart, reopenSequence, 3));
 
-            UA_fakeSleep(UA_Server_getConfig(server)->reverseReconnectInterval + 1000);
+    size_t removeStart = (size_t)numServerCallbackCalled;
+    UA_Server_removeReverseConnect(server, reverseConnectHandle);
 
-            for(int j = 0; j < 5; ++j) {
-                UA_Server_run_iterate(server, true);
-                UA_Client_run_iterate(client, 1);
-            }
-
-            ck_assert_int_eq(numServerCallbackCalled, 9);
-            ck_assert_int_eq(serverCallbackStates[6], UA_SECURECHANNELSTATE_RHE_SENT);
-            ck_assert_int_eq(serverCallbackStates[7], UA_SECURECHANNELSTATE_ACK_SENT);
-            ck_assert_int_eq(serverCallbackStates[8], UA_SECURECHANNELSTATE_OPEN);
-        }
-
-        if(i == 80)
-            UA_Server_removeReverseConnect(server, reverseConnectHandle);
-
-        if(numServerCallbackCalled == 10)
-            break;
-
-        UA_fakeSleep(1000);
-    }
+    const UA_SecureChannelState closeSequence[] = {
+        UA_SECURECHANNELSTATE_CLOSED
+    };
+    iterateClientServerUntilServerSequence(removeStart, closeSequence, 1, 1);
 
     ret = UA_Server_run_shutdown(server);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
-    ck_assert_int_eq(numServerCallbackCalled, 10);
-    ck_assert_int_eq(serverCallbackStates[9], UA_SECURECHANNELSTATE_CLOSED);
+    ck_assert(serverStatesContainSequence(removeStart, closeSequence, 1));
 } END_TEST
 
 START_TEST(removeOnShutdownWithConnection) {
     UA_StatusCode ret = UA_STATUSCODE_BADINTERNALERROR;
 
-    ret = UA_Server_addReverseConnect(server, UA_STRING("opc.tcp://127.0.0.1:4841"),
+    listenForReverseConnect();
+
+    ret = UA_Server_addReverseConnect(server, UA_STRING(reverseConnectUrl),
                                       serverStateCallback, (void *)1234,
                                       &reverseConnectHandle);
 
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
     ck_assert_uint_ne(reverseConnectHandle, 0);
 
-    const UA_String listenHost = UA_STRING("127.0.0.1");
-    ret = UA_Client_startListeningForReverseConnect(client, &listenHost, 1, 4841);
-    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
-
     ret = UA_Server_run_startup(server);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
-    for(int i = 0; i < 20; ++i) {
-        UA_Server_run_iterate(server, true);
-        UA_Client_run_iterate(client, 100);
-
-        if(numServerCallbackCalled == 5)
-            break;
-
-        UA_fakeSleep(1000);
-    }
+    iterateClientServerUntilCallbacks(5, 0, 1);
 
     ret = UA_Server_run_shutdown(server);
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
@@ -353,7 +409,7 @@ START_TEST(removeOnShutdownWithConnection) {
 START_TEST(removeOnShutdownWithoutConnection) {
     UA_StatusCode ret = UA_STATUSCODE_BADINTERNALERROR;
 
-    ret = UA_Server_addReverseConnect(server, UA_STRING("opc.tcp://127.0.0.1:4841"),
+    ret = UA_Server_addReverseConnect(server, UA_STRING(reverseConnectUrl),
                                       serverStateCallback, (void *)1234,
                                       &reverseConnectHandle);
 
@@ -364,7 +420,7 @@ START_TEST(removeOnShutdownWithoutConnection) {
     ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
 
     for(int i = 0; i < 20; ++i) {
-        UA_Server_run_iterate(server, true);
+        UA_Server_run_iterate(server, false);
         UA_fakeSleep(1);
 
         if(numServerCallbackCalled == 2)

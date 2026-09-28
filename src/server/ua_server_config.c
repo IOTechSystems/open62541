@@ -4,6 +4,7 @@
  *
  *    Copyright 2019 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2019 (c) HMS Industrial Networks AB (Author: Jonas Green)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include <open62541/server.h>
@@ -18,15 +19,6 @@ UA_ServerConfig_clear(UA_ServerConfig *config) {
     /* Server Description */
     UA_BuildInfo_clear(&config->buildInfo);
     UA_ApplicationDescription_clear(&config->applicationDescription);
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
-    UA_MdnsDiscoveryConfiguration_clear(&config->mdnsConfig);
-    UA_String_clear(&config->mdnsInterfaceIP);
-# if !defined(UA_HAS_GETIFADDR)
-    if (config->mdnsIpAddressListSize) {
-        UA_free(config->mdnsIpAddressList);
-    }
-# endif
-#endif
 
     /* Stop and delete the EventLoop */
     UA_EventLoop *el = config->eventLoop;
@@ -48,6 +40,14 @@ UA_ServerConfig_clear(UA_ServerConfig *config) {
     config->serverUrls = NULL;
     config->serverUrlsSize = 0;
 
+    UA_ByteString_clear(&config->webSocketCertificate);
+    UA_ByteString_clear(&config->webSocketPrivateKey);
+    UA_String_clear(&config->webSocketPrivateKeyPassword);
+    UA_ByteString_clear(&config->httpCertificate);
+    UA_ByteString_clear(&config->httpPrivateKey);
+    UA_String_clear(&config->httpListenAddress);
+    UA_String_clear(&config->httpPrivateKeyPassword);
+
     /* Security Policies */
     for(size_t i = 0; i < config->securityPoliciesSize; ++i) {
         UA_SecurityPolicy *policy = &config->securityPolicies[i];
@@ -65,9 +65,9 @@ UA_ServerConfig_clear(UA_ServerConfig *config) {
     config->endpointsSize = 0;
 
     /* Nodestore */
-    if(config->nodestore.context && config->nodestore.clear) {
-        config->nodestore.clear(config->nodestore.context);
-        config->nodestore.context = NULL;
+    if(config->nodestore) {
+        config->nodestore->free(config->nodestore);
+        config->nodestore = NULL;
     }
 
     /* Certificate Validation */
@@ -105,4 +105,24 @@ UA_ServerConfig_clear(UA_ServerConfig *config) {
     /* Custom Data Types */
     UA_cleanupDataTypeWithCustom(config->customDataTypes);
     config->customDataTypes = NULL;
+
+#ifdef UA_ENABLE_RBAC
+    /* RBAC Presets */
+    if(config->rolePermissionPresets) {
+        for(size_t i = 0; i < config->rolePermissionPresetsSize; i++)
+            UA_RolePermissionSet_clear(&config->rolePermissionPresets[i]);
+        UA_free(config->rolePermissionPresets);
+        config->rolePermissionPresets = NULL;
+        config->rolePermissionPresetsSize = 0;
+    }
+
+    /* RBAC Roles */
+    if(config->roles) {
+        for(size_t i = 0; i < config->rolesSize; i++)
+            UA_Role_clear(&config->roles[i]);
+        UA_free(config->roles);
+        config->roles = NULL;
+        config->rolesSize = 0;
+    }
+#endif
 }

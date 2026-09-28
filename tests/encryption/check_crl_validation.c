@@ -13,22 +13,25 @@
 #include <open62541/server_config_default.h>
 #include <open62541/plugin/certificategroup_default.h>
 
+#include <stdlib.h>
+
+#include "test_helpers.h"
 #include "certificates.h"
 #include "check.h"
 #include "thread_wrapper.h"
 
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
         UA_Server_run_iterate(server, true);
     return 0;
 }
 
 static void setup1(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load certificate and private key */
     UA_ByteString certificate;
@@ -67,13 +70,12 @@ static void setup1(void) {
     issuerList[0] = intermediateCa;
     issuerList[1] = rootCa;
 
-    /* Loading of a revocation list currently unsupported */
     size_t revocationListSize = 2;
     UA_STACKARRAY(UA_ByteString, revocationList, revocationListSize);
     revocationList[0] = rootCaCrl;
     revocationList[1] = intermediateCaCrl;
 
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefaultWithSecurityPolicies(config, 4840, &certificate, &privateKey,
@@ -84,14 +86,14 @@ static void setup1(void) {
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
-        UA_STRING_ALLOC("urn:unconfigured:application");
+        UA_STRING_ALLOC("urn:open62541.unconfigured.application");
 
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
 }
 
 static void setup2(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load certificate and private key */
     UA_ByteString certificate;
@@ -130,13 +132,12 @@ static void setup2(void) {
     issuerList[0] = intermediateCa;
     issuerList[1] = rootCa;
 
-    /* Loading of a revocation list currently unsupported */
     size_t revocationListSize = 2;
     UA_STACKARRAY(UA_ByteString, revocationList, revocationListSize);
     revocationList[0] = rootCaCrl;
     revocationList[1] = intermediateCaCrl;
 
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefaultWithSecurityPolicies(config, 4840, &certificate, &privateKey,
@@ -147,14 +148,14 @@ static void setup2(void) {
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
-        UA_STRING_ALLOC("urn:unconfigured:application");
+        UA_STRING_ALLOC("urn:open62541.unconfigured.application");
 
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
 }
 
 static void setup3(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load certificate and private key */
     UA_ByteString certificate;
@@ -193,13 +194,12 @@ static void setup3(void) {
     issuerList[0] = rootCa;
     issuerList[1] = intermediateCa;
 
-    /* Loading of a revocation list currently unsupported */
     size_t revocationListSize = 2;
     UA_STACKARRAY(UA_ByteString, revocationList, revocationListSize);
     revocationList[0] = rootCaCrl;
     revocationList[1] = intermediateCaCrl;
 
-    server = UA_Server_new();
+    server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefaultWithSecurityPolicies(config, 4840, &certificate, &privateKey,
@@ -210,14 +210,14 @@ static void setup3(void) {
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
-        UA_STRING_ALLOC("urn:unconfigured:application");
+        UA_STRING_ALLOC("urn:open62541.unconfigured.application");
 
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
 }
 
 static void teardown(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
@@ -242,16 +242,18 @@ START_TEST(encryption_connect_valid) {
     size_t revocationListSize = 0;
 
     /* Secure client initialization */
-    UA_Client *client = UA_Client_new();
+    UA_Client *client = UA_Client_newForUnitTest();
     UA_ClientConfig *cc = UA_Client_getConfig(client);
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
                                          revocationList, revocationListSize);
-    cc->certificateVerification.clear(&cc->certificateVerification);
     UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
     ck_assert(client != NULL);
+
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri = UA_STRING_ALLOC("urn:unconfigured:application");
 
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
@@ -287,7 +289,45 @@ START_TEST(encryption_connect_revoked) {
     size_t revocationListSize = 0;
 
     /* Secure client initialization */
-    UA_Client *client = UA_Client_new();
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+    UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
+                                         trustList, trustListSize,
+                                         revocationList, revocationListSize);
+    UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
+    cc->securityPolicyUri =
+        UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
+    ck_assert(client != NULL);
+
+    /* Secure client connect. The application certificate is revoked by the
+     * intermediate CA's CRL, so the server rejects the handshake. */
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADSECURITYCHECKSFAILED);
+
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+}
+END_TEST
+
+START_TEST(encryption_connect_issuer_revoked) {
+    UA_ByteString certificate;
+    certificate.length = APPLICATION_CERT_DER_LENGTH;
+    certificate.data = APPLICATION_CERT_DER_DATA;
+    ck_assert_uint_ne(certificate.length, 0);
+
+    UA_ByteString privateKey;
+    privateKey.length = APPLICATION_KEY_DER_LENGTH;
+    privateKey.data = APPLICATION_KEY_DER_DATA;
+    ck_assert_uint_ne(privateKey.length, 0);
+
+    /* Load the trustlist */
+    UA_ByteString *trustList = NULL;
+    size_t trustListSize = 0;
+    UA_ByteString *revocationList = NULL;
+    size_t revocationListSize = 0;
+
+    /* Secure client initialization */
+    UA_Client *client = UA_Client_newForUnitTest();
     UA_ClientConfig *cc = UA_Client_getConfig(client);
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
@@ -298,7 +338,8 @@ START_TEST(encryption_connect_revoked) {
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
     ck_assert(client != NULL);
 
-    /* Secure client connect */
+    /* Secure client connect. The intermediate CA certificate is revoked by the
+     * root CA's CRL, so the server rejects the handshake. */
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
     ck_assert_uint_eq(retval, UA_STATUSCODE_BADSECURITYCHECKSFAILED);
 
@@ -318,7 +359,7 @@ static Suite* testSuite_encryption(void) {
 #ifdef UA_ENABLE_ENCRYPTION
     tcase_add_test(tc_encryption_valid, encryption_connect_valid);
     tcase_add_test(tc_encryption_revoked, encryption_connect_revoked);
-    tcase_add_test(tc_encryption_revoked2, encryption_connect_revoked);
+    tcase_add_test(tc_encryption_revoked2, encryption_connect_issuer_revoked);
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_encryption_valid);
     suite_add_tcase(s,tc_encryption_revoked);

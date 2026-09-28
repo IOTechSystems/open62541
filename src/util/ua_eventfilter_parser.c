@@ -8,6 +8,11 @@
 
 #include "ua_eventfilter_parser.h"
 
+/* Maximum nesting depth of the operand tree. Bounds the recursion when
+ * resolving references and walking the tree, so that deeply nested expressions
+ * (e.g. long operator chains) cannot overflow the native stack. */
+#define UA_EVENTFILTER_MAXDEPTH 64
+
 void
 pos2lines(const UA_ByteString content, size_t pos,
           unsigned *outLine, unsigned *outCol) {
@@ -39,14 +44,14 @@ findOperand(EFParseContext *ctx, char *ref) {
         if(!temp->ref || strcmp(temp->ref, ref) != 0)
             continue;
         if(found) {
-            UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_APPLICATION,
                          "Duplicate definition of operand reference %s", ref);
             return NULL;
         }
         found = temp;
     }
     if(!found) {
-        UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_APPLICATION,
                      "Failed to find the operand reference %s", ref);
     }
     return found;
@@ -54,7 +59,7 @@ findOperand(EFParseContext *ctx, char *ref) {
 
 static Operand *
 resolveOperandRef(EFParseContext *ctx, Operand *op, size_t depth) {
-    if(depth > ctx->operandsSize)
+    if(depth > UA_EVENTFILTER_MAXDEPTH || depth > ctx->operandsSize)
         return NULL; /* prevent infinite recursion */
     if(!op)
         return NULL;
@@ -93,8 +98,9 @@ void append_select(EFParseContext *ctx, Operand *on) {
 
 char *
 save_string(char *str) {
-    char *local_str = (char*) UA_calloc(strlen(str)+1, sizeof(char));
-    strcpy(local_str, str);
+    size_t strLen = strlen(str);
+    char *local_str = (char*) UA_calloc(strLen + 1, sizeof(char));
+    memcpy(local_str, str, strLen + 1);
     return local_str;
 }
 
@@ -115,8 +121,11 @@ create_operator(EFParseContext *ctx, UA_FilterOperator fo) {
 void
 append_operand(Operand *op, Operand *on) {
     Operator *optr = &op->operand.op;
-    optr->children = (Operand**)
+    Operand **children_tmp = (Operand **)
         UA_realloc(optr->children, (optr->childrenSize + 1) * sizeof(Operand*));
+    if(!children_tmp)
+        return;
+    optr->children = children_tmp;
     optr->children[optr->childrenSize] = on;
     optr->childrenSize++;
 }
@@ -124,7 +133,11 @@ append_operand(Operand *op, Operand *on) {
 /* Count the number of elements for the filter. Mark all required elements that
  * appear in the hierarchy from the top element. */
 static size_t
-markPrinted(EFParseContext *ctx, Operand *top, UA_StatusCode *res) {
+markPrinted(EFParseContext *ctx, Operand *top, size_t depth, UA_StatusCode *res) {
+    if(depth > UA_EVENTFILTER_MAXDEPTH) {
+        *res |= UA_STATUSCODE_BADINTERNALERROR; /* prevent stack overflow */
+        return 0;
+    }
     top = resolveOperandRef(ctx, top, 0);
     if(!top) {
         *res |= UA_STATUSCODE_BADINTERNALERROR;
@@ -137,7 +150,7 @@ markPrinted(EFParseContext *ctx, Operand *top, UA_StatusCode *res) {
     top->operand.op.required = true;
     size_t count = 1;
     for(size_t i = 0; i < top->operand.op.childrenSize; i++)
-        count += markPrinted(ctx, top->operand.op.children[i], res);
+        count += markPrinted(ctx, top->operand.op.children[i], depth+1, res);
     return count;
 }
 
@@ -235,7 +248,7 @@ create_filter(EFParseContext *ctx, UA_EventFilter *filter) {
         if(!sao)
             return UA_STATUSCODE_BADINTERNALERROR;
         if(sao->type != OT_SAO) {
-            UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_APPLICATION,
                          "The select clause must only contain SimpleAttributeOperands");
             return UA_STATUSCODE_BADINTERNALERROR;
         }
@@ -252,12 +265,12 @@ create_filter(EFParseContext *ctx, UA_EventFilter *filter) {
 
     Operand *top = resolveOperandRef(ctx, ctx->top, 0);
     if(!top || top->type != OT_OPERATOR) {
-        UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_APPLICATION,
                      "The where clause has no top-level operator");
         return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    size_t count = markPrinted(ctx, top, &res); /* Count relevant filter elements */
+    size_t count = markPrinted(ctx, top, 0, &res); /* Count relevant filter elements */
     if(res != UA_STATUSCODE_GOOD)
         return res;
 
@@ -277,7 +290,7 @@ create_filter(EFParseContext *ctx, UA_EventFilter *filter) {
     /* Cycles are not allowed. Detected if we could not print all relevant
      * elements */
     if(count > 0) {
-        UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_ERROR(ctx->logger, UA_LOGCATEGORY_APPLICATION,
                      "Cyclic operand references detected");
         res |= UA_STATUSCODE_BADINTERNALERROR;
     }

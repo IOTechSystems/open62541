@@ -21,7 +21,7 @@
  * ^^^^^^^^^^^^^^^^^^^^^^^^^^^
  * As a starting point, assume that a variable for a value of type
  * :ref:`datetime` has been created in the server with the identifier
- * "ns=1,s=current-time". Assuming that our application gets triggered when a
+ * "ns=1,s=current-time-value-callback". Assuming that our application gets triggered when a
  * new value arrives from the underlying process, we can just write into the
  * variable. */
 
@@ -80,7 +80,7 @@ afterWriteTime(UA_Server *server,
                const UA_NodeId *sessionId, void *sessionContext,
                const UA_NodeId *nodeId, void *nodeContext,
                const UA_NumericRange *range, const UA_DataValue *data) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                 "The variable was updated");
 }
 
@@ -121,7 +121,7 @@ writeCurrentTime(UA_Server *server,
                  const UA_NodeId *sessionId, void *sessionContext,
                  const UA_NodeId *nodeId, void *nodeContext,
                  const UA_NumericRange *range, const UA_DataValue *data) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                 "Changing the system time is not implemented");
     return UA_STATUSCODE_BADINTERNALERROR;
 }
@@ -147,19 +147,6 @@ addCurrentTimeDataSourceVariable(UA_Server *server) {
                                         timeDataSource, NULL, NULL);
 }
 
-static UA_DataValue *externalValue;
-
-static void
-addCurrentTimeExternalDataSource(UA_Server *server) {
-    UA_NodeId currentNodeId = UA_NODEID_STRING(1, "current-time-external-source");
-
-    UA_ValueBackend valueBackend;
-    valueBackend.backendType = UA_VALUEBACKENDTYPE_EXTERNAL;
-    valueBackend.backend.external.value = &externalValue;
-
-    UA_Server_setVariableNode_valueBackend(server, currentNodeId, valueBackend);
-}
-
 /** It follows the main server code, making use of the above definitions. */
 
 int main(void) {
@@ -168,7 +155,6 @@ int main(void) {
     addCurrentTimeVariable(server);
     addValueCallbackToCurrentTimeVariable(server);
     addCurrentTimeDataSourceVariable(server);
-    addCurrentTimeExternalDataSource(server);
 
     UA_Server_runUntilInterrupt(server);
     UA_Server_delete(server);

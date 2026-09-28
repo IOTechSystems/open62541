@@ -141,9 +141,9 @@ addSubscribedVariables(UA_Server *server, UA_NodeId dataSetReaderId) {
      * between received DataSet fields and target Variables in the Subscriber
      * AddressSpace. The values subscribed from the Publisher are updated in the value
      * field of these variables */
-    /* Create the TargetVariables with respect to DataSetMetaData fields */
-    UA_FieldTargetVariable *targetVars = (UA_FieldTargetVariable *)UA_calloc(
-        readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetVariable));
+
+    UA_FieldTargetDataType *targetVars = (UA_FieldTargetDataType*)
+        UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetDataType));
     for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++) {
         /* Variable to subscribe data */
         UA_VariableAttributes vAttr = UA_VariableAttributes_default;
@@ -160,16 +160,12 @@ addSubscribedVariables(UA_Server *server, UA_NodeId dataSetReaderId) {
             UA_QUALIFIEDNAME(1, (char *)readerConfig.dataSetMetaData.fields[i].name.data),
             UA_NS0ID(BASEDATAVARIABLETYPE), vAttr, NULL, &newNode);
 
-        /* For creating Targetvariables */
-        UA_FieldTargetDataType_init(&targetVars[i].targetVariable);
-        targetVars[i].targetVariable.attributeId = UA_ATTRIBUTEID_VALUE;
-        targetVars[i].targetVariable.targetNodeId = newNode;
+        targetVars[i].attributeId = UA_ATTRIBUTEID_VALUE;
+        targetVars[i].targetNodeId = newNode;
     }
 
     UA_Server_DataSetReader_createTargetVariables(server, dataSetReaderId,
                                                   readerConfig.dataSetMetaData.fieldsSize, targetVars);
-    for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++)
-        UA_FieldTargetDataType_clear(&targetVars[i].targetVariable);
 
     UA_free(targetVars);
     UA_free(readerConfig.dataSetMetaData.fields);
@@ -303,7 +299,7 @@ main(int argc, char **argv) {
     if((size_t)argc >= pos + 1) {
         certificate = loadFile(argv[1]);
         if(certificate.length == 0) {
-            UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Unable to load file %s.", argv[pos]);
             return EXIT_FAILURE;
         }
@@ -315,7 +311,7 @@ main(int argc, char **argv) {
     if((size_t)argc >= pos + 1) {
         privateKey = loadFile(argv[2]);
         if(privateKey.length == 0) {
-            UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Unable to load file %s.", argv[pos]);
             return EXIT_FAILURE;
         }

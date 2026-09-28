@@ -5,14 +5,12 @@
  *    Copyright 2019 (c) fortiss (Author: Stefan Profanter)
  */
 
-
-#include "custom_memory_manager.h"
-
 #include <open62541/plugin/log_stdout.h>
 #include <open62541/server_config_default.h>
 #include <open62541/types.h>
 
 #include "ua_server_internal.h"
+#include "custom_memory_manager.h"
 #include "testing_networklayers.h"
 
 #define RECEIVE_BUFFER_SIZE 65535
@@ -26,9 +24,8 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if(size <= 4)
         return 0;
 
-    if(!UA_memoryManager_setLimitFromLast4Bytes(data, size))
-        return 0;
-    size -= 4;
+    /* Keep setup and teardown outside allocation-failure fuzzing. */
+    UA_memoryManager_setLimit((unsigned long long)-1);
 
     /* less debug output */
     UA_ServerConfig initialConfig;
@@ -60,14 +57,40 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
     memcpy(msg.data, data, size);
 
-    void *ctx = NULL;
-    serverNetworkCallback(&testConnectionManagerTCP, 0, server,
-                              &ctx, UA_CONNECTIONSTATE_ESTABLISHED,
-                              &UA_KEYVALUEMAP_NULL, msg);
+    /* Get the binary server components */
+    UA_String binStr = UA_STRING((char*)(uintptr_t)"binary");
+    UA_Driver *bpm = NULL;
+    for(UA_Driver *drv = server->drivers; drv; drv = drv->next) {
+        if(UA_String_equal(&binStr, &drv->name))
+            bpm = drv;
+    }
+    UA_assert(bpm != NULL);
+
+    UA_ConnectionManager *cm = TestConnectionManager_new("tcp", NULL);
+
+    /* Register a listening socket first. New active connections inherit its
+     * context and replace it with their SecureChannel on the first callback. */
+    void *listenCtx = NULL;
+    serverNetworkCallback(cm, 1, bpm,
+                          &listenCtx, UA_CONNECTIONSTATE_ESTABLISHED,
+                          &UA_KEYVALUEMAP_NULL, UA_BYTESTRING_NULL);
+
+    void *connectionCtx = listenCtx;
+    serverNetworkCallback(cm, 2, bpm,
+                          &connectionCtx, UA_CONNECTIONSTATE_ESTABLISHED,
+                          &UA_KEYVALUEMAP_NULL, msg);
+
+    /* Remove both connections before freeing the testing ConnectionManager. */
+    serverNetworkCallback(cm, 2, bpm,
+                          &connectionCtx, UA_CONNECTIONSTATE_CLOSING,
+                          &UA_KEYVALUEMAP_NULL, UA_BYTESTRING_NULL);
+    serverNetworkCallback(cm, 1, bpm,
+                          &listenCtx, UA_CONNECTIONSTATE_CLOSING,
+                          &UA_KEYVALUEMAP_NULL, UA_BYTESTRING_NULL);
+    cm->eventSource.free(&cm->eventSource);
 
     // if we got an invalid chunk, the message is not deleted, so delete it here
     UA_ByteString_clear(&msg);
-    UA_Server_run_shutdown(server);
     UA_Server_delete(server);
     return 0;
 }

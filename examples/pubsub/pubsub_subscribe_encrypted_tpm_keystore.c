@@ -178,8 +178,8 @@ addSubscribedVariables (UA_Server *server, UA_NodeId dataSetReaderId) {
  * received DataSet fields and target Variables in the Subscriber AddressSpace.
  * The values subscribed from the Publisher are updated in the value field of these variables */
     /* Create the TargetVariables with respect to DataSetMetaData fields */
-    UA_FieldTargetVariable *targetVars = (UA_FieldTargetVariable *)
-            UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetVariable));
+    UA_FieldTargetDataType *targetVars = (UA_FieldTargetDataType*)
+            UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetDataType));
     for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++) {
         /* Variable to subscribe data */
         UA_VariableAttributes vAttr = UA_VariableAttributes_default;
@@ -196,16 +196,12 @@ addSubscribedVariables (UA_Server *server, UA_NodeId dataSetReaderId) {
                                             UA_NS0ID(BASEDATAVARIABLETYPE),
                                             vAttr, NULL, &newNode);
 
-        /* For creating Targetvariables */
-        UA_FieldTargetDataType_init(&targetVars[i].targetVariable);
-        targetVars[i].targetVariable.attributeId  = UA_ATTRIBUTEID_VALUE;
-        targetVars[i].targetVariable.targetNodeId = newNode;
+        targetVars[i].attributeId  = UA_ATTRIBUTEID_VALUE;
+        targetVars[i].targetNodeId = newNode;
     }
 
     retval = UA_Server_DataSetReader_createTargetVariables(server, dataSetReaderId,
                                                            readerConfig.dataSetMetaData.fieldsSize, targetVars);
-    for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++)
-        UA_FieldTargetDataType_clear(&targetVars[i].targetVariable);
 
     UA_free(targetVars);
     UA_free(readerConfig.dataSetMetaData.fields);
@@ -628,12 +624,12 @@ int main(int argc, char **argv) {
             transportProfile =
                 UA_STRING("http://opcfoundation.org/UA-Profile/Transport/pubsub-eth-uadp");
             if (argc != 8) {
-                UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                              "Error: Provide uri, interface name, encryptionKey, signingkey, slotId, userpin, and keyLabel");
                 return EXIT_FAILURE;
             }
         } else {
-            UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Error: unknown URI");
+            UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "Error: unknown URI");
             return EXIT_FAILURE;
         }
         networkAddressUrl.url = UA_STRING(argv[1]);
@@ -651,14 +647,14 @@ int main(int argc, char **argv) {
 
     encrypt_in_data = loadFile(encryptionKeyFile);
     if(encrypt_in_data.length == 0) {
-        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Unable to load encryption file %s", encryptionKeyFile);
         return EXIT_FAILURE;
     }
 
     sign_in_data = loadFile(signingKeyFile);
     if(sign_in_data.length == 0) {
-        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Unable to load signing file %s", signingKeyFile);
         return EXIT_FAILURE;
     }
@@ -674,16 +670,36 @@ int main(int argc, char **argv) {
     rv = decrypt(slotId, userpin, keyLabel, &encrypt_in_data, &encrypt_out_data);
     if (rv != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SECURITYPOLICY, "Decrypt failed for encryption key");
+        if (sign_out_data) {
+            if (sign_out_data->data)
+                UA_free(sign_out_data->data);
+            UA_free(sign_out_data);
+        }
+        if (encrypt_out_data) {
+            if (encrypt_out_data->data)
+                UA_free(encrypt_out_data->data);
+            UA_free(encrypt_out_data);
+        }
         return EXIT_FAILURE;
     }
     rv = decrypt(slotId, userpin, keyLabel, &sign_in_data, &sign_out_data);
     if (rv != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SECURITYPOLICY, "Decrypt failed for signing key");
+        if (sign_out_data) {
+            if (sign_out_data->data)
+                UA_free(sign_out_data->data);
+            UA_free(sign_out_data);
+        }
+        if (encrypt_out_data) {
+            if (encrypt_out_data->data)
+                UA_free(encrypt_out_data->data);
+            UA_free(encrypt_out_data);
+        }
         return EXIT_FAILURE;
     }
 
-    signingKey[UA_AES128CTR_SIGNING_KEY_LENGTH] = *(UA_Byte*)sign_out_data->data;
-    encryptingKey[UA_AES128CTR_KEY_LENGTH] = *(UA_Byte*)encrypt_out_data->data;
+    memcpy(signingKey, sign_out_data->data, UA_AES128CTR_SIGNING_KEY_LENGTH);
+    memcpy(encryptingKey, encrypt_out_data->data, UA_AES128CTR_KEY_LENGTH);
 
     UA_ByteString_clear(&encrypt_in_data);
     UA_ByteString_clear(&sign_in_data);

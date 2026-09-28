@@ -10,6 +10,7 @@
  * Copyright (c) 2022 Siemens AG (Author: Thomas Fischer)
  * Copyright (c) 2022 Fraunhofer IOSB (Author: Noel Graf)
  * Copyright (c) 2022 Linutronix GmbH (Author: Muddasir Shakil)
+ * Copyright 2025 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_PUBSUB_INTERNAL_H_
@@ -31,12 +32,6 @@
  * state changes and also the integration which is expected between the
  * components.
  *
- * We distinguish between `enabled` and `disabled` states. The disabled states
- * or `Disabled` and `Error`. The difference is that disabled states need to
- * manually enabled (via the _enable method call). The other states are either
- * Operational or return automatically to the Operational state once the
- * prerequisites are met.
- * 
  * +----------------+-------+--------------------+----------------+--------------------+----------------+----------------+
  * |**Component**   |       |**Disabled**        |**Paused**      |**Pre-Operational** |**Operational** |**Error**       |
  * +----------------+-------+--------------------+----------------+--------------------+----------------+----------------+
@@ -132,16 +127,6 @@ UA_PubSubState_isEnabled(UA_PubSubState state) {
 
 /* All PubSubComponents share the same header structure */
 
-typedef enum  {
-    UA_PUBSUBCOMPONENT_CONNECTION  = 0,
-    UA_PUBSUBCOMPONENT_WRITERGROUP  = 1,
-    UA_PUBSUBCOMPONENT_DATASETWRITER  = 2,
-    UA_PUBSUBCOMPONENT_READERGROUP  = 3,
-    UA_PUBSUBCOMPONENT_DATASETREADER  = 4,
-    UA_PUBSUBCOMPONENT_PUBLISHEDDATASET  = 5,
-    UA_PUBSUBCOMPONENT_SUBSCRIBEDDDATASET = 6,
-} UA_PubSubComponentType;
-
 typedef struct {
     UA_NodeId identifier;
     UA_PubSubComponentType componentType;
@@ -184,6 +169,9 @@ typedef struct UA_PublishedDataSet {
     UA_DataSetMetaDataType dataSetMetaData;
     UA_UInt16 fieldSize;
     UA_UInt16 promotedFieldsCount;
+
+    /* The counter is required because the PDS has not state.
+     * Check if it is actively used when changes are introduced. */
     UA_UInt16 configurationFreezeCounter;
 } UA_PublishedDataSet;
 
@@ -266,10 +254,6 @@ typedef struct UA_PubSubConnection {
     UA_DelayedCallback dc; /* For delayed freeing */
 } UA_PubSubConnection;
 
-UA_StatusCode
-UA_PubSubConnectionConfig_copy(const UA_PubSubConnectionConfig *src,
-                               UA_PubSubConnectionConfig *dst);
-
 UA_PubSubConnection *
 UA_PubSubConnection_find(UA_PubSubManager *psm, const UA_NodeId id);
 
@@ -278,27 +262,12 @@ UA_PubSubConnection_create(UA_PubSubManager *psm,
                            const UA_PubSubConnectionConfig *connectionConfig,
                            UA_NodeId *connectionIdentifier);
 
-void
-UA_PubSubConnectionConfig_clear(UA_PubSubConnectionConfig *connectionConfig);
-
-void
+UA_StatusCode
 UA_PubSubConnection_delete(UA_PubSubManager *psm, UA_PubSubConnection *c);
-
-/* Returns either the eventloop configured in the connection or, in its absence,
- * for the server */
-UA_EventLoop *
-UA_PubSubConnection_getEL(UA_PubSubManager *psm, UA_PubSubConnection *c);
 
 UA_StatusCode
 UA_PubSubConnection_setPubSubState(UA_PubSubManager *psm, UA_PubSubConnection *c,
                                    UA_PubSubState targetState);
-
-/* Also used by the ReaderGroup ... */
-UA_StatusCode
-UA_PubSubConnection_decodeNetworkMessage(UA_PubSubManager *psm,
-                                         UA_PubSubConnection *connection,
-                                         UA_ByteString buffer,
-                                         UA_NetworkMessage *nm);
 
 /**********************************************/
 /*              DataSetWriter                 */
@@ -324,6 +293,7 @@ typedef struct UA_DataSetWriter {
     UA_DataSetWriterSample *lastSamples;
 
     UA_UInt16 actualDataSetMessageSequenceCount;
+    UA_DateTime lastDataSetMessageTime;
     UA_Boolean configurationFrozen;
     UA_UInt64 pubSubStateTimerId;
 } UA_DataSetWriter;
@@ -341,12 +311,24 @@ UA_DataSetWriter_setPubSubState(UA_PubSubManager *psm, UA_DataSetWriter *dsw,
 
 UA_StatusCode
 UA_DataSetWriter_generateDataSetMessage(UA_PubSubManager *psm,
-                                        UA_DataSetMessage *dsm,
-                                        UA_DataSetWriter *dsw);
+                                        UA_DataSetWriter *dsw,
+                                        UA_DataSetMessage *dsm);
 
 UA_StatusCode
-UA_DataSetWriter_prepareDataSet(UA_PubSubManager *psm, UA_DataSetWriter *dsw,
-                                UA_DataSetMessage *dsm);
+UA_PubSubDataSetWriter_generateDeltaFrameMessage(UA_PubSubManager *psm,
+                                                 UA_DataSetMessage *dsm,
+                                                 UA_DataSetWriter *dsw);
+
+#ifdef UA_ENABLE_PUBSUB_SKS
+void
+updateSKSKeyStorage(void *application, void *context);
+
+UA_StatusCode
+UA_SecurityGroup_invalidateKeys(UA_PubSubManager *psm, UA_SecurityGroup *sg);
+
+UA_StatusCode
+UA_SecurityGroup_rotateKeys(UA_PubSubManager *psm, UA_SecurityGroup *sg);
+#endif
 
 UA_StatusCode
 UA_DataSetWriter_create(UA_PubSubManager *psm,
@@ -371,9 +353,7 @@ struct UA_WriterGroup {
     UA_UInt32 writersCount;
 
     UA_UInt64 publishCallbackId; /* registered if != 0 */
-    UA_NetworkMessageOffsetBuffer bufferedMessage;
     UA_UInt16 sequenceNumber; /* Increased after every sent message */
-    UA_Boolean configurationFrozen;
     UA_DateTime lastPublishTimeStamp;
 
     /* The ConnectionManager pointer is stored in the Connection. The channels
@@ -395,7 +375,7 @@ UA_WriterGroup_create(UA_PubSubManager *psm, const UA_NodeId connection,
                       const UA_WriterGroupConfig *writerGroupConfig,
                       UA_NodeId *writerGroupIdentifier);
 
-void
+UA_StatusCode
 UA_WriterGroup_remove(UA_PubSubManager *psm, UA_WriterGroup *wg);
 
 /* Exposed so we can change the publish interval without having to stop */
@@ -424,7 +404,8 @@ UA_WriterGroup_setPubSubState(UA_PubSubManager *psm, UA_WriterGroup *wg,
                               UA_PubSubState targetState);
 
 void
-UA_WriterGroup_publishCallback(UA_PubSubManager *psm, UA_WriterGroup *wg);
+UA_WriterGroup_publishCallback(void *application /* UA_PubSubManager */,
+                               void *context /* UA_WriterGroup */);
 
 /**********************************************/
 /*               DataSetField                 */
@@ -464,6 +445,21 @@ UA_PubSubDataSetField_sampleValue(UA_PubSubManager *psm,
 /*               DataSetReader                */
 /**********************************************/
 
+/* Retain the accepted counter and last receive time for one message stream.
+ * The entry owns its PublisherId; DataSet and NetworkMessage histories are
+ * separate. */
+typedef struct UA_ReaderSequence {
+    struct UA_ReaderSequence *next;
+    UA_PublisherId publisherId;
+    UA_Boolean publisherIdEnabled;
+    UA_Boolean writerGroupIdEnabled;
+    UA_UInt16 writerGroupId;
+    UA_UInt16 writerId;
+    UA_Boolean dataSet;
+    UA_UInt32 sequenceNumber;
+    UA_DateTime lastReceived;
+} UA_ReaderSequence;
+
 struct UA_DataSetReader {
     UA_PubSubComponentHead head;
     LIST_ENTRY(UA_DataSetReader) listEntry;
@@ -471,20 +467,41 @@ struct UA_DataSetReader {
     UA_DataSetReaderConfig config;
     UA_ReaderGroup *linkedReaderGroup;
 
-    UA_NetworkMessageOffsetBuffer bufferedMessage;
+    UA_ReaderSequence *sequences;
 
     /* MessageReceiveTimeout handling */
     UA_UInt64 msgRcvTimeoutTimerId;
+    UA_Boolean receivedKeyFrame;
+    UA_UInt32 deltaFrameCounter;
+
+    /* Per-target retained values for OverrideValueHandling::LastUsableValue. */
+    UA_DataValue *lastUsableValues;
+    size_t lastUsableValuesSize;
 };
 
 UA_DataSetReader *
 UA_DataSetReader_find(UA_PubSubManager *psm, const UA_NodeId id);
 
-/* Process Network Message using DataSetReader */
-void
+/* Check ordering and report whether messages are missing. A preliminary check
+ * refreshes receive time; update also commits the accepted counter. */
+UA_Boolean
+UA_DataSetReader_checkSequence(UA_PubSubManager *psm, UA_DataSetReader *reader,
+                               const UA_NetworkMessage *nm, UA_UInt16 writerId,
+                               UA_Boolean dataSet, UA_UInt32 number, UA_Byte bits,
+                               UA_Boolean update, UA_Boolean *gap);
+
+/* Validate a DataSetMessage and apply its fields to the targets. Return true
+ * when the message is accepted, even if an individual target rejects its
+ * write. */
+UA_Boolean
 UA_DataSetReader_process(UA_PubSubManager *psm,
                          UA_DataSetReader *dataSetReader,
                          UA_DataSetMessage *dataSetMsg);
+
+UA_StatusCode
+UA_DataSetReader_generateDataSetMessage(UA_Server *server,
+                                        UA_DataSetMessage *dsm,
+                                        UA_DataSetReader *dsr);
 
 UA_StatusCode
 UA_DataSetReader_checkIdentifier(UA_PubSubManager *psm, UA_DataSetReader *dsr,
@@ -496,37 +513,16 @@ UA_DataSetReader_create(UA_PubSubManager *psm, UA_NodeId readerGroupIdentifier,
                         UA_NodeId *readerIdentifier);
 
 UA_StatusCode
-UA_DataSetReader_prepareOffsetBuffer(Ctx *ctx, UA_DataSetReader *reader,
-                                     UA_ByteString *buf);
-
-void
-UA_DataSetReader_decodeAndProcessRT(UA_PubSubManager *psm, UA_DataSetReader *dsr,
-                                    UA_ByteString buf);
-
-UA_StatusCode
 UA_DataSetReader_remove(UA_PubSubManager *psm, UA_DataSetReader *dsr);
-
-/* Copy the configuration of Target Variables */
-UA_StatusCode UA_TargetVariables_copy(const UA_TargetVariables *src,
-                                      UA_TargetVariables *dst);
-
-/* Clear the Target Variables configuration */
-void UA_TargetVariables_clear(UA_TargetVariables *subscribedDataSetTarget);
-
-/* Copy the configuration of Field Target Variables */
-UA_StatusCode UA_FieldTargetVariable_copy(const UA_FieldTargetVariable *src,
-                                          UA_FieldTargetVariable *dst);
 
 UA_StatusCode
 DataSetReader_createTargetVariables(UA_PubSubManager *psm, UA_DataSetReader *dsr,
-                                    size_t targetVariablesSize,
-                                    const UA_FieldTargetVariable *targetVariables);
+                                    size_t targetsSize, const UA_FieldTargetDataType *targets);
 
 /* Returns an error reason if the target state is `Error` */
-void
+UA_StatusCode
 UA_DataSetReader_setPubSubState(UA_PubSubManager *psm, UA_DataSetReader *dsr,
-                                UA_PubSubState targetState,
-                                UA_StatusCode errorReason);
+                                UA_PubSubState targetState, UA_StatusCode errorReason);
 
 /**********************************************/
 /*                ReaderGroup                 */
@@ -541,7 +537,6 @@ struct UA_ReaderGroup {
     LIST_HEAD(, UA_DataSetReader) readers;
     UA_UInt32 readersCount;
 
-    UA_Boolean configurationFrozen;
     UA_Boolean hasReceived; /* Received a message since the last _connect */
 
     /* The ConnectionManager pointer is stored in the Connection. The channels 
@@ -564,7 +559,7 @@ UA_ReaderGroup_create(UA_PubSubManager *psm, UA_NodeId connectionId,
                       const UA_ReaderGroupConfig *rgc,
                       UA_NodeId *readerGroupId);
 
-void
+UA_StatusCode
 UA_ReaderGroup_remove(UA_PubSubManager *psm, UA_ReaderGroup *rg);
 
 UA_StatusCode
@@ -596,10 +591,6 @@ UA_ReaderGroup_setPubSubState(UA_PubSubManager *psm, UA_ReaderGroup *rg,
                               UA_PubSubState targetState);
 
 UA_Boolean
-UA_ReaderGroup_decodeAndProcessRT(UA_PubSubManager *psm, UA_ReaderGroup *rg,
-                                  UA_ByteString buf);
-
-UA_Boolean
 UA_ReaderGroup_process(UA_PubSubManager *psm, UA_ReaderGroup *rg,
                        UA_NetworkMessage *nm);
 
@@ -609,6 +600,20 @@ UA_StatusCode
 verifyAndDecryptNetworkMessage(const UA_Logger *logger, UA_ByteString buffer,
                                Ctx *ctx, UA_NetworkMessage *nm,
                                UA_ReaderGroup *rg);
+
+UA_StatusCode
+UA_ReaderGroup_decodeNetworkMessage(UA_PubSubManager *psm,
+                                    UA_ReaderGroup *rg,
+                                    UA_ByteString buffer,
+                                    UA_NetworkMessage *nm);
+
+#ifdef UA_ENABLE_JSON_ENCODING
+UA_StatusCode
+UA_ReaderGroup_decodeNetworkMessageJSON(UA_PubSubManager *psm,
+                                        UA_ReaderGroup *rg,
+                                        UA_ByteString buffer,
+                                        UA_NetworkMessage *nm);
+#endif
 
 #ifdef UA_ENABLE_PUBSUB_SKS
 
@@ -664,7 +669,7 @@ typedef struct UA_ReserveId {
 typedef ZIP_HEAD(UA_ReserveIdTree, UA_ReserveId) UA_ReserveIdTree;
 
 struct UA_PubSubManager {
-    UA_ServerComponent sc;
+    UA_Driver drv;
 
     UA_Logger *logging; /* shortcut to sc->server.logging */
 
@@ -683,6 +688,11 @@ struct UA_PubSubManager {
     size_t reserveIdsSize;
     UA_ReserveIdTree reserveIds;
 
+    /* During the initial activation of the PubSub subsystem (e.g. when loading a configuration file), special behaviour
+     * is required within the PubSub state machine transitions. This global flag can be set to indicate that the
+     * configuration phase is active, and it is evaluated during the state changes of the PubSub components. */
+    UA_Boolean pubSubInitialSetupMode;
+
 #ifdef UA_ENABLE_PUBSUB_SKS
     LIST_HEAD(, UA_PubSubKeyStorage) pubSubKeyList;
 
@@ -697,7 +707,7 @@ struct UA_PubSubManager {
 
 static UA_INLINE UA_PubSubManager *
 getPSM(UA_Server *server) {
-    return (UA_PubSubManager*)getServerComponentByName(server, UA_STRING("pubsub"));
+    return (UA_PubSubManager*)server->pubSubDriver;
 }
 
 UA_StatusCode
@@ -706,6 +716,15 @@ UA_PubSubManager_clear(UA_PubSubManager *psm);
 void
 UA_PubSubManager_setState(UA_PubSubManager *psm,
                           UA_LifecycleState state);
+
+UA_PubSubState
+UA_PubSubManager_getPubSubState(const UA_PubSubManager *psm);
+
+UA_StatusCode
+UA_PubSubComponent_setPubSubState(UA_PubSubManager *psm, void *component,
+                                  UA_PubSubComponentType componentType,
+                                  UA_PubSubState targetState,
+                                  UA_StatusCode errorReason);
 
 UA_StatusCode
 UA_PubSubManager_reserveIds(UA_PubSubManager *psm, UA_NodeId sessionId,
@@ -728,6 +747,10 @@ UA_PubSubManager_generateUniqueGuid(UA_PubSubManager *psm);
 UA_UInt32
 UA_PubSubConfigurationVersionTimeDifference(UA_DateTime now);
 
+UA_StatusCode
+UA_PubSubSecurityPolicy_validate(const UA_PubSubSecurityPolicy *policy,
+                                 UA_MessageSecurityMode securityMode);
+
 /************************************/
 /* Information Model Representation */
 /************************************/
@@ -736,6 +759,11 @@ UA_PubSubConfigurationVersionTimeDifference(UA_DateTime now);
 
 UA_StatusCode
 initPubSubNS0(UA_Server *server);
+
+#ifdef UA_ENABLE_PUBSUB_SKS
+UA_StatusCode
+initPubSubNS0_SKS(UA_Server *server);
+#endif
 
 UA_StatusCode
 addPubSubConnectionRepresentation(UA_Server *server, UA_PubSubConnection *connection);
@@ -761,6 +789,9 @@ addDataSetReaderRepresentation(UA_Server *server, UA_DataSetReader *dataSetReade
 UA_StatusCode
 connectDataSetReaderToDataSet(UA_Server *server, UA_NodeId dsrId, UA_NodeId sdsId);
 
+void
+disconnectDataSetReaderToDataSet(UA_Server *server, UA_NodeId dsrId);
+
 #ifdef UA_ENABLE_PUBSUB_SKS
 UA_StatusCode
 addSecurityGroupRepresentation(UA_Server *server, UA_SecurityGroup *securityGroup);
@@ -768,7 +799,38 @@ addSecurityGroupRepresentation(UA_Server *server, UA_SecurityGroup *securityGrou
 
 #endif /* UA_ENABLE_PUBSUB_INFORMATIONMODEL */
 
+/* Recursively check whether a data type contains String or ByteString
+ * members. Used to warn about RawData encoding where maxStringLength
+ * padding is not applied for strings inside structures. */
+static UA_INLINE UA_Boolean
+typeContainsString(const UA_DataType *type, size_t depth) {
+    if(!type || depth > 10)
+        return false;
+    if(type->typeKind == UA_DATATYPEKIND_STRING ||
+       type->typeKind == UA_DATATYPEKIND_BYTESTRING)
+        return true;
+    if(type->typeKind != UA_DATATYPEKIND_STRUCTURE &&
+       type->typeKind != UA_DATATYPEKIND_OPTSTRUCT &&
+       type->typeKind != UA_DATATYPEKIND_UNION)
+        return false;
+    if(type->pointerFree)
+        return false;
+    for(size_t i = 0; i < type->membersSize; i++) {
+        if(typeContainsString(type->members[i].memberType, depth + 1))
+            return true;
+    }
+    return false;
+}
+
 #endif /* UA_ENABLE_PUBSUB */
+
+/* Free a partially-constructed component without re-asking the lifecycle
+ * callback. Used by create() on abort paths; the existing remove/delete
+ * defers free via deleteFlag for components with EventLoop channels. */
+void
+UA_PubSubComponent_freeWithoutLifecycleCallback(UA_PubSubManager *psm,
+                                                void *component,
+                                                UA_PubSubComponentType type);
 
 _UA_END_DECLS
 

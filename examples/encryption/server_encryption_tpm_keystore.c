@@ -323,9 +323,9 @@ decrypt(unsigned long slotNum, unsigned char *pin, char *label,
     return rv;
 }
 
-UA_Boolean running = true;
+static volatile UA_Boolean running = true;
 static void stopHandler(int sig) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "received ctrl-c");
+    (void)sig;
     running = false;
 }
 
@@ -334,7 +334,7 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, stopHandler);
 
     if(argc < 6) {
-        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_FATAL(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Missing arguments. Arguments are "
                      "<server-certificate.der> <private-key.der> "
                      "<slotId> <userPin> <keyLable> "
@@ -393,7 +393,7 @@ int main(int argc, char* argv[]) {
     size_t issuerListSize = 0;
     UA_ByteString *issuerList = NULL;
 
-    /* Loading of a revocation list currently unsupported */
+    /* Revocation lists are supported, but not used for the example here */
     UA_ByteString *revocationList = NULL;
     size_t revocationListSize = 0;
 

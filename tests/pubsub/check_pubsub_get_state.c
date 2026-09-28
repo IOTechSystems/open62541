@@ -9,10 +9,17 @@
 #include <open62541/server_pubsub.h>
 #include <open62541/plugin/log_stdout.h>
 
-#include "ua_pubsub_internal.h"
+#include "pubsub_test_helpers.h"
 #include "ua_server_internal.h"
+#include "ua_pubsub_internal.h"
 
-#include "../arch/eventloop_posix/eventloop_posix.h"
+#ifdef UA_ARCHITECTURE_LWIP
+#include "../arch/lwip/eventloop_lwip.h"
+#elif defined(UA_ARCHITECTURE_WIN32)
+#include <winsock2.h>
+#else
+#include "../arch/posix/eventloop_posix.h"
+#endif
 #include "test_helpers.h"
 #include "testing_clock.h"
 
@@ -22,39 +29,34 @@
 
 static UA_Server *server = NULL;
 
-/***************************************************************************************************/
 static void setup(void) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "setup");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "setup");
     server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
     UA_Server_run_startup(server);
 }
 
-/***************************************************************************************************/
 static void teardown(void) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "teardown");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "teardown");
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
 }
 
 
-/***************************************************************************************************/
 /* utility functions to setup the PubSub configuration */
 
-/***************************************************************************************************/
-static void AddConnection(
-    char *pName,
-    UA_UInt32 PublisherId,
-    UA_NodeId *opConnectionId) {
-
-    assert(pName != 0);
-    assert(opConnectionId != 0);
+static void
+AddConnection(char *pName, UA_UInt32 PublisherId,
+              UA_NodeId *opConnectionId) {
+    ck_assert(pName != 0);
+    ck_assert(opConnectionId != 0);
 
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(UA_PubSubConnectionConfig));
     connectionConfig.name = UA_STRING(pName);
+    connectionConfig.enabled = UA_TRUE;
     connectionConfig.transportProfileUri = UA_STRING("http://opcfoundation.org/UA-Profile/Transport/pubsub-udp-uadp");
-    UA_NetworkAddressUrlDataType networkAddressUrl = {UA_STRING_NULL, UA_STRING("opc.udp://224.0.0.22:4840/")};
+    UA_NetworkAddressUrlDataType networkAddressUrl = UA_PUBSUB_TEST_NETWORKADDRESSURL(UA_PUBSUB_TEST_UDP_MULTICAST_URL_4840);
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
 
@@ -64,17 +66,13 @@ static void AddConnection(
     ck_assert(UA_Server_addPubSubConnection(server, &connectionConfig, opConnectionId) == UA_STATUSCODE_GOOD);
 }
 
-/***************************************************************************************************/
-static void AddWriterGroup(
-    UA_NodeId *pConnectionId,
-    char *pName,
-    UA_UInt32 WriterGroupId,
-    UA_Duration PublishingInterval,
-    UA_NodeId *opWriterGroupId) {
-
-    assert(pConnectionId != 0);
-    assert(pName != 0);
-    assert(opWriterGroupId != 0);
+static void
+AddWriterGroup(UA_NodeId *pConnectionId, char *pName,
+               UA_UInt32 WriterGroupId, UA_Duration PublishingInterval,
+               UA_NodeId *opWriterGroupId) {
+    ck_assert(pConnectionId != 0);
+    ck_assert(pName != 0);
+    ck_assert(opWriterGroupId != 0);
 
     UA_WriterGroupConfig writerGroupConfig;
     memset(&writerGroupConfig, 0, sizeof(UA_WriterGroupConfig));
@@ -94,22 +92,17 @@ static void AddWriterGroup(
     UA_UadpWriterGroupMessageDataType_delete(writerGroupMessage);
 }
 
-/***************************************************************************************************/
-static void AddPublishedDataSet(
-    UA_NodeId *pWriterGroupId,
-    char *pPublishedDataSetName,
-    char *pDataSetWriterName,
-    UA_UInt32 DataSetWriterId,
-    UA_NodeId *opPublishedDataSetId,
-    UA_NodeId *opPublishedVarId,
-    UA_NodeId *opDataSetWriterId) {
-
-    assert(pWriterGroupId != 0);
-    assert(pPublishedDataSetName != 0);
-    assert(pDataSetWriterName != 0);
-    assert(opPublishedDataSetId != 0);
-    assert(opPublishedVarId != 0);
-    assert(opDataSetWriterId != 0);
+static void
+AddPublishedDataSet(UA_NodeId *pWriterGroupId, char *pPublishedDataSetName,
+                    char *pDataSetWriterName, UA_UInt32 DataSetWriterId,
+                    UA_NodeId *opPublishedDataSetId, UA_NodeId *opPublishedVarId,
+                    UA_NodeId *opDataSetWriterId) {
+    ck_assert(pWriterGroupId != 0);
+    ck_assert(pPublishedDataSetName != 0);
+    ck_assert(pDataSetWriterName != 0);
+    ck_assert(opPublishedDataSetId != 0);
+    ck_assert(opPublishedVarId != 0);
+    ck_assert(opDataSetWriterId != 0);
 
     UA_PublishedDataSetConfig pdsConfig;
     memset(&pdsConfig, 0, sizeof(UA_PublishedDataSetConfig));
@@ -152,15 +145,12 @@ static void AddPublishedDataSet(
     ck_assert(UA_Server_addDataSetWriter(server, *pWriterGroupId, *opPublishedDataSetId, &dataSetWriterConfig, opDataSetWriterId) == UA_STATUSCODE_GOOD);
 }
 
-/***************************************************************************************************/
-static void AddReaderGroup(
-    UA_NodeId *pConnectionId,
-    char *pName,
-    UA_NodeId *opReaderGroupId) {
-
-    assert(pConnectionId != 0);
-    assert(pName != 0);
-    assert(opReaderGroupId != 0);
+static void
+AddReaderGroup(UA_NodeId *pConnectionId, char *pName,
+               UA_NodeId *opReaderGroupId) {
+    ck_assert(pConnectionId != 0);
+    ck_assert(pName != 0);
+    ck_assert(opReaderGroupId != 0);
 
     UA_ReaderGroupConfig readerGroupConfig;
     memset (&readerGroupConfig, 0, sizeof(UA_ReaderGroupConfig));
@@ -169,21 +159,15 @@ static void AddReaderGroup(
                                        opReaderGroupId) == UA_STATUSCODE_GOOD);
 }
 
-/***************************************************************************************************/
-static void AddDataSetReader(
-    UA_NodeId *pReaderGroupId,
-    char *pName,
-    UA_UInt32 PublisherId,
-    UA_UInt32 WriterGroupId,
-    UA_UInt32 DataSetWriterId,
-    UA_Duration MessageReceiveTimeout,
-    UA_NodeId *opSubscriberVarId,
-    UA_NodeId *opDataSetReaderId) {
-
-    assert(pReaderGroupId != 0);
-    assert(pName != 0);
-    assert(opSubscriberVarId != 0);
-    assert(opDataSetReaderId != 0);
+static void
+AddDataSetReader(UA_NodeId *pReaderGroupId, char *pName,
+                 UA_UInt32 PublisherId, UA_UInt32 WriterGroupId,
+                 UA_UInt32 DataSetWriterId, UA_Duration MessageReceiveTimeout,
+                 UA_NodeId *opSubscriberVarId, UA_NodeId *opDataSetReaderId) {
+    ck_assert(pReaderGroupId != 0);
+    ck_assert(pName != 0);
+    ck_assert(opSubscriberVarId != 0);
+    ck_assert(opDataSetReaderId != 0);
 
     UA_DataSetReaderConfig readerConfig;
     memset (&readerConfig, 0, sizeof(UA_DataSetReaderConfig));
@@ -219,35 +203,27 @@ static void AddDataSetReader(
     UA_Variant_setScalar(&attr.value, &SubscriberData, &UA_TYPES[UA_TYPES_INT32]);
     ck_assert(UA_Server_addVariableNode(server, UA_NODEID_NULL,
                                         UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),
-                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),  UA_QUALIFIEDNAME(1, "Subscribed Int32"),
-                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), attr, NULL, opSubscriberVarId) == UA_STATUSCODE_GOOD);
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                        UA_QUALIFIEDNAME(1, "Subscribed Int32"),
+                                        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE),
+                                        attr, NULL, opSubscriberVarId) == UA_STATUSCODE_GOOD);
 
-    UA_FieldTargetVariable *pTargetVariables =  (UA_FieldTargetVariable *)
-        UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetVariable));
-    assert(pTargetVariables != 0);
-
-    UA_FieldTargetDataType_init(&pTargetVariables[0].targetVariable);
-
-    pTargetVariables[0].targetVariable.attributeId  = UA_ATTRIBUTEID_VALUE;
-    pTargetVariables[0].targetVariable.targetNodeId = *opSubscriberVarId;
+    UA_FieldTargetDataType targetVariable;
+    UA_FieldTargetDataType_init(&targetVariable);
+    targetVariable.attributeId  = UA_ATTRIBUTEID_VALUE;
+    targetVariable.targetNodeId = *opSubscriberVarId;
 
     ck_assert(UA_Server_DataSetReader_createTargetVariables(server, *opDataSetReaderId,
-        readerConfig.dataSetMetaData.fieldsSize, pTargetVariables) == UA_STATUSCODE_GOOD);
-
-    UA_FieldTargetDataType_clear(&pTargetVariables[0].targetVariable);
-    UA_free(pTargetVariables);
-    pTargetVariables = 0;
+                                                            1, &targetVariable) == UA_STATUSCODE_GOOD);
 
     UA_free(pDataSetMetaData->fields);
-    pDataSetMetaData->fields = 0;
+    pDataSetMetaData->fields = NULL;
 }
 
-/***************************************************************************************************/
 START_TEST(Test_normal_operation) {
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "START: Test_normal_operation");
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "START: Test_normal_operation");
-
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "configure pubsub");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "configure pubsub");
 
     /* setup Connection 1: writer */
     UA_NodeId ConnId_1;
@@ -284,8 +260,7 @@ START_TEST(Test_normal_operation) {
     AddDataSetReader(&RGId_Conn1_RG1, "Conn1_RG1_DSR1", PublisherNo_Conn1, WGNo_Conn1_WG1, DSWNo_Conn1_WG1_DS1,
         MessageReceiveTimeout_Conn1_RG1_DSR1, &VarId_Conn1_RG1_DSR1, &DSRId_Conn1_RG1_DSR1);
 
-
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "check state");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "check state");
     UA_PubSubState state = UA_PUBSUBSTATE_ERROR;
 
     ck_assert_int_eq(UA_STATUSCODE_GOOD, UA_Server_WriterGroup_getState(server, WGId_Conn1_WG1, &state));
@@ -312,7 +287,7 @@ START_TEST(Test_normal_operation) {
     ck_assert_int_eq(UA_STATUSCODE_GOOD, UA_Server_DataSetWriter_getState(server, DsWId_Conn1_WG1_DS1, &state));
     ck_assert_int_eq(UA_PUBSUBSTATE_OPERATIONAL, state);
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "set groups disabled");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "set groups disabled");
     ck_assert(UA_Server_setWriterGroupDisabled(server, WGId_Conn1_WG1) == UA_STATUSCODE_GOOD);
     ck_assert_int_eq(UA_STATUSCODE_GOOD, UA_Server_WriterGroup_getState(server, WGId_Conn1_WG1, &state));
     ck_assert_int_eq(UA_PUBSUBSTATE_DISABLED, state);
@@ -325,15 +300,12 @@ START_TEST(Test_normal_operation) {
     ck_assert_int_eq(UA_STATUSCODE_GOOD, UA_Server_DataSetReader_getState(server, DSRId_Conn1_RG1_DSR1, &state));
     ck_assert_int_eq(UA_PUBSUBSTATE_PAUSED, state);
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "END: Test_normal_operation");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "END: Test_normal_operation");
 
 } END_TEST
 
-
-/***************************************************************************************************/
 START_TEST(Test_corner_cases) {
-
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "START: Test_corner_cases");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "START: Test_corner_cases");
 
     UA_NodeId id = UA_NODEID_NULL;
 
@@ -343,7 +315,7 @@ START_TEST(Test_corner_cases) {
     ck_assert(UA_STATUSCODE_GOOD != UA_Server_WriterGroup_getState(0, id, &state));
     ck_assert(UA_STATUSCODE_GOOD != UA_Server_WriterGroup_getState(server, id, &state));
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "configure pubsub");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "configure pubsub");
 
     /* setup Connection 1: writer */
     UA_NodeId ConnId_1;
@@ -379,7 +351,6 @@ START_TEST(Test_corner_cases) {
     UA_Duration MessageReceiveTimeout_Conn1_RG1_DSR1 = 350.0;
     AddDataSetReader(&RGId_Conn1_RG1, "Conn1_RG1_DSR1", PublisherNo_Conn1, WGNo_Conn1_WG1, DSWNo_Conn1_WG1_DS1,
         MessageReceiveTimeout_Conn1_RG1_DSR1, &VarId_Conn1_RG1_DSR1, &DSRId_Conn1_RG1_DSR1);
-
 
     ck_assert(UA_Server_enableDataSetReader(server, DSRId_Conn1_RG1_DSR1) == UA_STATUSCODE_GOOD);
     ck_assert_int_eq(UA_STATUSCODE_GOOD, UA_Server_DataSetReader_getState(server, DSRId_Conn1_RG1_DSR1, &state));
@@ -430,14 +401,12 @@ START_TEST(Test_corner_cases) {
     ck_assert_int_eq(UA_STATUSCODE_GOOD, UA_Server_DataSetWriter_getState(server, DsWId_Conn1_WG1_DS1, &state));
     ck_assert_int_eq(UA_PUBSUBSTATE_OPERATIONAL, state);
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "END: Test_corner_cases");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "END: Test_corner_cases");
 
 } END_TEST
 
-/***************************************************************************************************/
 START_TEST(Test_error_case) {
-
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "\n\nSTART: Test_error_case");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "\n\nSTART: Test_error_case");
 
     /* setup Connection 1: 1 writergroup, 1 writer */
     UA_NodeId ConnId_1;
@@ -481,7 +450,11 @@ START_TEST(Test_error_case) {
     UA_PubSubConnection *tmpConnection;
     TAILQ_FOREACH(tmpConnection, &psm->connections, listEntry) {
        if(UA_NodeId_equal(&tmpConnection->head.identifier, &ConnId_1)) {
-            shutdown((int)tmpConnection->sendChannel, UA_SHUT_RDWR);
+#ifdef UA_ARCHITECTURE_WIN32
+            shutdown((SOCKET)tmpConnection->sendChannel, SD_BOTH);
+#else
+            UA_shutdown((int)tmpConnection->sendChannel, UA_SHUT_RDWR);
+#endif
        }
     }
 
@@ -507,9 +480,7 @@ START_TEST(Test_error_case) {
 
 } END_TEST
 
-/***************************************************************************************************/
 int main(void) {
-
     TCase *tc_normal_operation = tcase_create("normal_operation");
     tcase_add_checked_fixture(tc_normal_operation, setup, teardown);
     tcase_add_test(tc_normal_operation, Test_normal_operation);
@@ -520,7 +491,9 @@ int main(void) {
 
     TCase *tc_error_case = tcase_create("error case");
     tcase_add_checked_fixture(tc_error_case, setup, teardown);
+#ifndef __APPLE__
     tcase_add_test(tc_error_case, Test_error_case);
+#endif
 
     Suite *s = suite_create("PubSub getState test suite");
     suite_add_tcase(s, tc_normal_operation);

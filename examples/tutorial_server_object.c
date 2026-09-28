@@ -159,7 +159,7 @@ manuallyDefinePump(UA_Server *server) {
  * to an object that representes the `mandatory` modelling rule. */
 
 /* predefined identifier for later use */
-UA_NodeId pumpTypeId = {1, UA_NODEIDTYPE_NUMERIC, {1001}};
+static UA_NodeId pumpTypeId = {1, UA_NODEIDTYPE_NUMERIC, {1001}};
 
 static void
 defineObjectTypes(UA_Server *server) {
@@ -252,7 +252,7 @@ pumpTypeConstructor(UA_Server *server,
                     const UA_NodeId *sessionId, void *sessionContext,
                     const UA_NodeId *typeId, void *typeContext,
                     const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "New pump created");
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "New pump created");
 
     /* Find the NodeId of the status child variable */
     UA_RelativePathElement rpe;
@@ -288,7 +288,7 @@ pumpTypeConstructor(UA_Server *server,
 
 static void
 addPumpTypeConstructor(UA_Server *server) {
-    UA_NodeTypeLifecycle lifecycle;
+    UA_NodeTypeLifecycle lifecycle = {0};
     lifecycle.constructor = pumpTypeConstructor;
     lifecycle.destructor = NULL;
     UA_Server_setNodeTypeLifecycle(server, pumpTypeId, lifecycle);

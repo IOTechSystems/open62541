@@ -58,7 +58,6 @@ START_TEST(parseGuid) {
     ck_assert_int_eq(guid.data4[6], 0xaf);
     ck_assert_int_eq(guid.data4[7], 0x63);
 
-#ifdef UA_ENABLE_PARSING
     /* Encoding decoding roundtrip */
     UA_String encoded = UA_STRING_NULL;
     UA_Guid_print(&guid, &encoded);
@@ -66,7 +65,6 @@ START_TEST(parseGuid) {
     UA_Guid_parse(&guid2, encoded);
     ck_assert(UA_Guid_equal(&guid, &guid2));
     UA_String_clear(&encoded);
-#endif
 } END_TEST
 
 START_TEST(parseNodeIdNumeric) {
@@ -157,7 +155,8 @@ START_TEST(parseRelativePath) {
     UA_String ex = UA_STRING("");
     UA_String exout = UA_STRING_NULL;
     UA_StatusCode res = UA_RelativePath_parse(&rp, ex);
-    res |= UA_RelativePath_print(&rp, &exout);
+    ck_assert_int_eq(res, UA_STATUSCODE_GOOD);
+    res = UA_RelativePath_print(&rp, &exout);
     ck_assert_int_eq(res, UA_STATUSCODE_GOOD);
     ck_assert_uint_eq(rp.elementsSize, 0);
     ck_assert(UA_String_equal(&ex, &exout));
@@ -266,6 +265,42 @@ START_TEST(parseRelativePath) {
     UA_String_clear(&ex9out);
 } END_TEST
 
+START_TEST(parseRelativePathMalformed) {
+    /* src/util/ua_types_lex.c:981-991 (UA_RelativePath_parse):
+     *   res = parse_relativepath(rp, &pos, end, NULL, UA_ESCAPING_AND, 0);
+     *   if(pos != end) res = UA_STATUSCODE_BADDECODINGERROR;
+     * The existing parseRelativePath test (line 153) covers only valid
+     * inputs. The pre-existing test reaches this code path via the
+     * empty-string case, but only the GOOD branch. The new test
+     * exercises the BADDECODINGERROR branch by feeding inputs that
+     * parse_relativepathElement silently stops on (the default branch
+     * at line 872 sets *done=true and returns GOOD with pos still
+     * pointing to the unconsumed prefix), so pos != end trips. */
+    UA_RelativePath rp;
+    UA_StatusCode res;
+
+    /* No leading '/' / '.' / '<' -> parse_relativepathElement
+     * immediately hits the default branch, done=true, pos=0 < end. */
+    UA_String bad1 = UA_STRING("Foo");
+    res = UA_RelativePath_parse(&rp, bad1);
+    ck_assert_int_eq(res, UA_STATUSCODE_BADDECODINGERROR);
+    UA_RelativePath_clear(&rp);
+
+    /* Same: starts with a digit that isn't '/' / '.' / '<'. */
+    UA_String bad2 = UA_STRING("1:Foo");
+    res = UA_RelativePath_parse(&rp, bad2);
+    ck_assert_int_eq(res, UA_STATUSCODE_BADDECODINGERROR);
+    UA_RelativePath_clear(&rp);
+
+    /* Lone '<' is consumed (parse_relativepathElement takes the '<'-
+     * branch and produces an empty target) but the suffix is left
+     * untouched, so pos != end trips. */
+    UA_String bad3 = UA_STRING("<HasChild");
+    res = UA_RelativePath_parse(&rp, bad3);
+    ck_assert_int_eq(res, UA_STATUSCODE_BADDECODINGERROR);
+    UA_RelativePath_clear(&rp);
+} END_TEST
+
 START_TEST(parseRelativePathWithServer) {
     UA_Server *server = UA_Server_newForUnitTest();
 
@@ -311,7 +346,7 @@ START_TEST(parseSimpleAttributeOperand) {
     ck_assert_int_eq(res, UA_STATUSCODE_GOOD);
     UA_SimpleAttributeOperand_clear(&sao3);
 
-    UA_String sao4_str = UA_STRING("ns=1;s=1&&23/1:& Boiler/Temperature#BrowseName[0:5]");
+    UA_String sao4_str = UA_STRING("ns=1;s=1%2623/1:%20Boiler/Temperature#BrowseName[0:5]");
     UA_SimpleAttributeOperand sao4;
     UA_String cmp1 = UA_STRING("1&23");
     UA_String cmp2 = UA_STRING(" Boiler");
@@ -355,6 +390,79 @@ START_TEST(printSimpleAttributeOperand) {
     UA_SimpleAttributeOperand_clear(&sao2);
 } END_TEST
 
+START_TEST(parseDateTime) {
+    UA_DateTime dt = UA_DATETIME("2025-05-22T16:33:44Z");
+    ck_assert_int_eq(dt, 133924052240000000);
+    dt = UA_DATETIME("2025-05-22T16:33:44+02:00");
+    ck_assert_int_eq(dt, 133923980240000000);
+    dt = UA_DATETIME("2025-05-22T16:33:44-02:00");
+    ck_assert_int_eq(dt, 133924124240000000);
+} END_TEST
+
+START_TEST(parseQualifiedNameWithSemicolon) {
+    UA_QualifiedName value;
+    UA_QualifiedName_init(&value);
+    value.name = UA_STRING_ALLOC("te;st");
+    value.namespaceIndex = 123;
+
+    UA_ByteString encoded;
+    UA_ByteString_init(&encoded);
+    const UA_StatusCode enc = UA_encodeJson(&value, &UA_TYPES[UA_TYPES_QUALIFIEDNAME], &encoded, NULL);
+    ck_assert_uint_eq(enc, UA_STATUSCODE_GOOD);
+    UA_String expected_enc = UA_STRING("\"123:te;st\"");
+    ck_assert(UA_String_equal(&encoded, &expected_enc));
+
+    UA_QualifiedName decoded;
+    UA_QualifiedName_init(&decoded);
+    const UA_StatusCode dec = UA_decodeJson(&encoded, &decoded, &UA_TYPES[UA_TYPES_QUALIFIEDNAME], NULL);
+    ck_assert_uint_eq(dec, UA_STATUSCODE_GOOD);
+    UA_String expected_dec = UA_STRING("te;st");
+    ck_assert(UA_String_equal(&decoded.name, &expected_dec));
+    ck_assert_uint_eq(decoded.namespaceIndex, 123);
+
+    UA_ByteString_clear(&encoded);
+    UA_QualifiedName_clear(&value);
+    UA_QualifiedName_clear(&decoded);
+} END_TEST
+
+START_TEST(parseQualifiedNameWithNamespaceUri) {
+    UA_NamespaceMapping nsMapping;
+    memset(&nsMapping, 0, sizeof(UA_NamespaceMapping));
+    UA_String uris[3];
+    uris[0] = UA_STRING("");
+    uris[1] = UA_STRING("http://opcfoundation.org/UA/");
+    uris[2] = UA_STRING("urn:test");
+    nsMapping.namespaceUris = uris;
+    nsMapping.namespaceUrisSize = 3;
+    UA_UInt16 remote2local[3] = {0, 2, 1};
+    nsMapping.remote2local = remote2local;
+    nsMapping.remote2localSize = 3;
+
+    UA_QualifiedName qn;
+    UA_StatusCode res = UA_QualifiedName_parseEx(&qn, UA_STRING("urn:test;MyName"), &nsMapping);
+    ck_assert_int_eq(res, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(qn.namespaceIndex, 2);
+    UA_String expected = UA_STRING("MyName");
+    ck_assert(UA_String_equal(&qn.name, &expected));
+    UA_QualifiedName_clear(&qn);
+} END_TEST
+
+START_TEST(parseQualifiedNameWithNamespaceIndexMapping) {
+    UA_NamespaceMapping nsMapping;
+    memset(&nsMapping, 0, sizeof(UA_NamespaceMapping));
+    UA_UInt16 remote2local[3] = {0, 2, 1};
+    nsMapping.remote2local = remote2local;
+    nsMapping.remote2localSize = 3;
+
+    UA_QualifiedName qn;
+    UA_StatusCode res = UA_QualifiedName_parseEx(&qn, UA_STRING("1:MyName"), &nsMapping);
+    ck_assert_int_eq(res, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(qn.namespaceIndex, 2);
+    UA_String expected = UA_STRING("MyName");
+    ck_assert(UA_String_equal(&qn.name, &expected));
+    UA_QualifiedName_clear(&qn);
+} END_TEST
+
 int main(void) {
     Suite *s  = suite_create("Test Builtin Type Parsing");
     TCase *tc = tcase_create("test cases");
@@ -372,9 +480,14 @@ int main(void) {
     tcase_add_test(tc, parseExpandedNodeIdIntegerFailNSU);
     tcase_add_test(tc, parseExpandedNodeIdIntegerFailNSU2);
     tcase_add_test(tc, parseRelativePath);
+    tcase_add_test(tc, parseRelativePathMalformed);
     tcase_add_test(tc, parseRelativePathWithServer);
     tcase_add_test(tc, parseSimpleAttributeOperand);
     tcase_add_test(tc, printSimpleAttributeOperand);
+    tcase_add_test(tc, parseDateTime);
+    tcase_add_test(tc, parseQualifiedNameWithSemicolon);
+    tcase_add_test(tc, parseQualifiedNameWithNamespaceUri);
+    tcase_add_test(tc, parseQualifiedNameWithNamespaceIndexMapping);
     suite_add_tcase(s, tc);
 
     SRunner *sr = srunner_create(s);

@@ -10,6 +10,7 @@
 #include <open62541/client_config_default.h>
 #include <open62541/client_highlevel.h>
 #include <open62541/plugin/securitypolicy.h>
+#include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/server.h>
 #include <open62541/server_config_default.h>
@@ -28,17 +29,17 @@
 #include "thread_wrapper.h"
 
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
         UA_Server_run_iterate(server, true);
     return 0;
 }
 
 static void setup(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load certificate and private key */
     UA_ByteString certificate;
@@ -65,7 +66,7 @@ static void setup(void) {
         trustList[i] = loadFile(argv[i+3]);
     */
 
-    /* Loading of a revocation list currently unsupported */
+    /* Revocation lists are supported, but not used here */
     UA_ByteString *revocationList = NULL;
     size_t revocationListSize = 0;
 
@@ -82,7 +83,7 @@ static void setup(void) {
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
-        UA_STRING_ALLOC("urn:unconfigured:application");
+        UA_STRING_ALLOC("urn:open62541.unconfigured.application");
 
     for(size_t i = 0; i < trustListSize; i++)
         UA_ByteString_clear(&trustList[i]);
@@ -91,9 +92,9 @@ static void setup(void) {
     THREAD_CREATE(server_thread, serverloop);
 }
 
-#ifdef __linux__ /* Linux only so far */
+#if defined(__linux__) || defined(UA_ARCHITECTURE_WIN32)
 static void setup2(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load certificate and private key */
     UA_ByteString certificate;
@@ -120,15 +121,15 @@ static void setup2(void) {
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
-        UA_STRING_ALLOC("urn:unconfigured:application");
+        UA_STRING_ALLOC("urn:open62541.unconfigured.application");
 
     UA_Server_run_startup(server);
     THREAD_CREATE(server_thread, serverloop);
 }
-#endif
+#endif /* defined(__linux__) || defined(UA_ARCHITECTURE_WIN32) */
 
 static void teardown(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
@@ -167,7 +168,7 @@ START_TEST(encryption_connect) {
     UA_Array_delete(endpointArray, endpointArraySize,
                     &UA_TYPES[UA_TYPES_ENDPOINTDESCRIPTION]);
 
-    /* TODO test trustList Load revocationList is not supported now
+    /* Revocation lists are supported, but not used here
     if(argc > MIN_ARGS) {
         trustListSize = (size_t)argc-MIN_ARGS;
         retval = UA_ByteString_allocBuffer(trustList, trustListSize);
@@ -190,7 +191,6 @@ START_TEST(encryption_connect) {
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
                                          revocationList, revocationListSize);
-    cc->certificateVerification.clear(&cc->certificateVerification);
     UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
@@ -249,7 +249,7 @@ START_TEST(encryption_connect_pem) {
     UA_Array_delete(endpointArray, endpointArraySize,
                     &UA_TYPES[UA_TYPES_ENDPOINTDESCRIPTION]);
 
-    /* TODO test trustList Load revocationList is not supported now
+    /* Revocation lists are supported, but not used here
     if(argc > MIN_ARGS) {
         trustListSize = (size_t)argc-MIN_ARGS;
         retval = UA_ByteString_allocBuffer(trustList, trustListSize);
@@ -272,11 +272,15 @@ START_TEST(encryption_connect_pem) {
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
                                          revocationList, revocationListSize);
-    cc->certificateVerification.clear(&cc->certificateVerification);
     UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
     ck_assert(client != NULL);
+
+    /* Set the ApplicationUri used in the certificate */
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
 
     for(size_t deleteCount = 0; deleteCount < trustListSize; deleteCount++) {
         UA_ByteString_clear(&trustList[deleteCount]);
@@ -298,6 +302,35 @@ START_TEST(encryption_connect_pem) {
 }
 END_TEST
 
+#if defined(UA_ENABLE_ENCRYPTION_OPENSSL) || defined(UA_ENABLE_ENCRYPTION_LIBRESSL)
+START_TEST(securitypolicy_aes128sha256rsaoaep_null_cert_no_underflow) {
+    UA_ByteString certificate = {CERT_DER_LENGTH, CERT_DER_DATA};
+    UA_ByteString privateKey  = {KEY_DER_LENGTH,  KEY_DER_DATA};
+
+    UA_Client *client = UA_Client_newForUnitTest();
+    ck_assert(client != NULL);
+    UA_ClientConfig *cc = UA_Client_getConfig(client);
+
+    UA_SecurityPolicy policy;
+    memset(&policy, 0, sizeof(policy));
+    UA_StatusCode retval = UA_SecurityPolicy_Aes128Sha256RsaOaep(&policy, certificate,
+                                                                  privateKey, cc->logging);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    unsigned char fakeCtx[256];
+    memset(fakeCtx, 0, sizeof(fakeCtx));
+
+    size_t result = policy.asymEncryptionAlgorithm
+                        .getRemotePlainTextBlockSize(&policy, fakeCtx);
+
+    ck_assert_uint_eq(result, 0);
+
+    policy.clear(&policy);
+    UA_Client_delete(client);
+}
+END_TEST
+#endif /* defined(UA_ENABLE_ENCRYPTION_OPENSSL) || defined(UA_ENABLE_ENCRYPTION_LIBRESSL) */
+
 static Suite* testSuite_encryption(void) {
     Suite *s = suite_create("Encryption");
     TCase *tc_encryption = tcase_create("Encryption Aes128Sha256RsaOaep security policy");
@@ -308,7 +341,13 @@ static Suite* testSuite_encryption(void) {
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_encryption);
 
-#ifdef __linux__ /* Linux only so far */
+#if defined(UA_ENABLE_ENCRYPTION_OPENSSL) || defined(UA_ENABLE_ENCRYPTION_LIBRESSL)
+    TCase *tc_unit = tcase_create("Security policy unit tests (OpenSSL/LibreSSL)");
+    tcase_add_test(tc_unit, securitypolicy_aes128sha256rsaoaep_null_cert_no_underflow);
+    suite_add_tcase(s, tc_unit);
+#endif /* defined(UA_ENABLE_ENCRYPTION_OPENSSL) || defined(UA_ENABLE_ENCRYPTION_LIBRESSL) */
+
+#if defined(__linux__) || defined(UA_ARCHITECTURE_WIN32)
     TCase *tc_encryption_filestore = tcase_create("Encryption Aes128Sha256RsaOaep security policy filestore");
     tcase_add_checked_fixture(tc_encryption_filestore, setup2, teardown);
 #ifdef UA_ENABLE_ENCRYPTION
@@ -316,7 +355,7 @@ static Suite* testSuite_encryption(void) {
     tcase_add_test(tc_encryption_filestore, encryption_connect_pem);
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_encryption_filestore);
-#endif
+#endif /* defined(__linux__) || defined(UA_ARCHITECTURE_WIN32) */
 
     return s;
 }

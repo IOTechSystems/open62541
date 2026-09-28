@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
  * Copyright (c) 2022 Linutronix GmbH (Author: Muddasir Shakil)
+ * Copyright 2025 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include <open62541/client.h>
@@ -14,6 +15,7 @@
 #include <open62541/plugin/certificategroup_default.h>
 
 #include "test_helpers.h"
+#include "pubsub_test_helpers.h"
 #include "ua_pubsub_keystorage.h"
 #include "ua_pubsub_internal.h"
 #include "ua_server_internal.h"
@@ -38,12 +40,12 @@ UA_String securityGroupId;
 UA_NodeId sgNodeId;
 UA_UInt32 maxKeyCount;
 UA_NodeId connection;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 UA_ByteString allowedUsername;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
         UA_Server_run_iterate(sksServer, true);
     return 0;
 }
@@ -104,7 +106,7 @@ getUserExecutableOnObject_sks(UA_Server *server, UA_AccessControl *ac,
 
 static void
 setup(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* Load certificate and private key */
     UA_ByteString certificate;
@@ -147,7 +149,7 @@ setup(void) {
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
-        UA_STRING_ALLOC("urn:unconfigured:application");
+        UA_STRING_ALLOC("urn:open62541.unconfigured.application");
 
     UA_String basic256sha256 = UA_STRING("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256");
     UA_AccessControl_default(config, true, &basic256sha256, 2, userNamePW);
@@ -161,8 +163,7 @@ setup(void) {
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(UA_PubSubConnectionConfig));
     connectionConfig.name = UA_STRING("UADP Connection");
-    UA_NetworkAddressUrlDataType networkAddressUrl = {
-        UA_STRING_NULL, UA_STRING("opc.udp://224.0.0.22:4840/")};
+    UA_NetworkAddressUrlDataType networkAddressUrl = UA_PUBSUB_TEST_NETWORKADDRESSURL(UA_PUBSUB_TEST_UDP_MULTICAST_URL_4840);
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri =
@@ -182,7 +183,7 @@ setup(void) {
 static void
 teardown(void) {
     UA_String_clear(&securityGroupId);
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_Server_run_shutdown(sksServer);
     UA_Server_delete(sksServer);
@@ -231,6 +232,11 @@ encyrptedclientconnect(UA_Client *client) {
 
     UA_CertificateGroup_AcceptAll(&cc->certificateVerification);
 
+    /* Set the ApplicationUri used in the certificate */
+    UA_String_clear(&cc->clientDescription.applicationUri);
+    cc->clientDescription.applicationUri =
+        UA_STRING_ALLOC("urn:unconfigured:application");
+
     return UA_STATUSCODE_GOOD;
 }
 
@@ -270,9 +276,7 @@ START_TEST(getSecuritykeysBadSecurityModeInsufficient) {
     cc->securityMode = UA_MESSAGESECURITYMODE_SIGN;
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(client, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(client);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_BADSECURITYMODEINSUFFICIENT;
     UA_CallResponse response = callGetSecurityKeys(client, securityGroupId, 1, 1);
     ck_assert(response.results != NULL);
@@ -290,9 +294,7 @@ START_TEST(getSecuritykeysBadNotFound) {
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_String badSecurityGroupId = UA_STRING("BadSecurityGroupId");
     UA_StatusCode expectedCode = UA_STATUSCODE_BADNOTFOUND;
     UA_CallResponse response = callGetSecurityKeys(sksClient, badSecurityGroupId, 1, 1);
@@ -311,9 +313,7 @@ START_TEST(getSecuritykeysBadUserAccessDenied) {
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user2", "password2");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_BADUSERACCESSDENIED;
     UA_UInt32 reqkeyCount = 1;
     UA_CallResponse response =
@@ -337,9 +337,7 @@ START_TEST(getSecuritykeysGoodAndValidOutput) {
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_GOOD;
     UA_UInt32 reqkeyCount = 1;
     UA_CallResponse response = callGetSecurityKeys(sksClient, securityGroupId, 1, reqkeyCount);
@@ -388,9 +386,7 @@ START_TEST(requestCurrentKeyWithFutureKeys) {
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_GOOD;
     UA_UInt32 reqkeyCount = 1;
     UA_UInt32 reqStartingTokenId = 0;
@@ -430,9 +426,7 @@ START_TEST(requestCurrentKeyOnly) {
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_GOOD;
     UA_UInt32 reqkeyCount = 0;
     UA_UInt32 reqStartingTokenId = 0;
@@ -473,9 +467,7 @@ START_TEST(requestPastKey) {
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_GOOD;
     UA_UInt32 reqkeyCount = 0;
     UA_UInt32 reqStartingTokenId = 1;
@@ -508,15 +500,11 @@ START_TEST(requestPastKey) {
 END_TEST
 
 START_TEST(requestUnknownStartingTokenId){
-    UA_fakeSleep(1000);
-    UA_realSleep(4000);
     UA_Client *sksClient = UA_Client_newForUnitTest();
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_GOOD;
     UA_UInt32 reqkeyCount = UA_UINT32_MAX;
     UA_UInt32 reqStartingTokenId = UA_UINT32_MAX;
@@ -555,9 +543,7 @@ START_TEST(requestMaxFutureKeys) {
     encyrptedclientconnect(sksClient);
     /* Secure client connect */
     UA_StatusCode retval = UA_Client_connectUsername(sksClient, "opc.tcp://localhost:4840", "user1", "password");
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_Client_delete(sksClient);
-    }
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     UA_StatusCode expectedCode = UA_STATUSCODE_GOOD;
     UA_UInt32 reqkeyCount = UA_UINT32_MAX;
     UA_UInt32 reqStartingTokenId = 0;
@@ -576,6 +562,9 @@ START_TEST(requestMaxFutureKeys) {
     UA_UInt32 firstTokenId = *(UA_UInt32 *)output[1].data;
     size_t retKeyCount = output[2].arrayLength;
     ck_assert(retKeyCount == sg->keyStorage->maxFutureKeyCount + 1 );
+    UA_Duration timeToNextKey = *(UA_Duration*)output[3].data;
+    ck_assert(timeToNextKey >= 0.0);
+    ck_assert(timeToNextKey <= sg->config.keyLifeTime);
 
     UA_ByteString *retKeys = (UA_ByteString *)output[2].data;
     UA_PubSubKeyListItem *iterator = sg->keyStorage->currentItem;
@@ -591,6 +580,28 @@ START_TEST(requestMaxFutureKeys) {
 }
 END_TEST
 
+START_TEST(SecurityGroupKeyMethodsUseSignedChannel) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    encyrptedclientconnect(client);
+    UA_Client_getConfig(client)->securityMode = UA_MESSAGESECURITYMODE_SIGN;
+    ck_assert_uint_eq(UA_Client_connectUsername(
+        client, "opc.tcp://localhost:4840", "user1", "password"), UA_STATUSCODE_GOOD);
+
+    UA_UInt32 methods[] = {UA_NS0ID_SECURITYGROUPTYPE_FORCEKEYROTATION,
+                           UA_NS0ID_SECURITYGROUPTYPE_INVALIDATEKEYS};
+    for(size_t i = 0; i < 2; i++) {
+        size_t outputSize = 0;
+        UA_Variant *output = NULL;
+        UA_StatusCode res = UA_Client_call(client, sgNodeId,
+            UA_NODEID_NUMERIC(0, methods[i]), 0, NULL, &outputSize, &output);
+        ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+        ck_assert_uint_eq(outputSize, 0);
+        UA_Array_delete(output, outputSize, &UA_TYPES[UA_TYPES_VARIANT]);
+    }
+    cleanupSessionContext();
+    UA_Client_delete(client);
+} END_TEST
+
 int
 main(void) {
     int number_failed = 0;
@@ -605,6 +616,7 @@ main(void) {
     tcase_add_test(tc_pubsub_sks_pull, requestPastKey);
     tcase_add_test(tc_pubsub_sks_pull, requestUnknownStartingTokenId);
     tcase_add_test(tc_pubsub_sks_pull, requestMaxFutureKeys);
+    tcase_add_test(tc_pubsub_sks_pull, SecurityGroupKeyMethodsUseSignedChannel);
     Suite *s = suite_create("PubSub SKS Pull");
     suite_add_tcase(s, tc_pubsub_sks_pull);
 

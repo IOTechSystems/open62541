@@ -2,12 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
- * Copyright (c) 2017-2022 Fraunhofer IOSB (Author: Andreas Ebner)
+ * Copyright (c) 2017-2025 Fraunhofer IOSB (Author: Andreas Ebner)
  * Copyright (c) 2019 Fraunhofer IOSB (Author: Julius Pfrommer)
  * Copyright (c) 2019 Kalycito Infotech Private Limited
  * Copyright (c) 2021 Fraunhofer IOSB (Author: Jan Hermes)
  * Copyright (c) 2022 Siemens AG (Author: Thomas Fischer)
  * Copyright (c) 2022 Fraunhofer IOSB (Author: Noel Graf)
+ * Copyright 2025 (c) o6 Automation GmbH (Author: Andreas Ebner)
+ * Copyright 2025 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include "ua_pubsub_internal.h"
@@ -16,22 +18,65 @@
 
 #include "ua_pubsub_networkmessage.h"
 
+/* Forward declaration — used in setPubSubState to start the timeout timer on
+ * Operational transition, before the function is defined below. */
+static void
+UA_DataSetReader_handleMessageReceiveTimeout(void *application, void *context);
+
 static UA_Boolean
-publisherIdIsMatching(UA_NetworkMessage *msg, UA_PublisherId *idB) {
+publisherIdIsMatching(UA_NetworkMessage *msg, UA_PublisherId *idB,
+                      UA_Boolean filterEnabled,
+                      UA_Boolean allowNumericWidthMismatch) {
     if(!msg->publisherIdEnabled)
         return true;
+    /* Spec 6.2.9.1: "If the value is null, the parameter shall be ignored and
+     * all received NetworkMessages pass the PublisherId filter." A reader
+     * with a null (zero-initialized) PublisherId matches any message. */
+    if(!filterEnabled &&
+       idB->idType == UA_PUBLISHERIDTYPE_BYTE && idB->id.byte == 0)
+        return true;
     UA_PublisherId *idA = &msg->publisherId;
+
+    /* JSON represents every numeric PublisherId as a string and therefore
+     * cannot retain its original integer width. Compare numeric ids by value,
+     * while keeping the string and numeric domains distinct. */
+    if(allowNumericWidthMismatch &&
+       idA->idType != UA_PUBLISHERIDTYPE_STRING &&
+       idB->idType != UA_PUBLISHERIDTYPE_STRING) {
+        UA_UInt64 a = 0;
+        UA_UInt64 b = 0;
+        switch(idA->idType) {
+        case UA_PUBLISHERIDTYPE_BYTE: a = idA->id.byte; break;
+        case UA_PUBLISHERIDTYPE_UINT16: a = idA->id.uint16; break;
+        case UA_PUBLISHERIDTYPE_UINT32: a = idA->id.uint32; break;
+        case UA_PUBLISHERIDTYPE_UINT64: a = idA->id.uint64; break;
+        default: return false;
+        }
+        switch(idB->idType) {
+        case UA_PUBLISHERIDTYPE_BYTE: b = idB->id.byte; break;
+        case UA_PUBLISHERIDTYPE_UINT16: b = idB->id.uint16; break;
+        case UA_PUBLISHERIDTYPE_UINT32: b = idB->id.uint32; break;
+        case UA_PUBLISHERIDTYPE_UINT64: b = idB->id.uint64; break;
+        default: return false;
+        }
+        return a == b;
+    }
     if(idA->idType != idB->idType)
         return false;
     switch(idA->idType) {
-        case UA_PUBLISHERIDTYPE_BYTE:   return idA->id.byte == idB->id.byte;
-        case UA_PUBLISHERIDTYPE_UINT16: return idA->id.uint16 == idB->id.uint16;
-        case UA_PUBLISHERIDTYPE_UINT32: return idA->id.uint32 == idB->id.uint32;
-        case UA_PUBLISHERIDTYPE_UINT64: return idA->id.uint64 == idB->id.uint64;
-        case UA_PUBLISHERIDTYPE_STRING: return UA_String_equal(&idA->id.string, &idB->id.string);
-        default: break;
+    case UA_PUBLISHERIDTYPE_BYTE:
+        return idA->id.byte == idB->id.byte;
+    case UA_PUBLISHERIDTYPE_UINT16:
+        return idA->id.uint16 == idB->id.uint16;
+    case UA_PUBLISHERIDTYPE_UINT32:
+        return idA->id.uint32 == idB->id.uint32;
+    case UA_PUBLISHERIDTYPE_UINT64:
+        return idA->id.uint64 == idB->id.uint64;
+    case UA_PUBLISHERIDTYPE_STRING:
+        return UA_String_equal(&idA->id.string, &idB->id.string);
+    default:
+        return false;
     }
-    return false;
 }
 
 #if UA_LOGLEVEL <= 200
@@ -51,7 +96,11 @@ printPublisherId(char *out, size_t size, UA_PublisherId *id) {
 UA_StatusCode
 UA_DataSetReader_checkIdentifier(UA_PubSubManager *psm, UA_DataSetReader *dsr,
                                  UA_NetworkMessage *msg) {
-    if(!publisherIdIsMatching(msg, &dsr->config.publisherId)) {
+    UA_ReaderGroup *rg = dsr->linkedReaderGroup;
+    UA_Boolean json =
+        (rg->config.encodingMimeType == UA_PUBSUB_ENCODING_JSON);
+    if(!publisherIdIsMatching(msg, &dsr->config.publisherId,
+                              dsr->config.publisherIdFilterEnabled, json)) {
 #if UA_LOGLEVEL <= 200
         char idAStr[512];
         char idBStr[512];
@@ -63,17 +112,40 @@ UA_DataSetReader_checkIdentifier(UA_PubSubManager *psm, UA_DataSetReader *dsr,
         return UA_STATUSCODE_BADNOTFOUND;
     }
 
-    UA_ReaderGroup *rg = dsr->linkedReaderGroup;
-    if(rg->config.encodingMimeType == UA_PUBSUB_ENCODING_JSON) {
-        if(dsr->config.dataSetWriterId ==
-           *msg->payloadHeader.dataSetPayloadHeader.dataSetWriterIds) {
+    if(json) {
+        /* Match the writer ids decoded from the JSON DataSetMessage headers.
+         * A zero reader id accepts messages from any writer. */
+        if(dsr->config.dataSetWriterId == 0)
             return UA_STATUSCODE_GOOD;
+        for(size_t i = 0; i < msg->messageCount; i++) {
+            if(dsr->config.dataSetWriterId == msg->dataSetWriterIds[i])
+                return UA_STATUSCODE_GOOD;
         }
-
         UA_LOG_DEBUG_PUBSUB(psm->logging, dsr, "DataSetWriterId does not match. "
-                            "Expected %u, received %u", dsr->config.dataSetWriterId,
-                            *msg->payloadHeader.dataSetPayloadHeader.dataSetWriterIds);
+                            "Expected %u", dsr->config.dataSetWriterId);
         return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    /* Apply the optional UADP header filters. Nonzero settings require the
+     * corresponding header field to be present and equal to the configured
+     * value. */
+    const UA_ExtensionObject *settings = &dsr->config.messageSettings;
+    if(UA_ExtensionObject_hasDecodedType(settings,
+           &UA_TYPES[UA_TYPES_UADPDATASETREADERMESSAGEDATATYPE])) {
+        const UA_UadpDataSetReaderMessageDataType *uadp =
+            (const UA_UadpDataSetReaderMessageDataType*)settings->content.decoded.data;
+        if(uadp->groupVersion != 0 &&
+           (!msg->groupHeaderEnabled || !msg->groupHeader.groupVersionEnabled ||
+            msg->groupHeader.groupVersion != uadp->groupVersion))
+            return UA_STATUSCODE_BADNOTFOUND;
+        if(uadp->networkMessageNumber != 0 &&
+           (!msg->groupHeaderEnabled || !msg->groupHeader.networkMessageNumberEnabled ||
+            msg->groupHeader.networkMessageNumber != uadp->networkMessageNumber))
+            return UA_STATUSCODE_BADNOTFOUND;
+        if(!UA_Guid_equal(&uadp->dataSetClassId, &UA_GUID_NULL) &&
+           (!msg->dataSetClassIdEnabled ||
+            !UA_Guid_equal(&uadp->dataSetClassId, &msg->dataSetClassId)))
+            return UA_STATUSCODE_BADNOTFOUND;
     }
 
     if(msg->groupHeaderEnabled && msg->groupHeader.writerGroupIdEnabled) {
@@ -86,10 +158,13 @@ UA_DataSetReader_checkIdentifier(UA_PubSubManager *psm, UA_DataSetReader *dsr,
     }
 
     if(msg->payloadHeaderEnabled) {
-        UA_Byte totalDataSets = msg->payloadHeader.dataSetPayloadHeader.count;
-        for(size_t i = 0; i < totalDataSets; i++) {
-            UA_UInt32 dswId = msg->payloadHeader.dataSetPayloadHeader.dataSetWriterIds[i];
-            if(dsr->config.dataSetWriterId == dswId)
+        /* Spec 6.2.9.3: "If the value is 0 (null), the parameter shall be
+         * ignored and all received DataSetMessages pass the DataSetWriterId
+         * filter." A reader with dataSetWriterId == 0 matches any message. */
+        if(dsr->config.dataSetWriterId == 0)
+            return UA_STATUSCODE_GOOD;
+        for(size_t i = 0; i < msg->messageCount; i++) {
+            if(dsr->config.dataSetWriterId == msg->dataSetWriterIds[i])
                 return UA_STATUSCODE_GOOD;
         }
         UA_LOG_DEBUG_PUBSUB(psm->logging, dsr,
@@ -118,6 +193,238 @@ UA_DataSetReader_find(UA_PubSubManager *psm, const UA_NodeId id) {
     return NULL;
 }
 
+static UA_StatusCode
+validateDSRConfig(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
+    /* Reject fixed byte offsets: the default reader locates DataSetMessages
+     * through the decoded payload rather than configured positions. */
+    if(UA_ExtensionObject_hasDecodedType(&dsr->config.messageSettings,
+           &UA_TYPES[UA_TYPES_UADPDATASETREADERMESSAGEDATATYPE])) {
+        const UA_UadpDataSetReaderMessageDataType *settings =
+            (const UA_UadpDataSetReaderMessageDataType*)dsr->config.messageSettings.content.decoded.data;
+        if(settings->dataSetOffset != 0)
+            return UA_STATUSCODE_BADNOTSUPPORTED;
+    }
+
+    /* Check if used dataSet metaData is valid in context of the rest of the config */
+    if(dsr->config.dataSetFieldContentMask & UA_DATASETFIELDCONTENTMASK_RAWDATA) {
+        for(size_t i = 0; i < dsr->config.dataSetMetaData.fieldsSize; i++) {
+            const UA_FieldMetaData *field = &dsr->config.dataSetMetaData.fields[i];
+            if((field->builtInType == UA_NS0ID_STRING || field->builtInType == UA_NS0ID_BYTESTRING) &&
+               field->maxStringLength == 0) {
+                /* Fields of type String or ByteString need to have defined
+                 * MaxStringLength*/
+                UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
+                                    "Add DataSetReader failed. MaxStringLength must be "
+                                    "set in MetaData when using RawData field encoding.");
+                return UA_STATUSCODE_BADCONFIGURATIONERROR;
+            }
+
+            /* Warn if the field is a structure type that contains
+             * String/ByteString members. MaxStringLength padding is not
+             * yet applied for strings nested inside structures. */
+            const UA_DataType *type =
+                UA_findDataTypeWithCustom(&field->dataType,
+                                          psm->drv.server->config.customDataTypes);
+            if(type &&
+               (type->typeKind == UA_DATATYPEKIND_STRUCTURE ||
+                type->typeKind == UA_DATATYPEKIND_UNION ||
+                type->typeKind == UA_DATATYPEKIND_OPTSTRUCT) &&
+               typeContainsString(type, 0)) {
+                UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
+                                      "Field %.*s uses a structure type that "
+                                      "contains String/ByteString members. "
+                                      "MaxStringLength padding is not applied for "
+                                      "strings inside structures with RawData encoding.",
+                                      (int)field->name.length, field->name.data);
+            }
+        }
+    }
+    return UA_STATUSCODE_GOOD;
+}
+
+static void
+disconnectDSR2Standalone(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
+    /* Check if a sds name is defined */
+    const UA_String sdsName = dsr->config.linkedStandaloneSubscribedDataSetName;
+    if(UA_String_isEmpty(&sdsName))
+        return;
+
+    UA_SubscribedDataSet *sds = UA_SubscribedDataSet_findByName(psm, sdsName);
+    if(!sds)
+        return;
+
+    /* Remove the backpointer from the sds */
+    sds->connectedReader = NULL;
+
+    /* Remove the references in the information model */
+#ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
+    disconnectDataSetReaderToDataSet(psm->drv.server, dsr->head.identifier);
+#endif
+}
+
+static void
+clearSequences(UA_DataSetReader *reader) {
+    while(reader->sequences) {
+        UA_ReaderSequence *entry = reader->sequences;
+        reader->sequences = entry->next;
+        UA_PublisherId_clear(&entry->publisherId);
+        UA_free(entry);
+    }
+}
+
+UA_Boolean
+UA_DataSetReader_checkSequence(UA_PubSubManager *psm, UA_DataSetReader *reader,
+                               const UA_NetworkMessage *nm, UA_UInt16 writerId,
+                               UA_Boolean dataSet, UA_UInt32 number, UA_Byte bits,
+                               UA_Boolean update, UA_Boolean *gap) {
+    /* Identify this stream by its received publisher, group and writer ids.
+     * NetworkMessage and DataSetMessage counters have separate histories. */
+    UA_EventLoop *el = psm->drv.server->config.eventLoop;
+    UA_DateTime now = el->dateTime_nowMonotonic(el);
+    UA_Boolean groupEnabled = nm->groupHeaderEnabled && nm->groupHeader.writerGroupIdEnabled;
+    UA_UInt16 groupId = groupEnabled ? nm->groupHeader.writerGroupId : 0;
+    UA_ReaderSequence **pos = &reader->sequences;
+    *gap = true;
+    while(*pos) {
+        UA_ReaderSequence *entry = *pos;
+        /* The history survives the first receive timeout. Part 14 7.2.3
+         * discards it only after twice that interval without messages. */
+        if(reader->config.messageReceiveTimeout > 0.0 &&
+           (UA_Double)(now - entry->lastReceived) / UA_DATETIME_MSEC >=
+               2.0 * reader->config.messageReceiveTimeout) {
+            *pos = entry->next;
+            UA_PublisherId_clear(&entry->publisherId);
+            UA_free(entry);
+            continue;
+        }
+
+        /* Find the history for this stream, including which header ids are
+         * present. */
+        UA_Variant a, b;
+        UA_PublisherId_toVariant(&entry->publisherId, &a);
+        UA_PublisherId_toVariant(&nm->publisherId, &b);
+        if(entry->publisherIdEnabled == nm->publisherIdEnabled &&
+           (!nm->publisherIdEnabled || UA_Variant_equal(&a, &b)) &&
+           entry->writerGroupIdEnabled == groupEnabled &&
+           entry->writerGroupId == groupId && entry->writerId == writerId &&
+           entry->dataSet == dataSet) {
+            /* Refresh the receive time even for rejected numbers, then
+             * compare sequence numbers modulo the wire format's counter
+             * width. */
+            entry->lastReceived = now;
+            UA_UInt32 mask = bits == 16 ? UA_UINT16_MAX : UA_UINT32_MAX;
+            UA_UInt32 distance = (number - entry->sequenceNumber - 1) & mask;
+            /* Only the lower quarter is a forward step. This rejects both
+             * duplicate/old values and the ambiguous middle range. */
+            if(distance >= ((UA_UInt32)1 << (bits - 2)))
+                return false;
+
+            /* Report missing messages immediately, but advance the accepted
+             * sequence number only after the caller has processed the
+             * message. */
+            *gap = distance != 0;
+            if(update)
+                entry->sequenceNumber = number;
+            return true;
+        }
+        pos = &entry->next;
+    }
+
+    /* Accept the first message of a new stream without creating history
+     * during the preliminary check. Store an owned publisher id when
+     * committing it. */
+    if(!update)
+        return true;
+    UA_ReaderSequence *entry = (UA_ReaderSequence*)UA_calloc(1, sizeof(*entry));
+    if(!entry)
+        return false;
+    if(UA_PublisherId_copy(&nm->publisherId, &entry->publisherId) != UA_STATUSCODE_GOOD) {
+        UA_free(entry);
+        return false;
+    }
+    entry->publisherIdEnabled = nm->publisherIdEnabled;
+    entry->writerGroupIdEnabled = groupEnabled;
+    entry->writerGroupId = groupId;
+    entry->writerId = writerId;
+    entry->dataSet = dataSet;
+    entry->sequenceNumber = number;
+    entry->lastReceived = now;
+    *pos = entry;
+    return true;
+}
+
+static void
+clearLastUsableValues(UA_DataSetReader *dsr) {
+    if(dsr->lastUsableValues)
+        UA_Array_delete(dsr->lastUsableValues, dsr->lastUsableValuesSize,
+                        &UA_TYPES[UA_TYPES_DATAVALUE]);
+    dsr->lastUsableValues = NULL;
+    dsr->lastUsableValuesSize = 0;
+}
+
+/* Connect to StandaloneSubscribedDataSet if a name is defined */
+static UA_StatusCode
+connectDSR2Standalone(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
+    /* Check if a sds name is defined */
+    const UA_String sdsName = dsr->config.linkedStandaloneSubscribedDataSetName;
+    if(UA_String_isEmpty(&sdsName))
+        return UA_STATUSCODE_GOOD;
+
+    UA_SubscribedDataSet *sds = UA_SubscribedDataSet_findByName(psm, sdsName);
+    if(!sds)
+        return UA_STATUSCODE_BADNOTFOUND;
+
+    /* Already connected? */
+    if(sds->connectedReader) {
+        if(sds->connectedReader == dsr)
+            return UA_STATUSCODE_GOOD;
+        UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
+                            "Configured StandaloneSubscribedDataSet already "
+                            "connected to a different DataSetReader");
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    /* Check supported type */
+    if(sds->config.subscribedDataSetType != UA_PUBSUB_SDS_TARGET) {
+        UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
+                            "Not implemented! Currently only SubscribedDataSet as "
+                            "TargetVariables is implemented");
+        return UA_STATUSCODE_BADNOTIMPLEMENTED;
+    }
+
+    UA_LOG_DEBUG_PUBSUB(psm->logging, dsr, "Connecting SubscribedDataSet");
+
+    /* Copy the metadata from the sds */
+    UA_DataSetMetaDataType metaData;
+    UA_StatusCode res = UA_DataSetMetaDataType_copy(&sds->config.dataSetMetaData, &metaData);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+
+    /* Prepare the input for _createTargetVariables and call it */
+    UA_TargetVariablesDataType *tvs = &sds->config.subscribedDataSet.target;
+    res = DataSetReader_createTargetVariables(psm, dsr, tvs->targetVariablesSize,
+                                              tvs->targetVariables);
+    if(res != UA_STATUSCODE_GOOD) {
+        UA_DataSetMetaDataType_clear(&metaData);
+        return res;
+    }
+
+    /* Use the metadata from the sds */
+    UA_DataSetMetaDataType_clear(&dsr->config.dataSetMetaData);
+    dsr->config.dataSetMetaData = metaData;
+
+    /* Set the backpointer from the sds */
+    sds->connectedReader = dsr;
+
+    /* Make the connection visible in the information model */
+#ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
+    return connectDataSetReaderToDataSet(psm->drv.server, dsr->head.identifier,
+                                         sds->head.identifier);
+#else
+    return UA_STATUSCODE_GOOD;
+#endif
+}
+
 UA_StatusCode
 UA_DataSetReader_create(UA_PubSubManager *psm, UA_NodeId readerGroupIdentifier,
                         const UA_DataSetReaderConfig *dataSetReaderConfig,
@@ -125,18 +432,17 @@ UA_DataSetReader_create(UA_PubSubManager *psm, UA_NodeId readerGroupIdentifier,
     if(!psm || !dataSetReaderConfig)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
 
-    UA_LOCK_ASSERT(&psm->sc.server->serviceMutex);
+    UA_LOCK_ASSERT(&psm->drv.server->serviceMutex);
 
     /* Search the reader group by the given readerGroupIdentifier */
     UA_ReaderGroup *rg = UA_ReaderGroup_find(psm, readerGroupIdentifier);
     if(!rg)
         return UA_STATUSCODE_BADNOTFOUND;
 
-    if(rg->config.rtLevel != UA_PUBSUB_RT_NONE &&
-       UA_PubSubState_isEnabled(rg->head.state)) {
+    if(UA_PubSubState_isEnabled(rg->head.state)) {
         UA_LOG_WARNING_PUBSUB(psm->logging, rg,
                               "Cannot add a DataSetReader while the "
-                              "ReaderGroup with realtime options is enabled");
+                              "ReaderGroup is enabled");
         return UA_STATUSCODE_BADCONFIGURATIONERROR;
     }
 
@@ -149,24 +455,36 @@ UA_DataSetReader_create(UA_PubSubManager *psm, UA_NodeId readerGroupIdentifier,
     dsr->head.componentType = UA_PUBSUBCOMPONENT_DATASETREADER;
     dsr->linkedReaderGroup = rg;
 
-    /* Add the new reader to the group */
-    LIST_INSERT_HEAD(&rg->readers, dsr, listEntry);
+    /* Add the new reader to the group. Add to the end of the linked list to
+     * ensure the order for the realtime offsets is as expected. The received
+     * DataSetMessages are matched via UA_DataSetReader_checkIdentifier for the
+     * non-RT path. */
+    UA_DataSetReader *after = LIST_FIRST(&rg->readers);
+    if(!after) {
+        LIST_INSERT_HEAD(&rg->readers, dsr, listEntry);
+    } else {
+        while(LIST_NEXT(after, listEntry))
+            after = LIST_NEXT(after, listEntry);
+        LIST_INSERT_AFTER(after, dsr, listEntry);
+    }
     rg->readersCount++;
 
     /* Copy the config into the new dataSetReader */
     UA_StatusCode retVal =
         UA_DataSetReaderConfig_copy(dataSetReaderConfig, &dsr->config);
     if(retVal != UA_STATUSCODE_GOOD) {
-        UA_DataSetReader_remove(psm, dsr);
+        UA_PubSubComponent_freeWithoutLifecycleCallback(
+            psm, dsr, UA_PUBSUBCOMPONENT_DATASETREADER);
         return retVal;
     }
 
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
-    retVal = addDataSetReaderRepresentation(psm->sc.server, dsr);
+    retVal = addDataSetReaderRepresentation(psm->drv.server, dsr);
     if(retVal != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR_PUBSUB(psm->logging, rg,
                             "Adding the DataSetReader to the information model failed");
-        UA_DataSetReader_remove(psm, dsr);
+        UA_PubSubComponent_freeWithoutLifecycleCallback(
+            psm, dsr, UA_PUBSUBCOMPONENT_DATASETREADER);
         return retVal;
     }
 #else
@@ -176,105 +494,80 @@ UA_DataSetReader_create(UA_PubSubManager *psm, UA_NodeId readerGroupIdentifier,
     /* Cache the log string */
     char tmpLogIdStr[128];
     mp_snprintf(tmpLogIdStr, 128, "%SDataSetReader %N\t| ",
-                dsr->linkedReaderGroup->head.logIdString,
-                dsr->head.identifier);
+                dsr->linkedReaderGroup->head.logIdString, dsr->head.identifier);
     dsr->head.logIdString = UA_STRING_ALLOC(tmpLogIdStr);
+
+    /* Connect to StandaloneSubscribedDataSet if a name is defined. Needs to be
+     * added in the information model first, as this adds references to the
+     * StandaloneSubscribedDataSet. */
+    retVal = connectDSR2Standalone(psm, dsr);
+    if(retVal != UA_STATUSCODE_GOOD) {
+        UA_PubSubComponent_freeWithoutLifecycleCallback(
+            psm, dsr, UA_PUBSUBCOMPONENT_DATASETREADER);
+        return retVal;
+    }
+
+    /* Validate the config */
+    retVal = validateDSRConfig(psm, dsr);
+    if(retVal != UA_STATUSCODE_GOOD) {
+        UA_PubSubComponent_freeWithoutLifecycleCallback(
+            psm, dsr, UA_PUBSUBCOMPONENT_DATASETREADER);
+        return retVal;
+    }
+
+    /* Notify the application that a new Reader was created.
+     * This may internally adjust the config */
+    UA_Server *server = psm->drv.server;
+    if(server->config.pubSubConfig.componentLifecycleCallback) {
+        UA_StatusCode res = server->config.pubSubConfig.
+            componentLifecycleCallback(server, dsr->head.identifier,
+                                       UA_PUBSUBCOMPONENT_DATASETREADER, false);
+        if(res != UA_STATUSCODE_GOOD) {
+            /* The app refused the component; free without re-asking the
+             * lifecycle callback (it would re-reject and leak the reader). */
+            UA_PubSubComponent_freeWithoutLifecycleCallback(
+                psm, dsr, UA_PUBSUBCOMPONENT_DATASETREADER);
+            return res;
+        }
+    }
 
     UA_LOG_INFO_PUBSUB(psm->logging, dsr, "DataSetReader created (State: %s)",
                        UA_PubSubState_name(dsr->head.state));
 
-    /* Connect to StandaloneSubscribedDataSet if a name is defined */
-    const UA_String sdsName = dsr->config.linkedStandaloneSubscribedDataSetName;
-    UA_SubscribedDataSet *sds = (UA_String_isEmpty(&sdsName)) ?
-        NULL : UA_SubscribedDataSet_findByName(psm, sdsName);
-    if(sds) {
-        if(sds->config.subscribedDataSetType != UA_PUBSUB_SDS_TARGET) {
-            UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
-                                "Not implemented! Currently only SubscribedDataSet as "
-                                "TargetVariables is implemented");
-        } else if(sds->connectedReader) {
-            UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
-                                "SubscribedDataSet is already connected");
-        } else {
-            UA_LOG_DEBUG_PUBSUB(psm->logging, dsr,
-                                "Found SubscribedDataSet");
-
-            /* Use the MetaData from the sds */
-            UA_DataSetMetaDataType_clear(&dsr->config.dataSetMetaData);
-            UA_DataSetMetaDataType_copy(&sds->config.dataSetMetaData,
-                                        &dsr->config.dataSetMetaData);
-
-            /* Prepare the input for _createTargetVariables and call it */
-            UA_TargetVariablesDataType *tvs = &sds->config.subscribedDataSet.target;
-            UA_FieldTargetVariable *targetVars = (UA_FieldTargetVariable *)
-                UA_calloc(tvs->targetVariablesSize, sizeof(UA_FieldTargetVariable));
-            for(size_t i = 0; i < tvs->targetVariablesSize; i++) {
-                UA_FieldTargetDataType_copy(&tvs->targetVariables[i],
-                                            &targetVars[i].targetVariable);
-            }
-
-            DataSetReader_createTargetVariables(psm, dsr, tvs->targetVariablesSize,
-                                                targetVars);
-
-            /* Clean up the temporary array */
-            for(size_t i = 0; i < tvs->targetVariablesSize; i++) {
-                UA_FieldTargetDataType_clear(&targetVars[i].targetVariable);
-            }
-            UA_free(targetVars);
-
-            /* Set the backpointer */
-            sds->connectedReader = dsr;
-
-            /* Make the connection visible in the information model */
-#ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
-            connectDataSetReaderToDataSet(psm->sc.server, dsr->head.identifier,
-                                          sds->head.identifier);
-#endif
-        }
-    }
-
-    /* Check if used dataSet metaData is valid in context of the rest of the config */
-    if(dsr->config.dataSetFieldContentMask & UA_DATASETFIELDCONTENTMASK_RAWDATA) {
-        for(size_t fieldIdx = 0;
-            fieldIdx < dsr->config.dataSetMetaData.fieldsSize; fieldIdx++) {
-            const UA_FieldMetaData *field =
-                &dsr->config.dataSetMetaData.fields[fieldIdx];
-            if((field->builtInType == UA_TYPES_STRING ||
-                field->builtInType == UA_TYPES_BYTESTRING) &&
-               field->maxStringLength == 0) {
-                /* Fields of type String or ByteString need to have defined
-                 * MaxStringLength*/
-                UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
-                                    "Add DataSetReader failed. MaxStringLength must be "
-                                    "set in MetaData when using RawData field encoding.");
-                UA_DataSetReader_remove(psm, dsr);
-                return UA_STATUSCODE_BADCONFIGURATIONERROR;
-            }
-        }
-    }
-
     if(readerIdentifier)
         UA_NodeId_copy(&dsr->head.identifier, readerIdentifier);
+
+    /* Enable the DataSetReader immediately if the enabled flag is set */
+    if(dataSetReaderConfig->enabled)
+        UA_DataSetReader_setPubSubState(psm, dsr, UA_PUBSUBSTATE_OPERATIONAL,
+                                        UA_STATUSCODE_GOOD);
 
     return UA_STATUSCODE_GOOD;
 }
 
 UA_StatusCode
 UA_DataSetReader_remove(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
-    UA_LOCK_ASSERT(&psm->sc.server->serviceMutex);
+    UA_LOCK_ASSERT(&psm->drv.server->serviceMutex);
 
     UA_ReaderGroup *rg = dsr->linkedReaderGroup;
     UA_assert(rg);
 
-    /* Check if the ReaderGroup is enabled with realtime options. Disallow
-     * removal in that case. The RT path might still have a pointer to the
-     * DataSetReader. Or we violate the fixed-size-message configuration.*/
-    if(rg->config.rtLevel != UA_PUBSUB_RT_NONE &&
-       UA_PubSubState_isEnabled(rg->head.state)) {
+    /* Check if the ReaderGroup is enabled */
+    if(UA_PubSubState_isEnabled(rg->head.state)) {
         UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
-                              "Removal of DataSetReader not possible while "
-                              "the ReaderGroup with realtime options is enabled");
+                              "Removal of the DataSetReader not possible while "
+                              "the ReaderGroup is enabled");
         return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    /* Check with the application if we can remove */
+    UA_Server *server = psm->drv.server;
+    if(server->config.pubSubConfig.componentLifecycleCallback) {
+        UA_StatusCode res = server->config.pubSubConfig.
+            componentLifecycleCallback(server, dsr->head.identifier,
+                                       UA_PUBSUBCOMPONENT_DATASETREADER, true);
+        if(res != UA_STATUSCODE_GOOD)
+            return res;
     }
 
     /* Disable and signal to the application */
@@ -283,7 +576,7 @@ UA_DataSetReader_remove(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
 
     /* Remove from information model */
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
-    deleteNode(psm->sc.server, dsr->head.identifier, true);
+    deleteNode(psm->drv.server, dsr->head.identifier, true);
 #endif
 
     /* Check if a Standalone-SubscribedDataSet is associated with this reader
@@ -300,8 +593,9 @@ UA_DataSetReader_remove(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
 
     UA_LOG_INFO_PUBSUB(psm->logging, dsr, "DataSetReader deleted");
 
+    clearLastUsableValues(dsr);
+    clearSequences(dsr);
     UA_DataSetReaderConfig_clear(&dsr->config);
-    UA_NetworkMessageOffsetBuffer_clear(&dsr->bufferedMessage);
     UA_PubSubComponentHead_clear(&dsr->head);
     UA_free(dsr);
 
@@ -311,12 +605,16 @@ UA_DataSetReader_remove(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
 UA_StatusCode
 UA_DataSetReaderConfig_copy(const UA_DataSetReaderConfig *src,
                             UA_DataSetReaderConfig *dst) {
-    memset(dst, 0, sizeof(UA_DataSetReaderConfig));
-    dst->writerGroupId = src->writerGroupId;
-    dst->dataSetWriterId = src->dataSetWriterId;
-    dst->expectedEncoding = src->expectedEncoding;
-    dst->dataSetFieldContentMask = src->dataSetFieldContentMask;
-    dst->messageReceiveTimeout = src->messageReceiveTimeout;
+    memcpy(dst, src, sizeof(UA_DataSetReaderConfig));
+    dst->name = UA_STRING_NULL;
+    memset(&dst->publisherId, 0, sizeof(dst->publisherId));
+    UA_DataSetMetaDataType_init(&dst->dataSetMetaData);
+    UA_ExtensionObject_init(&dst->messageSettings);
+    UA_ExtensionObject_init(&dst->transportSettings);
+    memset(&dst->subscribedDataSet, 0, sizeof(dst->subscribedDataSet));
+    dst->linkedStandaloneSubscribedDataSetName = UA_STRING_NULL;
+    dst->headerLayoutUri = UA_STRING_NULL;
+    dst->dataSetReaderProperties = UA_KEYVALUEMAP_NULL;
 
     UA_StatusCode ret = UA_String_copy(&src->name, &dst->name);
     ret |= UA_PublisherId_copy(&src->publisherId, &dst->publisherId);
@@ -325,10 +623,13 @@ UA_DataSetReaderConfig_copy(const UA_DataSetReaderConfig *src,
     ret |= UA_ExtensionObject_copy(&src->transportSettings, &dst->transportSettings);
     ret |= UA_String_copy(&src->linkedStandaloneSubscribedDataSetName,
                              &dst->linkedStandaloneSubscribedDataSetName);
+    ret |= UA_String_copy(&src->headerLayoutUri, &dst->headerLayoutUri);
+    ret |= UA_KeyValueMap_copy(&src->dataSetReaderProperties,
+                               &dst->dataSetReaderProperties);
 
     if(src->subscribedDataSetType == UA_PUBSUB_SDS_TARGET) {
-        ret |= UA_TargetVariables_copy(&src->subscribedDataSet.subscribedDataSetTarget,
-                                       &dst->subscribedDataSet.subscribedDataSetTarget);
+        ret |= UA_TargetVariablesDataType_copy(&src->subscribedDataSet.target,
+                                               &dst->subscribedDataSet.target);
     }
 
     if(ret != UA_STATUSCODE_GOOD)
@@ -345,25 +646,145 @@ UA_DataSetReaderConfig_clear(UA_DataSetReaderConfig *cfg) {
     UA_DataSetMetaDataType_clear(&cfg->dataSetMetaData);
     UA_ExtensionObject_clear(&cfg->messageSettings);
     UA_ExtensionObject_clear(&cfg->transportSettings);
+    UA_String_clear(&cfg->headerLayoutUri);
+    UA_KeyValueMap_clear(&cfg->dataSetReaderProperties);
     if(cfg->subscribedDataSetType == UA_PUBSUB_SDS_TARGET) {
-        UA_TargetVariables_clear(&cfg->subscribedDataSet.subscribedDataSetTarget);
+        UA_TargetVariablesDataType_clear(&cfg->subscribedDataSet.target);
     }
+    memset(cfg, 0, sizeof(UA_DataSetReaderConfig));
 }
 
-void
+/* Build an owned fallback value. LastUsableValue starts with the metadata's
+ * default value, not the separately configured OverrideValue (Part 14 Table 80). */
+static UA_StatusCode
+getTargetFallback(UA_PubSubManager *psm, UA_DataSetReader *dsr, size_t index,
+                   UA_StatusCode badStatus, UA_DataValue *value) {
+    /* Start with Null and the supplied Bad status. Disabled override handling
+     * uses this value without retaining any received payload. */
+    UA_FieldTargetDataType *tv = &dsr->config.subscribedDataSet.target.targetVariables[index];
+    UA_DataValue_init(value);
+    value->hasStatus = true;
+    value->status = badStatus;
+    if(tv->overrideValueHandling == UA_OVERRIDEVALUEHANDLING_DISABLED)
+        return UA_STATUSCODE_GOOD;
+
+    /* Use the configured override or the last usable sample, assigning the
+     * quality that identifies which fallback supplied the value. */
+    UA_StatusCode res;
+    if(tv->overrideValueHandling == UA_OVERRIDEVALUEHANDLING_OVERRIDEVALUE) {
+        res = UA_Variant_copy(&tv->overrideValue, &value->value);
+        value->status = UA_STATUSCODE_GOODLOCALOVERRIDE;
+    } else if(index < dsr->lastUsableValuesSize &&
+              dsr->lastUsableValues[index].hasValue) {
+        res = UA_DataValue_copy(&dsr->lastUsableValues[index], value);
+        value->status = UA_STATUSCODE_UNCERTAINLASTUSABLEVALUE;
+    } else {
+        /* Before the first usable sample, construct the field's default value
+         * from its metadata. */
+        if(index >= dsr->config.dataSetMetaData.fieldsSize)
+            return UA_STATUSCODE_BADCONFIGURATIONERROR;
+        const UA_FieldMetaData *fmd = &dsr->config.dataSetMetaData.fields[index];
+        const UA_DataType *type = UA_findDataTypeWithCustom(
+            &fmd->dataType, psm->drv.server->config.customDataTypes);
+        if(!type)
+            return UA_STATUSCODE_BADTYPEMISMATCH;
+        if(fmd->valueRank == UA_VALUERANK_SCALAR) {
+            void *data = UA_new(type);
+            if(!data)
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            UA_Variant_setScalar(&value->value, data, type);
+        } else {
+            /* Allocate a default array with the declared dimensions, checking
+             * the element count before multiplication. */
+            size_t count = fmd->arrayDimensionsSize ? 1 : 0;
+            for(size_t i = 0; i < fmd->arrayDimensionsSize; i++) {
+                UA_UInt32 dim = fmd->arrayDimensions[i];
+                if(dim && count > SIZE_MAX / dim)
+                    return UA_STATUSCODE_BADOUTOFMEMORY;
+                count *= dim;
+            }
+            void *data = UA_Array_new(count, type);
+            if(!data)
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            UA_Variant_setArray(&value->value, data, count, type);
+            res = UA_Array_copy(fmd->arrayDimensions, fmd->arrayDimensionsSize,
+                               (void**)&value->value.arrayDimensions,
+                               &UA_TYPES[UA_TYPES_UINT32]);
+            if(res != UA_STATUSCODE_GOOD)
+                return res;
+            value->value.arrayDimensionsSize = fmd->arrayDimensionsSize;
+        }
+        value->status = UA_STATUSCODE_UNCERTAINLASTUSABLEVALUE;
+        res = UA_STATUSCODE_GOOD;
+    }
+    value->hasStatus = true;
+    value->hasValue = value->value.type != NULL;
+    return res;
+}
+
+static UA_StatusCode
+updateTargetsForState(UA_PubSubManager *psm, UA_DataSetReader *dsr) {
+    /* Translate the inactive reader state into target quality: communication
+     * failure for Error, and out of service for Disabled or Paused. */
+    UA_StatusCode badStatus = dsr->head.state == UA_PUBSUBSTATE_ERROR ?
+        UA_STATUSCODE_BADNOCOMMUNICATION : UA_STATUSCODE_BADOUTOFSERVICE;
+    UA_TargetVariablesDataType *tvs = &dsr->config.subscribedDataSet.target;
+    UA_StatusCode result = UA_STATUSCODE_GOOD;
+
+    /* Apply each target's fallback through the normal write service. Release
+     * temporary values and continue with other targets if a write fails. */
+    for(size_t i = 0; i < tvs->targetVariablesSize; i++) {
+        UA_WriteValue wv;
+        UA_WriteValue_init(&wv);
+        UA_StatusCode res = getTargetFallback(psm, dsr, i, badStatus, &wv.value);
+        if(res == UA_STATUSCODE_GOOD) {
+            wv.nodeId = tvs->targetVariables[i].targetNodeId;
+            wv.attributeId = tvs->targetVariables[i].attributeId;
+            wv.indexRange = tvs->targetVariables[i].writeIndexRange;
+            Operation_Write(psm->drv.server, &psm->drv.server->adminSession, &wv, &res);
+        }
+        UA_DataValue_clear(&wv.value);
+        if(res != UA_STATUSCODE_GOOD)
+            result = res;
+    }
+    return result;
+}
+
+UA_StatusCode
 UA_DataSetReader_setPubSubState(UA_PubSubManager *psm, UA_DataSetReader *dsr,
-                                UA_PubSubState targetState,
-                                UA_StatusCode errorReason) {
+                                UA_PubSubState targetState, UA_StatusCode errorReason) {
     UA_ReaderGroup *rg = dsr->linkedReaderGroup;
     UA_assert(rg);
 
+    /* Callback to modify the WriterGroup config and change the targetState
+     * before the state machine executes */
+    UA_Server *server = psm->drv.server;
+    if(server->config.pubSubConfig.beforeStateChangeCallback) {
+        server->config.pubSubConfig.
+            beforeStateChangeCallback(server, dsr->head.identifier, &targetState);
+    }
+
+    UA_StatusCode res = UA_STATUSCODE_GOOD;
     UA_PubSubState oldState = dsr->head.state;
 
+    /* Custom state machine */
+    if(dsr->config.customStateMachine) {
+        res = dsr->config.customStateMachine(server, dsr->head.identifier,
+                                             dsr->config.context,
+                                             &dsr->head.state, targetState);
+        if(res != UA_STATUSCODE_GOOD)
+            errorReason = res;
+        goto finalize_state_machine;
+    }
+
+    /* Internal state machine */
     switch(targetState) {
         /* Disabled */
     case UA_PUBSUBSTATE_DISABLED:
     case UA_PUBSUBSTATE_ERROR:
         dsr->head.state = targetState;
+        dsr->receivedKeyFrame = false;
+        dsr->deltaFrameCounter = 0;
         break;
 
         /* Enabled */
@@ -381,65 +802,62 @@ UA_DataSetReader_setPubSubState(UA_PubSubManager *psm, UA_DataSetReader *dsr,
 
     default:
         dsr->head.state = UA_PUBSUBSTATE_ERROR;
-        errorReason = UA_STATUSCODE_BADINTERNALERROR;
+        res = UA_STATUSCODE_BADINTERNALERROR;
+        errorReason = res;
         break;
     }
 
     /* Only keep the timeout callback if the reader is operational */
     if(dsr->head.state != UA_PUBSUBSTATE_OPERATIONAL &&
        dsr->msgRcvTimeoutTimerId != 0) {
-        UA_EventLoop *el = UA_PubSubConnection_getEL(psm, rg->linkedConnection);
+        UA_EventLoop *el = psm->drv.server->config.eventLoop;
         el->removeTimer(el, dsr->msgRcvTimeoutTimerId);
         dsr->msgRcvTimeoutTimerId = 0;
     }
 
+    /* Start receive-timeout monitoring when the reader becomes Operational,
+     * including readers that have not yet received their first message. */
+    if(dsr->head.state == UA_PUBSUBSTATE_OPERATIONAL &&
+       dsr->config.messageReceiveTimeout > 0.0 &&
+       dsr->msgRcvTimeoutTimerId == 0) {
+        UA_EventLoop *el = psm->drv.server->config.eventLoop;
+        el->addTimer(el, UA_DataSetReader_handleMessageReceiveTimeout,
+                     psm, dsr, dsr->config.messageReceiveTimeout, NULL,
+                     UA_TIMERPOLICY_CURRENTTIME, &dsr->msgRcvTimeoutTimerId);
+    }
+
+ finalize_state_machine:
+
+    /* No state change has happened */
+    if(dsr->head.state == oldState)
+        return res;
+
+    /* Update target values once when the built-in state machine enters an
+     * inactive state. Custom state machines manage their own target updates. */
+    if(!dsr->config.customStateMachine &&
+       (dsr->head.state == UA_PUBSUBSTATE_DISABLED ||
+        dsr->head.state == UA_PUBSUBSTATE_PAUSED ||
+        dsr->head.state == UA_PUBSUBSTATE_ERROR)) {
+        UA_StatusCode targetResult = updateTargetsForState(psm, dsr);
+        if(targetResult != UA_STATUSCODE_GOOD)
+            res = targetResult;
+    }
+
+    UA_LOG_INFO_PUBSUB(psm->logging, dsr, "%s -> %s",
+                       UA_PubSubState_name(oldState),
+                       UA_PubSubState_name(dsr->head.state));
+
+    /* Forget stream history on disable; retain it across receive timeouts. */
+    if(dsr->head.state == UA_PUBSUBSTATE_DISABLED)
+        clearSequences(dsr);
+
     /* Inform application about state change */
-    if(dsr->head.state != oldState) {
-        UA_ServerConfig *config = &psm->sc.server->config;
-        UA_LOG_INFO_PUBSUB(psm->logging, dsr, "%s -> %s",
-                           UA_PubSubState_name(oldState),
-                           UA_PubSubState_name(dsr->head.state));
-        if(config->pubSubConfig.stateChangeCallback != 0) {
-            UA_UNLOCK(&psm->sc.server->serviceMutex);
-            config->pubSubConfig.stateChangeCallback(psm->sc.server, dsr->head.identifier,
-                                                     dsr->head.state, errorReason);
-            UA_LOCK(&psm->sc.server->serviceMutex);
-        }
-    }
-}
-
-UA_StatusCode
-UA_FieldTargetVariable_copy(const UA_FieldTargetVariable *src,
-                            UA_FieldTargetVariable *dst) {
-    memcpy(dst, src, sizeof(UA_FieldTargetVariable));
-    return UA_FieldTargetDataType_copy(&src->targetVariable,
-                                       &dst->targetVariable);
-}
-
-UA_StatusCode
-UA_TargetVariables_copy(const UA_TargetVariables *src, UA_TargetVariables *dst) {
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
-    memcpy(dst, src, sizeof(UA_TargetVariables));
-    if(src->targetVariablesSize > 0) {
-        dst->targetVariables = (UA_FieldTargetVariable*)
-            UA_calloc(src->targetVariablesSize, sizeof(UA_FieldTargetVariable));
-        if(!dst->targetVariables)
-            return UA_STATUSCODE_BADOUTOFMEMORY;
-        for(size_t i = 0; i < src->targetVariablesSize; i++)
-            retVal |= UA_FieldTargetVariable_copy(&src->targetVariables[i],
-                                                  &dst->targetVariables[i]);
-    }
-    return retVal;
-}
-
-void
-UA_TargetVariables_clear(UA_TargetVariables *tvs) {
-    for(size_t i = 0; i < tvs->targetVariablesSize; i++) {
-        UA_FieldTargetDataType_clear(&tvs->targetVariables[i].targetVariable);
-    }
-    if(tvs->targetVariablesSize > 0)
-        UA_free(tvs->targetVariables);
-    memset(tvs, 0, sizeof(UA_TargetVariables));
+    if(server->config.pubSubConfig.stateChangeCallback)
+        server->config.pubSubConfig.
+            stateChangeCallback(server, dsr->head.identifier,
+                                dsr->head.state, errorReason);
+                                
+    return res;
 }
 
 /* This Method is used to initially set the SubscribedDataSet to
@@ -447,8 +865,8 @@ UA_TargetVariables_clear(UA_TargetVariables *tvs) {
  * SubscribedDataSetType. */
 UA_StatusCode
 DataSetReader_createTargetVariables(UA_PubSubManager *psm, UA_DataSetReader *dsr,
-                                    size_t tvsSize, const UA_FieldTargetVariable *tvs) {
-    UA_LOCK_ASSERT(&psm->sc.server->serviceMutex);
+                                    size_t tvsSize, const UA_FieldTargetDataType *tvs) {
+    UA_LOCK_ASSERT(&psm->drv.server->serviceMutex);
 
     if(UA_PubSubState_isEnabled(dsr->head.state)) {
         UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
@@ -457,131 +875,23 @@ DataSetReader_createTargetVariables(UA_PubSubManager *psm, UA_DataSetReader *dsr
         return UA_STATUSCODE_BADCONFIGURATIONERROR;
     }
 
-    if(dsr->config.subscribedDataSet.subscribedDataSetTarget.targetVariablesSize > 0)
-        UA_TargetVariables_clear(&dsr->config.subscribedDataSet.subscribedDataSetTarget);
+    UA_TargetVariablesDataType newVars;
+    UA_TargetVariablesDataType tmp = {tvsSize, (UA_FieldTargetDataType*)(uintptr_t)tvs};
+    UA_StatusCode res = UA_TargetVariablesDataType_copy(&tmp, &newVars);   
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
 
-    /* Set subscribed dataset to TargetVariableType */
-    dsr->config.subscribedDataSetType = UA_PUBSUB_SDS_TARGET;
-    UA_TargetVariables tmp;
-    tmp.targetVariablesSize = tvsSize;
-    tmp.targetVariables = (UA_FieldTargetVariable*)(uintptr_t)tvs;
-    return UA_TargetVariables_copy(&tmp, &dsr->config.subscribedDataSet.subscribedDataSetTarget);
+    UA_TargetVariablesDataType_clear(&dsr->config.subscribedDataSet.target);
+    dsr->config.subscribedDataSet.target = newVars;
+    clearLastUsableValues(dsr);
+    return UA_STATUSCODE_GOOD;
 }
 
 static void
-DataSetReader_processRaw(UA_PubSubManager *psm, UA_DataSetReader *dsr,
-                         UA_DataSetMessage* msg) {
-    UA_LOG_TRACE_PUBSUB(psm->logging, dsr, "Received RAW Frame");
-    msg->data.keyFrameData.fieldCount = (UA_UInt16)
-        dsr->config.dataSetMetaData.fieldsSize;
-
-    /* Start iteration from beginning of rawFields buffer */
-    size_t offset = 0;
-    for(size_t i = 0; i < dsr->config.dataSetMetaData.fieldsSize; i++) {
-        UA_FieldTargetVariable *tv =
-            &dsr->config.subscribedDataSet.subscribedDataSetTarget.targetVariables[i];
-
-        /* TODO The datatype reference should be part of the internal
-         * pubsub configuration to avoid the time-expensive lookup */
-        const UA_DataType *type =
-            UA_findDataTypeWithCustom(&dsr->config.dataSetMetaData.fields[i].dataType,
-                                      psm->sc.server->config.customDataTypes);
-        if(!type) {
-            UA_LOG_ERROR_PUBSUB(psm->logging, dsr, "Type not found");
-            return;
-        }
-
-        /* For arrays the length of the array is encoded before the actual data */
-        size_t elementCount = 1;
-        for(int cnt = 0; cnt < dsr->config.dataSetMetaData.fields[i].valueRank; cnt++) {
-            UA_UInt32 dimSize =
-                *(UA_UInt32 *)&msg->data.keyFrameData.rawFields.data[offset];
-            if(dimSize != dsr->config.dataSetMetaData.fields[i].arrayDimensions[cnt]) {
-                UA_LOG_INFO_PUBSUB(psm->logging, dsr,
-                                   "Error during Raw-decode KeyFrame field %u: "
-                                   "Dimension size in received data doesn't match the dataSetMetaData",
-                                   (unsigned)i);
-                return;
-            }
-            offset += sizeof(UA_UInt32);
-            elementCount *= dimSize;
-        }
-
-        /* Decode the value */
-        UA_STACKARRAY(UA_Byte, value, elementCount * type->memSize);
-        memset(value, 0, elementCount * type->memSize);
-        UA_Byte *valPtr = value;
-        UA_StatusCode res = UA_STATUSCODE_GOOD;
-        for(size_t cnt = 0; cnt < elementCount; cnt++) {
-            res = UA_decodeBinaryInternal(&msg->data.keyFrameData.rawFields,
-                                          &offset, valPtr, type, NULL);
-            if(dsr->config.dataSetMetaData.fields[i].maxStringLength != 0) {
-                if(type->typeKind == UA_DATATYPEKIND_STRING ||
-                   type->typeKind == UA_DATATYPEKIND_BYTESTRING) {
-                    UA_ByteString *bs = (UA_ByteString *)valPtr;
-                    /* Check if length < maxStringLength, The types ByteString and
-                     * String are equal in their base definition */
-                    size_t lengthDifference =
-                        dsr->config.dataSetMetaData.fields[i].maxStringLength - bs->length;
-                    offset += lengthDifference;
-                }
-            }
-            if(res != UA_STATUSCODE_GOOD) {
-                UA_LOG_INFO_PUBSUB(psm->logging, dsr,
-                                   "Error during Raw-decode KeyFrame field %u: %s",
-                                   (unsigned)i, UA_StatusCode_name(res));
-                return;
-            }
-            valPtr += type->memSize;
-        }
-
-        /* Write the value */
-        if(tv->externalDataValue) {
-            if(tv->beforeWrite)
-                tv->beforeWrite(psm->sc.server, &dsr->head.identifier,
-                                &dsr->linkedReaderGroup->head.identifier,
-                                &tv->targetVariable.targetNodeId,
-                                tv->targetVariableContext, tv->externalDataValue);
-            memcpy((*tv->externalDataValue)->value.data, value, type->memSize);
-            if(tv->afterWrite)
-                tv->afterWrite(psm->sc.server, &dsr->head.identifier,
-                               &dsr->linkedReaderGroup->head.identifier,
-                               &tv->targetVariable.targetNodeId,
-                               tv->targetVariableContext, tv->externalDataValue);
-        } else {
-            UA_WriteValue writeVal;
-            UA_WriteValue_init(&writeVal);
-            writeVal.attributeId = tv->targetVariable.attributeId;
-            writeVal.indexRange = tv->targetVariable.receiverIndexRange;
-            writeVal.nodeId = tv->targetVariable.targetNodeId;
-            if(dsr->config.dataSetMetaData.fields[i].valueRank > 0) {
-                UA_Variant_setArray(&writeVal.value.value, value, elementCount, type);
-            } else {
-                UA_Variant_setScalar(&writeVal.value.value, value, type);
-            }
-            writeVal.value.hasValue = true;
-            Operation_Write(psm->sc.server, &psm->sc.server->adminSession, NULL, &writeVal, &res);
-            if(res != UA_STATUSCODE_GOOD) {
-                UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
-                                      "Error writing KeyFrame field %u: %s",
-                                      (unsigned)i, UA_StatusCode_name(res));
-            }
-        }
-
-        /* Clean up if string-type (with mallocs) was used */
-        if(!type->pointerFree) {
-            valPtr = value;
-            for(size_t cnt = 0; cnt < elementCount; cnt++) {
-                UA_clear(value, type);
-                valPtr += type->memSize;
-            }
-        }
-    }
-}
-
-static void
-UA_DataSetReader_handleMessageReceiveTimeout(UA_PubSubManager *psm,
-                                             UA_DataSetReader *dsr) {
+UA_DataSetReader_handleMessageReceiveTimeout(void *application /* UA_PubSubManager */,
+                                             void *context /* UA_DataSetReader */) {
+    UA_PubSubManager *psm = (UA_PubSubManager*)application;
+    UA_DataSetReader *dsr = (UA_DataSetReader*)context;
     UA_assert(dsr->head.componentType == UA_PUBSUBCOMPONENT_DATASETREADER);
 
     /* Don't signal an error if we don't expect messages to arrive */
@@ -591,61 +901,68 @@ UA_DataSetReader_handleMessageReceiveTimeout(UA_PubSubManager *psm,
 
     UA_LOG_DEBUG_PUBSUB(psm->logging, dsr, "Message receive timeout occurred");
 
-    UA_LOCK(&psm->sc.server->serviceMutex);
+    lockServer(psm->drv.server);
     UA_DataSetReader_setPubSubState(psm, dsr, UA_PUBSUBSTATE_ERROR,
                                     UA_STATUSCODE_BADTIMEOUT);
-    UA_UNLOCK(&psm->sc.server->serviceMutex);
+    unlockServer(psm->drv.server);
 }
 
-void
+UA_Boolean
 UA_DataSetReader_process(UA_PubSubManager *psm, UA_DataSetReader *dsr,
                          UA_DataSetMessage *msg) {
     if(!dsr || !msg || !psm)
-        return;
+        return false;
 
     UA_LOG_DEBUG_PUBSUB(psm->logging, dsr, "Received a network message");
-
-    /* Received a (first) message for the Reader.
-     * Transition from PreOperational to Operational. */
-    if(dsr->head.state == UA_PUBSUBSTATE_PREOPERATIONAL)
-        UA_DataSetReader_setPubSubState(psm, dsr, dsr->head.state, UA_STATUSCODE_GOOD);
 
     if(dsr->head.state != UA_PUBSUBSTATE_OPERATIONAL &&
        dsr->head.state != UA_PUBSUBSTATE_PREOPERATIONAL) {
         UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
                               "Received a network message but not operational");
-        return;
+        return false;
     }
 
     if(!msg->header.dataSetMessageValid) {
         UA_LOG_INFO_PUBSUB(psm->logging, dsr,
                            "DataSetMessage is discarded: message is not valid");
-        return;
+        return false;
     }
 
-    /* TODO: Check ConfigurationVersion */
-    /* if(msg->header.configVersionMajorVersionEnabled) {
-     *     if(msg->header.configVersionMajorVersion !=
-     *            dsr->config.dataSetMetaData.configurationVersion.majorVersion) {
-     *         UA_LOG_WARNING(psm->logging, UA_LOGCATEGORY_SERVER,
-     *                        "DataSetMessage is discarded: ConfigurationVersion "
-     *                        "MajorVersion does not match");
-     *         return;
-     *     }
-     * } */
-
-    if(msg->header.dataSetMessageType != UA_DATASETMESSAGE_DATAKEYFRAME) {
+    /* A version carried by the message has to match the reader metadata.
+     * Omitted version fields are compatible with a statically configured
+     * reader. A mismatch discards only this message: the reader remains ready
+     * for a later message matching its current metadata. */
+    const UA_ConfigurationVersionDataType *expected =
+        &dsr->config.dataSetMetaData.configurationVersion;
+    if(expected->majorVersion != 0 &&
+       msg->header.configVersionMajorVersionEnabled &&
+       msg->header.configVersionMajorVersion != expected->majorVersion) {
         UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
-                              "DataSetMessage is discarded: Only keyframes are supported");
-        return;
+                              "DataSetMessage discarded: ConfigurationVersion "
+                              "MajorVersion does not match");
+        return false;
+    }
+    if(expected->minorVersion != 0 &&
+       msg->header.configVersionMinorVersionEnabled &&
+       msg->header.configVersionMinorVersion != expected->minorVersion) {
+        UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
+                              "DataSetMessage discarded: ConfigurationVersion "
+                              "MinorVersion does not match");
+        return false;
     }
 
-    /* Configure / Update the timeout callback */
+    /* A valid and compatible first message promotes the reader from
+     * PreOperational to Operational. Rejected messages must not do so. */
+    if(dsr->head.state == UA_PUBSUBSTATE_PREOPERATIONAL)
+        UA_DataSetReader_setPubSubState(psm, dsr, dsr->head.state,
+                                        UA_STATUSCODE_GOOD);
+
+    /* Reset receive-timeout monitoring for a compatible message before
+     * handling its payload, including keep-alive and heartbeat messages. */
     if(dsr->config.messageReceiveTimeout > 0.0) {
-        UA_EventLoop *el =
-            UA_PubSubConnection_getEL(psm, dsr->linkedReaderGroup->linkedConnection);
+        UA_EventLoop *el = psm->drv.server->config.eventLoop;
         if(dsr->msgRcvTimeoutTimerId == 0) {
-            el->addTimer(el, (UA_Callback)UA_DataSetReader_handleMessageReceiveTimeout,
+            el->addTimer(el, UA_DataSetReader_handleMessageReceiveTimeout,
                          psm, dsr, dsr->config.messageReceiveTimeout, NULL,
                          UA_TIMERPOLICY_CURRENTTIME, &dsr->msgRcvTimeoutTimerId);
         } else {
@@ -656,148 +973,162 @@ UA_DataSetReader_process(UA_PubSubManager *psm, UA_DataSetReader *dsr,
         }
     }
 
-    /* Process message with raw encoding. We have no field-count information for
-     * the message. */
-    if(msg->header.fieldEncoding == UA_FIELDENCODING_RAWDATA) {
-        DataSetReader_processRaw(psm, dsr, msg);
-        return;
+    UA_Boolean deltaFrame =
+        (msg->header.dataSetMessageType == UA_DATASETMESSAGE_DATADELTAFRAME);
+    if(msg->header.dataSetMessageType != UA_DATASETMESSAGE_DATAKEYFRAME &&
+       !deltaFrame) {
+        UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
+                              "DataSetMessage is discarded: unsupported message type");
+        return msg->header.dataSetMessageType == UA_DATASETMESSAGE_KEEPALIVE;
     }
 
     /* Received a heartbeat with no fields */
-    if(msg->data.keyFrameData.fieldCount == 0)
-        return;
+    if(msg->fieldCount == 0)
+        return true;
 
     /* Check whether the field count matches the configuration */
-    size_t fieldCount = msg->data.keyFrameData.fieldCount;
-    if(dsr->config.dataSetMetaData.fieldsSize != fieldCount) {
-        UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
-                              "Number of fields does not match the "
-                              "DataSetMetaData configuration");
-        return;
-    }
-
-    UA_TargetVariables *tvs =
-        &dsr->config.subscribedDataSet.subscribedDataSetTarget;
-    if(tvs->targetVariablesSize != fieldCount) {
+    UA_TargetVariablesDataType *tvs = &dsr->config.subscribedDataSet.target;
+    if(!deltaFrame && tvs->targetVariablesSize != msg->fieldCount) {
         UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
                               "Number of fields does not match the "
                               "TargetVariables configuration");
-        return;
+        return false;
+    }
+
+    if(deltaFrame) {
+        /* Delta fields can only be matched after a complete key frame. The
+         * configured period also bounds the number of consecutive deltas so a
+         * missing key frame cannot leave the subscriber indefinitely stale. */
+        if(dsr->config.keyFrameCount <= 1 || !dsr->receivedKeyFrame ||
+           dsr->deltaFrameCounter >= dsr->config.keyFrameCount - 1) {
+            UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
+                                  "DataSetMessage is discarded: delta frame "
+                                  "does not match the configured key-frame period");
+            return false;
+        }
+        dsr->deltaFrameCounter++;
+    } else {
+        dsr->receivedKeyFrame = true;
+        dsr->deltaFrameCounter = 0;
+    }
+
+    if(dsr->lastUsableValuesSize != tvs->targetVariablesSize) {
+        clearLastUsableValues(dsr);
+        if(tvs->targetVariablesSize > 0) {
+            dsr->lastUsableValues = (UA_DataValue*)
+                UA_Array_new(tvs->targetVariablesSize,
+                             &UA_TYPES[UA_TYPES_DATAVALUE]);
+            if(!dsr->lastUsableValues) {
+                UA_DataSetReader_setPubSubState(psm, dsr, UA_PUBSUBSTATE_ERROR,
+                                                UA_STATUSCODE_BADOUTOFMEMORY);
+                return false;
+            }
+            dsr->lastUsableValuesSize = tvs->targetVariablesSize;
+        }
     }
 
     /* Write the message fields. RT has the external data value configured. */
     UA_StatusCode res = UA_STATUSCODE_GOOD;
-    for(size_t i = 0; i < fieldCount; i++) {
-        UA_FieldTargetVariable *tv = &tvs->targetVariables[i];
-        UA_DataValue *field = &msg->data.keyFrameData.dataSetFields[i];
-        if(!field->hasValue)
-            continue;
-
-        /* RT-path: write directly into the target memory */
-        if(tv->externalDataValue) {
-            if(field->value.type != (*tv->externalDataValue)->value.type) {
-                UA_LOG_WARNING_PUBSUB(psm->logging, dsr, "Mismatching type");
-                continue;
+    for(size_t i = 0; i < msg->fieldCount; i++) {
+        size_t targetIndex = i;
+        UA_DataValue *field = NULL;
+        if(deltaFrame) {
+            targetIndex = msg->data.deltaFrameFields[i].index;
+            field = &msg->data.deltaFrameFields[i].value;
+            if(targetIndex >= tvs->targetVariablesSize) {
+                UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
+                                      "Delta-frame field index is outside the "
+                                      "TargetVariables configuration");
+                return false;
             }
+        } else {
+            field = &msg->data.keyFrameFields[i];
+        }
+        UA_FieldTargetDataType *tv = &tvs->targetVariables[targetIndex];
 
-            if(tv->beforeWrite)
-                tv->beforeWrite(psm->sc.server, &dsr->head.identifier,
-                                &dsr->linkedReaderGroup->head.identifier,
-                                &tv->targetVariable.targetNodeId,
-                                tv->targetVariableContext, tv->externalDataValue);
-            memcpy((*tv->externalDataValue)->value.data,
-                   field->value.data, field->value.type->memSize);
-            if(tv->afterWrite)
-                tv->afterWrite(psm->sc.server, &dsr->head.identifier,
-                               &dsr->linkedReaderGroup->head.identifier,
-                               &tv->targetVariable.targetNodeId,
-                               tv->targetVariableContext, tv->externalDataValue);
+        /* Replace missing or Bad input with an owned fallback value. Keep
+         * usable received values, including Uncertain values, borrowed. */
+        UA_DataValue writeValue = *field;
+        UA_Boolean bad = !field->hasValue ||
+            (field->hasStatus && UA_StatusCode_isBad(field->status));
+        UA_Boolean fromReceivedValue = !bad;
+        UA_DataValue fallback;
+        UA_DataValue_init(&fallback);
+        if(bad) {
+            UA_StatusCode badStatus = (field->hasStatus &&
+                UA_StatusCode_isBad(field->status)) ? field->status :
+                UA_STATUSCODE_BADNODATAAVAILABLE;
+            res = getTargetFallback(psm, dsr, targetIndex, badStatus, &fallback);
+            if(res != UA_STATUSCODE_GOOD) {
+                UA_DataValue_clear(&fallback);
+                UA_DataSetReader_setPubSubState(psm, dsr, UA_PUBSUBSTATE_ERROR, res);
+                return false;
+            }
+            writeValue = fallback;
+        }
+
+        /* ReceiverIndexRange selects from the received value before the
+         * selected data is written to WriteIndexRange on the target. */
+        UA_Variant rangedValue;
+        UA_Variant_init(&rangedValue);
+        if(fromReceivedValue && tv->receiverIndexRange.length > 0) {
+            UA_NumericRange range;
+            memset(&range, 0, sizeof(range));
+            res = UA_NumericRange_parse(&range, tv->receiverIndexRange);
+            if(res == UA_STATUSCODE_GOOD)
+                res = UA_Variant_copyRange(&writeValue.value, &rangedValue, range);
+            UA_free(range.dimensions);
+            if(res != UA_STATUSCODE_GOOD) {
+                UA_LOG_INFO_PUBSUB(psm->logging, dsr,
+                                   "Invalid ReceiverIndexRange for field %u: %s",
+                                   (unsigned)targetIndex, UA_StatusCode_name(res));
+                UA_DataSetReader_setPubSubState(psm, dsr, UA_PUBSUBSTATE_ERROR, res);
+                UA_DataValue_clear(&fallback);
+                UA_Variant_clear(&rangedValue);
+                return false;
+            }
+            writeValue.value = rangedValue;
+            writeValue.hasValue = true;
+        }
+
+        /* Write the selected value through the Write service. WriteIndexRange
+         * selects the target elements; ReceiverIndexRange was applied to the
+         * input. */
+        UA_WriteValue writeVal;
+        UA_WriteValue_init(&writeVal);
+        writeVal.attributeId = tv->attributeId;
+        writeVal.indexRange = tv->writeIndexRange;
+        writeVal.nodeId = tv->targetNodeId;
+        writeVal.value = writeValue;
+        Operation_Write(psm->drv.server, &psm->drv.server->adminSession, &writeVal, &res);
+        if(res != UA_STATUSCODE_GOOD) {
+            UA_LOG_INFO_PUBSUB(psm->logging, dsr,
+                               "Error writing KeyFrame field %u: %s",
+                               (unsigned)targetIndex, UA_StatusCode_name(res));
+            UA_DataValue_clear(&fallback);
+            UA_Variant_clear(&rangedValue);
+            /* A target-specific write rejection must not disable the complete
+             * reader. Later messages (or other targets in this message) may
+             * still be writable. */
             continue;
         }
 
-        /* Write via the Write-Service */
-        UA_WriteValue writeVal;
-        UA_WriteValue_init(&writeVal);
-        writeVal.attributeId = tv->targetVariable.attributeId;
-        writeVal.indexRange = tv->targetVariable.receiverIndexRange;
-        writeVal.nodeId = tv->targetVariable.targetNodeId;
-        writeVal.value = *field;
-        Operation_Write(psm->sc.server, &psm->sc.server->adminSession,
-                        NULL, &writeVal, &res);
-        if(res != UA_STATUSCODE_GOOD)
-            UA_LOG_INFO_PUBSUB(psm->logging, dsr,
-                               "Error writing KeyFrame field %u: %s",
-                               (unsigned)i, UA_StatusCode_name(res));
+        /* Retain an owned copy only for usable received values. */
+        if(fromReceivedValue) {
+            UA_DataValue_clear(&dsr->lastUsableValues[targetIndex]);
+            res = UA_DataValue_copy(&writeValue,
+                                    &dsr->lastUsableValues[targetIndex]);
+            if(res != UA_STATUSCODE_GOOD) {
+                UA_DataValue_clear(&fallback);
+                UA_Variant_clear(&rangedValue);
+                UA_DataSetReader_setPubSubState(psm, dsr, UA_PUBSUBSTATE_ERROR, res);
+                return false;
+            }
+        }
+        UA_DataValue_clear(&fallback);
+        UA_Variant_clear(&rangedValue);
     }
-}
-
-UA_StatusCode
-UA_DataSetReader_prepareOffsetBuffer(Ctx *ctx, UA_DataSetReader *reader,
-                                     UA_ByteString *buf) {
-    UA_NetworkMessage *nm = (UA_NetworkMessage *)
-        UA_calloc(1, sizeof(UA_NetworkMessage));
-    if(!nm)
-        return UA_STATUSCODE_BADOUTOFMEMORY;
-
-    /* Decode using the non-rt decoding */
-    UA_StatusCode rv = UA_NetworkMessage_decodeHeaders(ctx, nm);
-    if(rv != UA_STATUSCODE_GOOD) {
-        UA_NetworkMessage_clear(nm);
-        UA_free(nm);
-        return rv;
-    }
-    rv |= UA_NetworkMessage_decodePayload(ctx, nm);
-    rv |= UA_NetworkMessage_decodeFooters(ctx, nm);
-    if(rv != UA_STATUSCODE_GOOD) {
-        UA_NetworkMessage_clear(nm);
-        UA_free(nm);
-        return rv;
-    }
-
-    /* Compute and store the offsets necessary to decode */
-    size_t nmSize =
-        UA_NetworkMessage_calcSizeBinaryWithOffsetBuffer(nm, &reader->bufferedMessage);
-    if(nmSize == 0) {
-        UA_NetworkMessage_clear(nm);
-        UA_free(nm);
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    /* Set the offset buffer in the reader */
-    reader->bufferedMessage.nm = nm;
-    return UA_STATUSCODE_GOOD;
-}
-
-void
-UA_DataSetReader_decodeAndProcessRT(UA_PubSubManager *psm, UA_DataSetReader *dsr,
-                                    UA_ByteString buf) {
-    /* Set up the decoding context */
-    Ctx ctx;
-    ctx.pos = buf.data;
-    ctx.end = buf.data + buf.length;
-    ctx.depth = 0;
-    memset(&ctx.opts, 0, sizeof(UA_DecodeBinaryOptions));
-    ctx.opts.customTypes = psm->sc.server->config.customDataTypes;
-
-    UA_StatusCode rv;
-    if(!dsr->bufferedMessage.nm) {
-        /* This is the first message being received for the RT fastpath.
-         * Prepare the offset buffer. */
-        rv = UA_DataSetReader_prepareOffsetBuffer(&ctx, dsr, &buf);
-    } else {
-        /* Decode with offset information and update the networkMessage */
-        rv = UA_NetworkMessage_updateBufferedNwMessage(&ctx, &dsr->bufferedMessage);
-    }
-    if(rv != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING_PUBSUB(psm->logging, dsr,
-                              "PubSub decoding failed. Could not decode with "
-                              "status code %s.", UA_StatusCode_name(rv));
-        return;
-    }
-
-    UA_DataSetMessage *dsm =
-        dsr->bufferedMessage.nm->payload.dataSetPayload.dataSetMessages;
-    UA_DataSetReader_process(psm, dsr, dsm);
+    return true;
 }
 
 /**************/
@@ -805,29 +1136,28 @@ UA_DataSetReader_decodeAndProcessRT(UA_PubSubManager *psm, UA_DataSetReader *dsr
 /**************/
 
 UA_StatusCode
-UA_Server_addDataSetReader(UA_Server *server, UA_NodeId readerGroupIdentifier,
-                           const UA_DataSetReaderConfig *dataSetReaderConfig,
-                           UA_NodeId *readerIdentifier) {
-    if(!server || !dataSetReaderConfig)
+UA_Server_addDataSetReader(UA_Server *server, UA_NodeId readerGroupId,
+                           const UA_DataSetReaderConfig *config,
+                           UA_NodeId *dsrId) {
+    if(!server || !config)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_StatusCode res =
-        UA_DataSetReader_create(getPSM(server), readerGroupIdentifier,
-                                dataSetReaderConfig, readerIdentifier);
-    UA_UNLOCK(&server->serviceMutex);
+        UA_DataSetReader_create(getPSM(server), readerGroupId, config, dsrId);
+    unlockServer(server);
     return res;
 }
 
 UA_StatusCode
-UA_Server_removeDataSetReader(UA_Server *server, UA_NodeId readerIdentifier) {
+UA_Server_removeDataSetReader(UA_Server *server, const UA_NodeId readerId) {
     if(!server)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_PubSubManager *psm = getPSM(server);
-    UA_DataSetReader *dsr = UA_DataSetReader_find(psm, readerIdentifier);
+    UA_DataSetReader *dsr = UA_DataSetReader_find(psm, readerId);
     UA_StatusCode res = (dsr) ?
         UA_DataSetReader_remove(psm, dsr) : UA_STATUSCODE_BADNOTFOUND;
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
@@ -836,12 +1166,12 @@ UA_Server_getDataSetReaderConfig(UA_Server *server, const UA_NodeId dsrId,
                                  UA_DataSetReaderConfig *config) {
     if(!server || !config)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_PubSubManager *psm = getPSM(server);
     UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dsrId);
     UA_StatusCode res = (dsr) ?
         UA_DataSetReaderConfig_copy(&dsr->config, config) : UA_STATUSCODE_BADNOTFOUND;
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
@@ -850,14 +1180,14 @@ UA_Server_getDataSetReaderState(UA_Server *server, const UA_NodeId dsrId,
                                 UA_PubSubState *state) {
     if(!server || !state)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_DataSetReader *dsr = UA_DataSetReader_find(getPSM(server), dsrId);
     UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
     if(dsr) {
         res = UA_STATUSCODE_GOOD;
         *state = dsr->head.state;
     }
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return res;
 }
 
@@ -865,7 +1195,7 @@ UA_StatusCode
 UA_Server_enableDataSetReader(UA_Server *server, const UA_NodeId dsrId) {
     if(!server)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_StatusCode ret = UA_STATUSCODE_GOOD;
     UA_PubSubManager *psm = getPSM(server);
     UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dsrId);
@@ -874,7 +1204,7 @@ UA_Server_enableDataSetReader(UA_Server *server, const UA_NodeId dsrId) {
                                         UA_STATUSCODE_GOOD);
     else
         ret = UA_STATUSCODE_BADNOTFOUND;
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return ret;
 }
 
@@ -882,7 +1212,7 @@ UA_StatusCode
 UA_Server_disableDataSetReader(UA_Server *server, const UA_NodeId dsrId) {
     if(!server)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_StatusCode ret = UA_STATUSCODE_GOOD;
     UA_PubSubManager *psm = getPSM(server);
     UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dsrId);
@@ -891,21 +1221,383 @@ UA_Server_disableDataSetReader(UA_Server *server, const UA_NodeId dsrId) {
                                         UA_STATUSCODE_GOOD);
     else
         ret = UA_STATUSCODE_BADNOTFOUND;
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     return ret;
 }
 
 UA_StatusCode
 UA_Server_setDataSetReaderTargetVariables(UA_Server *server, const UA_NodeId dsrId,
-                                          size_t tvsSize, const UA_FieldTargetVariable *tvs) {
+                                          size_t targetVariablesSize,
+                                          const UA_FieldTargetDataType *targetVariables) {
     if(!server)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     UA_PubSubManager *psm = getPSM(server);
     UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dsrId);
     UA_StatusCode res = (dsr) ?
-        DataSetReader_createTargetVariables(psm, dsr, tvsSize, tvs) : UA_STATUSCODE_BADNOTFOUND;
-    UA_UNLOCK(&server->serviceMutex);
+        DataSetReader_createTargetVariables(psm, dsr, targetVariablesSize,
+                                            targetVariables) : UA_STATUSCODE_BADNOTFOUND;
+    unlockServer(server);
+    return res;
+}
+
+UA_StatusCode
+UA_Server_updateDataSetReaderConfig(UA_Server *server, const UA_NodeId dsrId,
+                                    const UA_DataSetReaderConfig *config) {
+    if(!server || !config)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+
+    lockServer(server);
+    UA_PubSubManager *psm = getPSM(server);
+    UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dsrId);
+    if(!dsr) {
+        unlockServer(server);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    if(UA_PubSubState_isEnabled(dsr->head.state)) {
+        UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
+                            "The DataSetReader must be disabled to update the config");
+        unlockServer(server);
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    /* Store the old config */
+    UA_DataSetReaderConfig oldConfig = dsr->config;
+    UA_Boolean standaloneChanged =
+        !UA_String_equal(&config->linkedStandaloneSubscribedDataSetName,
+                         &oldConfig.linkedStandaloneSubscribedDataSetName);
+
+    /* disconnectDSR2Standalone resolves the SDS through the current config,
+     * so this must happen before replacing that config. */
+    if(standaloneChanged)
+        disconnectDSR2Standalone(psm, dsr);
+
+    /* Copy the config into the new dataSetReader */
+    UA_StatusCode retVal = UA_DataSetReaderConfig_copy(config, &dsr->config);
+    if(retVal != UA_STATUSCODE_GOOD)
+        goto errout;
+
+    /* Change the connection to a StandaloneSubscribedDataSet */
+    if(standaloneChanged) {
+        retVal = connectDSR2Standalone(psm, dsr);
+        if(retVal != UA_STATUSCODE_GOOD)
+            goto errout;
+    }
+
+    /* Validate the new config */
+    retVal = validateDSRConfig(psm, dsr);
+    if(retVal != UA_STATUSCODE_GOOD)
+        goto errout;
+
+    /* Clean up and return */
+    UA_DataSetReaderConfig_clear(&oldConfig);
+    clearLastUsableValues(dsr);
+    clearSequences(dsr);
+    unlockServer(server);
+    return UA_STATUSCODE_GOOD;
+
+    /* Fall back to the old config */
+ errout:
+    UA_DataSetReaderConfig_clear(&dsr->config);
+    dsr->config = oldConfig;
+    if(standaloneChanged) {
+        UA_StatusCode reconnect = connectDSR2Standalone(psm, dsr);
+        if(reconnect != UA_STATUSCODE_GOOD) {
+            UA_LOG_ERROR_PUBSUB(psm->logging, dsr,
+                                "Failed to restore StandaloneSubscribedDataSet "
+                                "after rejected config update");
+            retVal = reconnect;
+        }
+    }
+    unlockServer(server);
+    return retVal;
+}
+
+/**********************/
+/* Offset Computation */
+/**********************/
+
+static UA_StatusCode
+UA_PubSubDataSetReader_generateKeyFrameMessage(UA_Server *server,
+                                               UA_DataSetMessage *dsm,
+                                               UA_DataSetReader *dsr) {
+    /* Prepare DataSetMessageContent */
+    UA_TargetVariablesDataType *tv = &dsr->config.subscribedDataSet.target;
+    UA_DataSetMetaDataType *metaData = &dsr->config.dataSetMetaData;
+    if(tv->targetVariablesSize != metaData->fieldsSize)
+        metaData = NULL;
+    dsm->header.dataSetMessageValid = true;
+    dsm->header.dataSetMessageType = UA_DATASETMESSAGE_DATAKEYFRAME;
+    dsm->fieldCount = (UA_UInt16) tv->targetVariablesSize;
+    dsm->data.keyFrameFields = (UA_DataValue *)
+            UA_Array_new(tv->targetVariablesSize, &UA_TYPES[UA_TYPES_DATAVALUE]);
+    if(!dsm->data.keyFrameFields)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+
+     for(size_t counter = 0; counter < tv->targetVariablesSize; counter++) {
+        /* Read the value and set the source in the reader config */
+        UA_DataValue *dfv = &dsm->data.keyFrameFields[counter];
+        UA_FieldTargetDataType *ftv = &tv->targetVariables[counter];
+
+        /* Synthesize the field value from the FieldMetaData. This allows us to
+         * prevent a read from the information model during startup. */
+        UA_FieldMetaData *fieldMetaData = (metaData) ? &metaData->fields[counter] : NULL;
+        if(fieldMetaData && fieldMetaData->valueRank == UA_VALUERANK_SCALAR) {
+            const UA_DataType *type =
+                UA_findDataTypeWithCustom(&fieldMetaData->dataType,
+                                          server->config.customDataTypes);
+            if(type == &UA_TYPES[UA_TYPES_STRING] && fieldMetaData->maxStringLength > 0) {
+                UA_String *s = UA_String_new();
+                if(!s) {
+                    UA_DataSetMessage_clear(dsm);
+                    return UA_STATUSCODE_BADOUTOFMEMORY;
+                }
+                s->data = (UA_Byte*)
+                    UA_calloc(fieldMetaData->maxStringLength, sizeof(UA_Byte));
+                if(!s->data) {
+                    UA_free(s);
+                    UA_DataSetMessage_clear(dsm);
+                    return UA_STATUSCODE_BADOUTOFMEMORY;
+                }
+                s->length = fieldMetaData->maxStringLength;
+                UA_Variant_setScalar(&dfv->value, s, type);
+                dfv->hasValue = true;
+            } else if(type && type->memSize < 512) {
+                char buf[512];
+                UA_init(buf, type);
+                UA_StatusCode res = UA_Variant_setScalarCopy(&dfv->value, buf, type);
+                if(res != UA_STATUSCODE_GOOD) {
+                    UA_DataSetMessage_clear(dsm);
+                    return res;
+                }
+                dfv->hasValue = true;
+            }
+        }
+
+        /* Read the value from the information model */
+        if(!dfv->hasValue) {
+            UA_ReadValueId rvi;
+            UA_ReadValueId_init(&rvi);
+            rvi.nodeId = ftv->targetNodeId;
+            rvi.attributeId = ftv->attributeId;
+            rvi.indexRange = ftv->writeIndexRange;
+            *dfv = readWithSession(server, &server->adminSession, &rvi,
+                                   UA_TIMESTAMPSTORETURN_NEITHER);
+        }
+
+        /* Deactivate statuscode? */
+        if(((u64)dsr->config.dataSetFieldContentMask &
+            (u64)UA_DATASETFIELDCONTENTMASK_STATUSCODE) == 0)
+            dfv->hasStatus = false;
+
+        /* Deactivate timestamps */
+        if(((u64)dsr->config.dataSetFieldContentMask &
+            (u64)UA_DATASETFIELDCONTENTMASK_SOURCETIMESTAMP) == 0)
+            dfv->hasSourceTimestamp = false;
+        if(((u64)dsr->config.dataSetFieldContentMask &
+            (u64)UA_DATASETFIELDCONTENTMASK_SOURCEPICOSECONDS) == 0)
+            dfv->hasSourcePicoseconds = false;
+        if(((u64)dsr->config.dataSetFieldContentMask &
+            (u64)UA_DATASETFIELDCONTENTMASK_SERVERTIMESTAMP) == 0)
+            dfv->hasServerTimestamp = false;
+        if(((u64)dsr->config.dataSetFieldContentMask &
+            (u64)UA_DATASETFIELDCONTENTMASK_SERVERPICOSECONDS) == 0)
+            dfv->hasServerPicoseconds = false;
+    }
+
+    return UA_STATUSCODE_GOOD;
+}
+
+/* Generate a DataSetMessage for the given reader. */
+UA_StatusCode
+UA_DataSetReader_generateDataSetMessage(UA_Server *server,
+                                        UA_DataSetMessage *dsm,
+                                        UA_DataSetReader *dsr) {
+    /* Support only for UADP configuration
+     * TODO: JSON encoding if UA_DataSetReader_generateDataSetMessage used other
+     * that RT configuration */
+
+    UA_ExtensionObject *settings = &dsr->config.messageSettings;
+    if(settings->content.decoded.type != &UA_TYPES[UA_TYPES_UADPDATASETREADERMESSAGEDATATYPE])
+        return UA_STATUSCODE_BADNOTSUPPORTED;
+
+    /* The configuration Flags are included inside the std. defined
+     * UA_UadpDataSetReaderMessageDataType */
+    UA_UadpDataSetReaderMessageDataType defaultUadpConfiguration;
+    UA_UadpDataSetReaderMessageDataType *dsrMessageDataType =
+        (UA_UadpDataSetReaderMessageDataType*) settings->content.decoded.data;
+
+    if(!(settings->encoding == UA_EXTENSIONOBJECT_DECODED ||
+         settings->encoding == UA_EXTENSIONOBJECT_DECODED_NODELETE) ||
+       !dsrMessageDataType->dataSetMessageContentMask) {
+        /* Create default flag configuration if no dataSetMessageContentMask or
+         * even messageSettings in UadpDataSetWriterMessageDataType was
+         * passed. */
+        memset(&defaultUadpConfiguration, 0, sizeof(UA_UadpDataSetReaderMessageDataType));
+        defaultUadpConfiguration.dataSetMessageContentMask = (UA_UadpDataSetMessageContentMask)
+            ((u64)UA_UADPDATASETMESSAGECONTENTMASK_TIMESTAMP |
+             (u64)UA_UADPDATASETMESSAGECONTENTMASK_MAJORVERSION |
+             (u64)UA_UADPDATASETMESSAGECONTENTMASK_MINORVERSION);
+        dsrMessageDataType = &defaultUadpConfiguration;
+    }
+
+    /* The field encoding depends on the flags inside the reader config. */
+    if(dsr->config.dataSetFieldContentMask & (u64)UA_DATASETFIELDCONTENTMASK_RAWDATA) {
+        dsm->header.fieldEncoding = UA_FIELDENCODING_RAWDATA;
+    } else if((u64)dsr->config.dataSetFieldContentMask &
+              ((u64)UA_DATASETFIELDCONTENTMASK_SOURCETIMESTAMP |
+               (u64)UA_DATASETFIELDCONTENTMASK_SERVERPICOSECONDS |
+               (u64)UA_DATASETFIELDCONTENTMASK_SOURCEPICOSECONDS |
+               (u64)UA_DATASETFIELDCONTENTMASK_STATUSCODE)) {
+        dsm->header.fieldEncoding = UA_FIELDENCODING_DATAVALUE;
+    } else {
+        dsm->header.fieldEncoding = UA_FIELDENCODING_VARIANT;
+    }
+
+    /* Std: 'The DataSetMessageContentMask defines the flags for the content
+     * of the DataSetMessage header.' */
+    if((u64)dsrMessageDataType->dataSetMessageContentMask &
+       (u64)UA_UADPDATASETMESSAGECONTENTMASK_MAJORVERSION) {
+        dsm->header.configVersionMajorVersionEnabled = true;
+        dsm->header.configVersionMajorVersion =
+            dsr->config.dataSetMetaData.configurationVersion.majorVersion;
+    }
+
+    if((u64)dsrMessageDataType->dataSetMessageContentMask &
+       (u64)UA_UADPDATASETMESSAGECONTENTMASK_MINORVERSION) {
+        dsm->header.configVersionMinorVersionEnabled = true;
+        dsm->header.configVersionMinorVersion =
+            dsr->config.dataSetMetaData.configurationVersion.minorVersion;
+    }
+
+    if((u64)dsrMessageDataType->dataSetMessageContentMask &
+       (u64)UA_UADPDATASETMESSAGECONTENTMASK_SEQUENCENUMBER) {
+        /* Will be modified when subscriber receives new nw msg */
+        dsm->header.dataSetMessageSequenceNrEnabled = true;
+        dsm->header.dataSetMessageSequenceNr = 1;
+    }
+
+    if((u64)dsrMessageDataType->dataSetMessageContentMask &
+       (u64)UA_UADPDATASETMESSAGECONTENTMASK_TIMESTAMP) {
+        dsm->header.timestampEnabled = true;
+        dsm->header.timestamp = UA_DateTime_now();
+    }
+
+    if((u64)dsrMessageDataType->dataSetMessageContentMask &
+       (u64)UA_UADPDATASETMESSAGECONTENTMASK_PICOSECONDS)
+        dsm->header.picoSecondsIncluded = false;
+
+    if((u64)dsrMessageDataType->dataSetMessageContentMask &
+       (u64)UA_UADPDATASETMESSAGECONTENTMASK_STATUS)
+        dsm->header.statusEnabled = true;
+
+    /* Not supported for Delta frames atm */
+    return UA_PubSubDataSetReader_generateKeyFrameMessage(server, dsm, dsr);
+}
+
+
+UA_StatusCode
+UA_Server_computeDataSetReaderOffsetTable(UA_Server *server,
+                                          const UA_NodeId dataSetReaderId,
+                                          UA_PubSubOffsetTable *ot) {
+    /* Validate the arguments */
+    if(!server || !ot)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+
+    lockServer(server);
+
+    /* Get the DataSetReader */
+    UA_PubSubManager *psm = getPSM(server);
+    UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dataSetReaderId);
+    if(!dsr) {
+        unlockServer(server);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    /* Generate the DataSetMessage */
+    UA_DataSetMessage dsm;
+    memset(&dsm, 0, sizeof(UA_DataSetMessage));
+    UA_StatusCode res = UA_DataSetReader_generateDataSetMessage(server, &dsm, dsr);
+    if(res != UA_STATUSCODE_GOOD) {
+        unlockServer(server);
+        return res;
+    }
+
+    /* Reset the OffsetTable */
+    memset(ot, 0, sizeof(UA_PubSubOffsetTable));
+
+    /* Prepare the encoding context */
+    UA_DataSetMessage_EncodingMetaData emd;
+    memset(&emd, 0, sizeof(UA_DataSetMessage_EncodingMetaData));
+    emd.dataSetWriterId = dsr->config.dataSetWriterId;
+    emd.fields = dsr->config.dataSetMetaData.fields;
+    emd.fieldsSize = dsr->config.dataSetMetaData.fieldsSize;
+
+    PubSubEncodeCtx ctx;
+    memset(&ctx, 0, sizeof(PubSubEncodeCtx));
+    ctx.ot = ot;
+    ctx.eo.metaData = &emd;
+    ctx.eo.metaDataSize = 1;
+
+    /* Compute the offset */
+    size_t fieldindex = 0;
+    UA_FieldTargetDataType *tv = NULL;
+    size_t msgSize = UA_DataSetMessage_calcSizeBinary(&ctx, &emd, &dsm, 0);
+    if(msgSize == 0) {
+        res = UA_STATUSCODE_BADINTERNALERROR;
+        goto errout;
+    }
+
+    /* Allocate the message */
+    res = UA_ByteString_allocBuffer(&ot->networkMessage, msgSize);
+    if(res != UA_STATUSCODE_GOOD)
+        goto errout;
+
+    /* Create the ByteString of the encoded DataSetMessage */
+    ctx.ctx.pos = ot->networkMessage.data;
+    ctx.ctx.end = ot->networkMessage.data + ot->networkMessage.length;
+    res = UA_DataSetMessage_encodeBinary(&ctx, &emd, &dsm);
+    if(res != UA_STATUSCODE_GOOD)
+        goto errout;
+
+    /* Pick up the component NodeIds */
+    for(size_t i = 0; i < ot->offsetsSize; i++) {
+        UA_PubSubOffset *o = &ot->offsets[i];
+        switch(o->offsetType) {
+        case UA_PUBSUBOFFSETTYPE_DATASETMESSAGE_SEQUENCENUMBER:
+        case UA_PUBSUBOFFSETTYPE_DATASETMESSAGE_STATUS:
+        case UA_PUBSUBOFFSETTYPE_DATASETMESSAGE_TIMESTAMP:
+        case UA_PUBSUBOFFSETTYPE_DATASETMESSAGE_PICOSECONDS:
+            res |= UA_NodeId_copy(&dsr->head.identifier, &o->component);
+            break;
+        case UA_PUBSUBOFFSETTYPE_DATASETFIELD_DATAVALUE:
+            tv = &dsr->config.subscribedDataSet.target.targetVariables[fieldindex];
+            res |= UA_NodeId_copy(&tv->targetNodeId, &o->component);
+            fieldindex++;
+            break;
+        case UA_PUBSUBOFFSETTYPE_DATASETFIELD_VARIANT:
+            tv = &dsr->config.subscribedDataSet.target.targetVariables[fieldindex];
+            res |= UA_NodeId_copy(&tv->targetNodeId, &o->component);
+            fieldindex++;
+            break;
+        case UA_PUBSUBOFFSETTYPE_DATASETFIELD_RAW:
+            tv = &dsr->config.subscribedDataSet.target.targetVariables[fieldindex];
+            res |= UA_NodeId_copy(&tv->targetNodeId, &o->component);
+            fieldindex++;
+            break;
+        default:
+            res = UA_STATUSCODE_BADINTERNALERROR;
+            break;
+        }
+    }
+
+    /* Clean up */
+ errout:
+    UA_DataSetMessage_clear(&dsm);
+    if(res != UA_STATUSCODE_GOOD)
+        UA_PubSubOffsetTable_clear(ot);
+    unlockServer(server);
     return res;
 }
 

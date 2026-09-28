@@ -11,7 +11,10 @@ open62541 Documentation
    client
    pubsub
    tutorials
+   security/index
    common
+   util
    nodeset_compiler
    statuscodes
    plugin
+   driver

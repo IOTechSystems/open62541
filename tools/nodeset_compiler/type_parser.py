@@ -3,16 +3,15 @@ import codecs
 import csv
 import json
 import xml.etree.ElementTree as etree
+import xml.dom.minidom as dom
 import copy
 import re
 from collections import OrderedDict
-import sys
-import xml.dom.minidom as dom
 
 try:
-    from opaque_type_mapping import get_base_type_for_opaque as get_base_type_for_opaque_ns0
+    from .opaque_type_mapping import get_base_type_for_opaque as get_base_type_for_opaque_ns0
 except ImportError:
-    from nodeset_compiler.opaque_type_mapping import get_base_type_for_opaque as get_base_type_for_opaque_ns0
+    from .nodeset_compiler.opaque_type_mapping import get_base_type_for_opaque as get_base_type_for_opaque_ns0
 
 builtin_types = ["Boolean", "SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32",
                  "Int64", "UInt64", "Float", "Double", "String", "DateTime", "Guid",
@@ -46,8 +45,7 @@ class TypeNotDefinedException(Exception):
 def get_base_type_for_opaque(name):
     if name in user_opaque_type_mapping:
         return user_opaque_type_mapping[name]
-    else:
-        return get_base_type_for_opaque_ns0(name)
+    return get_base_type_for_opaque_ns0(name)
 
 def get_type_name(xml_type_name):
     [namespace, type_name] = xml_type_name.split(':', 1)
@@ -59,11 +57,9 @@ def get_type_for_name(xml_type_name, types, xmlNamespaces):
     if resultNs == 'http://opcfoundation.org/BinarySchema/':
         resultNs = 'http://opcfoundation.org/UA/'
     if resultNs not in types:
-        raise TypeNotDefinedException("Unknown namespace: '{resultNs}'".format(
-            resultNs=resultNs))
+        raise TypeNotDefinedException(f"Unknown namespace: '{resultNs}'")
     if member_type_name not in types[resultNs]:
-        raise TypeNotDefinedException("Unknown type: '{type}'".format(
-            type=member_type_name))
+        raise TypeNotDefinedException(f"Unknown type: '{member_type_name}'")
     return types[resultNs][member_type_name]
 
 
@@ -79,6 +75,7 @@ class Type:
         self.description = ""
         self.nodeId = None
         self.binaryEncodingId = None
+        self.xmlEncodingId = None
         if xml is not None:
             for child in xml:
                 if child.tag == "{http://opcfoundation.org/BinarySchema/}Documentation":
@@ -98,7 +95,7 @@ class EnumerationType(Type):
         Type.__init__(self, outname, xml, namespace)
         self.pointerfree = True
         self.elements = OrderedDict()
-        self.isOptionSet = True if xml.get("IsOptionSet", "false") == "true" else False
+        self.isOptionSet = bool(xml.get("IsOptionSet", "false") == "true")
         self.lengthInBits = 0
         try:
             self.lengthInBits = int(xml.get("LengthInBits", "32"))
@@ -113,7 +110,7 @@ class EnumerationType(Type):
         self.strTypeIndex = "UA_TYPES_INT32"
 
         # special handling for OptionSet datatype (bitmask)
-        if self.isOptionSet == True:
+        if self.isOptionSet is True:
             if self.lengthInBits <= 8:
                 self.strDataType = "UA_Byte"
                 self.strTypeKind = "UA_DATATYPEKIND_BYTE"
@@ -164,7 +161,7 @@ class StructType(Type):
         typename = type_aliases.get(xml.get("Name"), xml.get("Name"))
 
         bt = xml.get("BaseType")
-        self.is_union = True if bt and get_type_name(bt)[1] == "Union" else False
+        self.is_union = bool(bt and get_type_name(bt)[1] == "Union")
         for child in xml:
             length_field = child.get("LengthField")
             if length_field:
@@ -187,13 +184,10 @@ class StructType(Type):
             if self.is_union and child.get("Name") in switch_fields:
                 continue
             switch_field = child.get("SwitchField")
-            if switch_field and switch_field in optional_fields:
-                member_is_optional = True
-            else:
-                member_is_optional = False
+            member_is_optional = (switch_field and switch_field in optional_fields)
             member_name = child.get("Name")
             member_name = member_name[:1].lower() + member_name[1:]
-            is_array = True if child.get("LengthField") else False
+            is_array = bool(child.get("LengthField"))
 
             member_type_name = get_type_name(child.get("TypeName"))[1]
             if member_type_name == typename: # If a type contains itself, use self as member_type
@@ -246,7 +240,7 @@ class TypeParser():
             for child in element:
                 if child.tag == "{http://opcfoundation.org/BinarySchema/}Field":
                     childname = get_type_name(child.get("TypeName"))[1]
-                    if childname != "Bit" and childname != parentname:
+                    if childname not in ("Bit", parentname):
                         try:
                             get_type_for_name(child.get("TypeName"), types, xmlNamespaces)
                         except TypeNotDefinedException:
@@ -279,8 +273,7 @@ class TypeParser():
                     elif child.get("Name") == "Reserved1":
                         if len(opt_fields) + int(child.get("Length")) != 32:
                             return False
-                        else:
-                            break
+                        break
                     else:
                         return False
                 else:
@@ -412,7 +405,7 @@ class CSVBSDTypeParser(TypeParser):
             for ns in self.types:
                 for t in self.types[ns]:
                     if isinstance(self.types[ns][t], BuiltinType):
-                       del self.existing_types[ns][t]
+                        del self.existing_types[ns][t]
 
         # parse the new types
         for f in self.type_bsd:
@@ -446,10 +439,44 @@ class CSVBSDTypeParser(TypeParser):
         dataTypeNodes = nodeset.getElementsByTagName("UADataType")
         for nd in dataTypeNodes:
             if nd.hasAttribute("SymbolicName"):
-                # Remove any digit and the colon
-                result_string = re.sub(r'\d|:', '', nd.attributes["BrowseName"].nodeValue)
+                # Remove the optional namespace index prefix.
+                result_string = re.sub(r'^\d+:', '', nd.attributes["BrowseName"].nodeValue)
                 table[nd.attributes["SymbolicName"].nodeValue] = result_string
         return table
+
+    def _find_type_ns(self, typeName):
+        """Find the namespace URI of a type by name, preferring the namespace
+        that matches the current output file (self.outname).  This ensures CSV
+        nodeIds are assigned to the correct spec's own type when the same type
+        name also appears in an imported (dependency) namespace.
+
+        Example
+        -------
+        Suppose Machinery/Jobs imports ISA95-JOBCONTROL which defines
+        ``ProcessIrregularity`` (outname="types_isa95_jobcontrol"), and the
+        MachineTool BSD also defines ``ProcessIrregularity`` for its own namespace
+        (outname="types_machinetool").  When generating types_machinetool:
+
+            self.outname == "types_machinetool"
+            self._find_type_ns("ProcessIrregularity")
+            # → returns the MachineTool namespace URI so that nodeId 62 from
+            #   Opc.Ua.MachineTool.NodeIds.csv is stored on the MachineTool copy,
+            #   not on the already-imported ISA95-JOBCONTROL copy.
+        """
+        for ns in self.types:
+            if typeName in self.types[ns] and self.types[ns][typeName].outname == self.outname:
+                return ns, typeName
+        for ns in self.types:
+            if typeName in self.types[ns]:
+                return ns, typeName
+        # Case-insensitive fallback: some companion specs (e.g. IREDES) have
+        # a case mismatch between the BSD type name and the CSV/XML name.
+        typeNameLower = typeName.lower()
+        for ns in self.types:
+            for t in self.types[ns]:
+                if t.lower() == typeNameLower:
+                    return ns, t
+        return None, typeName
 
     def parseTypeDescriptions(self, f, table):
         csvreader = csv.reader(f, delimiter=',')
@@ -462,10 +489,18 @@ class CSVBSDTypeParser(TypeParser):
                 m = re.match('(.*?)_Encoding_DefaultBinary$', row[0])
                 if m:
                     baseType = m.group(1)
-                    for ns in self.types:
-                        if baseType in self.types[ns]:
-                            self.types[ns][baseType].binaryEncodingId = row[1]
-                            break
+                    ns, key = self._find_type_ns(baseType)
+                    if ns is not None:
+                        self.types[ns][key].binaryEncodingId = row[1]
+
+                # Check if node name ends with _Encoding_DefaultXml and store
+                # the node id in the corresponding DataType
+                m = re.match('(.*?)_Encoding_DefaultXml$', row[0])
+                if m:
+                    baseType = m.group(1)
+                    ns, key = self._find_type_ns(baseType)
+                    if ns is not None:
+                        self.types[ns][key].xmlEncodingId = row[1]
                 continue
 
             if row[2] != "DataType":
@@ -478,10 +513,10 @@ class CSVBSDTypeParser(TypeParser):
                 typeName = "ExtensionObject"
             if typeName in rename_types:
                 typeName = rename_types[typeName]
-            # check if typeName is a symbolicName and replace it with the browseName
-            if typeName in table:
-                typeName = table[typeName]
-            for ns in self.types:
-                if typeName in self.types[ns]:
-                    self.types[ns][typeName].nodeId = row[1]
-                    break
+            ns, key = self._find_type_ns(typeName)
+            # If the CSV uses a SymbolicName that differs from the type name in
+            # the BSD, retry with the corresponding BrowseName.
+            if ns is None and typeName in table:
+                ns, key = self._find_type_ns(table[typeName])
+            if ns is not None:
+                self.types[ns][key].nodeId = row[1]

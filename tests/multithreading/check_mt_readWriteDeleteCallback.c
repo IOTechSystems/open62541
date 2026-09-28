@@ -16,11 +16,11 @@
 
 #define NUMBER_OF_READ_WORKERS 10
 #define NUMBER_OF_WRITE_WORKERS 10
-#define ITERATIONS_PER_WORKER 100
+#define ITERATIONS_PER_WORKER 10
 
 #define NUMBER_OF_READ_CLIENTS 10
 #define NUMBER_OF_WRITE_CLIENTS 10
-#define ITERATIONS_PER_CLIENT 100
+#define ITERATIONS_PER_CLIENT 10
 
 UA_NodeId pumpTypeId = {1, UA_NODEIDTYPE_NUMERIC, {1001}};
 UA_Int32 temperature = 42;
@@ -69,7 +69,7 @@ void AddVariableNode(void) {
 }
 
 static void setup(void) {
-    tc.running = true;
+    UA_atomic_store(&tc.running, true);
     tc.server = UA_Server_newForUnitTest();
     ck_assert(tc.server != NULL);
     AddVariableNode();

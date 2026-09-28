@@ -8,6 +8,7 @@
 #include <open62541/plugin/certificategroup_default.h>
 
 #include "server/ua_server_internal.h"
+#include "client/ua_client_internal.h"
 #include "../encryption/certificates.h"
 
 #include <fcntl.h>
@@ -16,24 +17,29 @@
 #include "test_helpers.h"
 #include "testing_clock.h"
 #include "thread_wrapper.h"
-#ifndef _WIN32
+#ifndef UA_ARCHITECTURE_WIN32
 #include <sys/stat.h>
 #endif
 
 #include <check.h>
 #include <stdlib.h>
 
-#ifndef _WIN32
+#ifndef UA_ARCHITECTURE_WIN32
 #include <sys/stat.h>
 #endif
 
-// set register timeout to 1 second so we are able to test it.
-#define registerTimeout 4
+// Registration cleanup timeout (seconds). Kept generous so the registered
+// entry cannot age out between registering and the FindServers check under slow
+// execution (e.g. valgrind), where re-registration may transiently fail. The
+// dedicated timeout test still drives expiry via UA_fakeSleep(100000*checkWait),
+// which scales with this value and stays well beyond the timeout.
+#define registerTimeout 60
+
 // cleanup is only triggered every 10 seconds, thus wait a bit longer to check
 #define checkWait registerTimeout + 11
 
 #ifdef UA_ENABLE_DISCOVERY_SEMAPHORE
-# ifndef _WIN32
+# ifndef UA_ARCHITECTURE_WIN32
 #  define SEMAPHORE_PATH "/tmp/open62541-unit-test-semaphore"
 # else
 #  define SEMAPHORE_PATH ".\\open62541-unit-test-semaphore"
@@ -41,12 +47,12 @@
 #endif
 
 UA_Server *server_lds;
-UA_Boolean *running_lds;
+UA_atomic(uintptr_t) running_lds;
 THREAD_HANDLE server_thread_lds;
 UA_Client *clientRegisterRepeated;
 
 THREAD_CALLBACK(serverloop_lds) {
-    while(*running_lds)
+    while(UA_atomic_load(&running_lds))
         UA_Server_run_iterate(server_lds, true);
     return 0;
 }
@@ -80,23 +86,13 @@ configure_lds_server(UA_Server *pServer) {
     UA_LocalizedText_clear(&config_lds->applicationDescription.applicationName);
     config_lds->applicationDescription.applicationName =
         UA_LOCALIZEDTEXT_ALLOC("en", "LDS Server");
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
-    config_lds->mdnsEnabled = true;
-    config_lds->mdnsConfig.mdnsServerName = UA_String_fromChars("LDS_test");
-    config_lds->mdnsConfig.serverCapabilitiesSize = 2;
-    UA_String *caps = (UA_String *)UA_Array_new(2, &UA_TYPES[UA_TYPES_STRING]);
-    caps[0] = UA_String_fromChars("LDS");
-    caps[1] = UA_String_fromChars("MyFancyCap");
-    config_lds->mdnsConfig.serverCapabilities = caps;
-#endif
-    config_lds->discoveryCleanupTimeout = registerTimeout;
+    config_lds->registeredServerCleanupTimeout = registerTimeout;
 }
 
 static void
 setup_lds(void) {
     // start LDS server
-    running_lds = UA_Boolean_new();
-    *running_lds = true;
+    UA_atomic_store(&running_lds, true);
 
     UA_assert(server_lds == NULL);
     server_lds = UA_Server_newForUnitTest();
@@ -111,21 +107,23 @@ setup_lds(void) {
 
 static void
 teardown_lds(void) {
-    *running_lds = false;
+    UA_atomic_store(&running_lds, false);
     THREAD_JOIN(server_thread_lds);
     UA_Server_run_shutdown(server_lds);
-    UA_Boolean_delete(running_lds);
     UA_Server_delete(server_lds);
     server_lds = NULL;
 }
 
 UA_Server *server_register;
-UA_Boolean *running_register;
+UA_atomic(uintptr_t) running_register;
 THREAD_HANDLE server_thread_register;
 UA_UInt64 periodicRegisterCallbackId;
 
+static const UA_String registeredDiscoveryUrl =
+    UA_STRING_STATIC("opc.tcp://third-party.example:16664");
+
 THREAD_CALLBACK(serverloop_register) {
-    while(*running_register)
+    while(UA_atomic_load(&running_register))
         UA_Server_run_iterate(server_register, true);
     return 0;
 }
@@ -133,8 +131,7 @@ THREAD_CALLBACK(serverloop_register) {
 static void
 setup_register(void) {
     // start register server
-    running_register = UA_Boolean_new();
-    *running_register = true;
+    UA_atomic_store(&running_register, true);
 
     server_register = UA_Server_newForUnitTest();
     UA_ServerConfig *config_register = UA_Server_getConfig(server_register);
@@ -163,25 +160,40 @@ setup_register(void) {
     UA_LocalizedText_clear(&config_register->applicationDescription.applicationName);
     config_register->applicationDescription.applicationName =
         UA_LOCALIZEDTEXT_ALLOC("de", "Anmeldungsserver");
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
-    config_register->mdnsConfig.mdnsServerName = UA_String_fromChars("Register_test");
-#endif
-
+    UA_StatusCode res = UA_Array_appendCopy(
+        (void**)&config_register->applicationDescription.discoveryUrls,
+        &config_register->applicationDescription.discoveryUrlsSize,
+        &registeredDiscoveryUrl, &UA_TYPES[UA_TYPES_STRING]);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
     UA_Server_run_startup(server_register);
     THREAD_CREATE(server_thread_register, serverloop_register);
 }
 
 static void
 teardown_register(void) {
-    *running_register = false;
+    UA_atomic_store(&running_register, false);
     THREAD_JOIN(server_thread_register);
     UA_Server_run_shutdown(server_register);
-    UA_Boolean_delete(running_register);
     UA_Server_delete(server_register);
 }
 
+/* The LDS can expose a registration before the asynchronous registration
+ * client has received the response and shut down. Drain that request before
+ * advancing the fake clock by the registration timeout. */
 static void
-registerServer(void) {
+waitForRegisterRequestCompletion(void) {
+    UA_atomic_store(&running_register, false);
+    THREAD_JOIN(server_thread_register);
+
+    while(UA_DiscoveryManager_getPendingRegistration(server_register, NULL))
+        UA_Server_run_iterate(server_register, true);
+
+    UA_atomic_store(&running_register, true);
+    THREAD_CREATE(server_thread_register, serverloop_register);
+}
+
+static UA_StatusCode
+beginRegisterServerStopped(void) {
     /* Load certificate and private key */
     UA_ByteString certificate;
     certificate.length = CERT_DER_LENGTH;
@@ -192,23 +204,25 @@ registerServer(void) {
     privateKey.data = KEY_DER_DATA;
 
     UA_ClientConfig cc;
-    memset(&cc, 0, sizeof(UA_ClientConfig));
-    UA_ClientConfig_setDefaultEncryption(&cc, certificate, privateKey, NULL, 0, NULL, 0);
-    UA_CertificateGroup_AcceptAll(&cc.certificateVerification);
-    cc.eventLoop->dateTime_now = UA_DateTime_now_fake;
-    cc.eventLoop->dateTime_nowMonotonic = UA_DateTime_now_fake;
+    UA_ClientConfig_newForUnitTestWithEncryption(&cc, certificate, privateKey);
 
-    *running_register = false;
+    UA_atomic_store(&running_register, false);
     THREAD_JOIN(server_thread_register);
 
-    UA_StatusCode res =
-        UA_Server_registerDiscovery(server_register, &cc,
-                                    UA_STRING("opc.tcp://localhost:4840"),
-                                    UA_STRING_NULL);
-    *running_register = true;
+    return UA_Server_registerDiscovery(
+        server_register, &cc, UA_STRING("opc.tcp://localhost:4840"),
+        UA_STRING_NULL);
+}
+
+static void
+registerServer(void) {
+    UA_StatusCode res = beginRegisterServerStopped();
+
+    UA_atomic_store(&running_register, true);
     THREAD_CREATE(server_thread_register, serverloop_register);
 
     ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    waitForRegisterRequestCompletion();
 }
 
 static void
@@ -223,23 +237,20 @@ unregisterServer(void) {
     privateKey.data = KEY_DER_DATA;
 
     UA_ClientConfig cc;
-    memset(&cc, 0, sizeof(UA_ClientConfig));
-    UA_ClientConfig_setDefaultEncryption(&cc, certificate, privateKey, NULL, 0, NULL, 0);
-    UA_CertificateGroup_AcceptAll(&cc.certificateVerification);
-    cc.eventLoop->dateTime_now = UA_DateTime_now_fake;
-    cc.eventLoop->dateTime_nowMonotonic = UA_DateTime_now_fake;
+    UA_ClientConfig_newForUnitTestWithEncryption(&cc, certificate, privateKey);
 
-    *running_register = false;
+    UA_atomic_store(&running_register, false);
     THREAD_JOIN(server_thread_register);
 
     UA_StatusCode res =
         UA_Server_deregisterDiscovery(server_register, &cc,
                                     UA_STRING("opc.tcp://localhost:4840"));
 
-    *running_register = true;
+    UA_atomic_store(&running_register, true);
     THREAD_CREATE(server_thread_register, serverloop_register);
 
     ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    waitForRegisterRequestCompletion();
 }
 
 #ifdef UA_ENABLE_DISCOVERY_SEMAPHORE
@@ -247,7 +258,7 @@ unregisterServer(void) {
 static void
 Server_register_semaphore(void) {
     // create the semaphore
-#ifndef _WIN32
+#ifndef UA_ARCHITECTURE_WIN32
     int fd = open(SEMAPHORE_PATH, O_RDWR|O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
     ck_assert_int_ne(fd, -1);
     close(fd);
@@ -268,13 +279,9 @@ Server_register_semaphore(void) {
     privateKey.data = KEY_DER_DATA;
 
     UA_ClientConfig cc;
-    memset(&cc, 0, sizeof(UA_ClientConfig));
-    UA_ClientConfig_setDefaultEncryption(&cc, certificate, privateKey, NULL, 0, NULL, 0);
-    UA_CertificateGroup_AcceptAll(&cc.certificateVerification);
-    cc.eventLoop->dateTime_now = UA_DateTime_now_fake;
-    cc.eventLoop->dateTime_nowMonotonic = UA_DateTime_now_fake;
+    UA_ClientConfig_newForUnitTestWithEncryption(&cc, certificate, privateKey);
 
-    *running_register = false;
+    UA_atomic_store(&running_register, false);
     THREAD_JOIN(server_thread_register);
 
     UA_StatusCode res =
@@ -282,10 +289,11 @@ Server_register_semaphore(void) {
                                     UA_STRING("opc.tcp://localhost:4840"),
                                     UA_STRING(SEMAPHORE_PATH));
 
-    *running_register = true;
+    UA_atomic_store(&running_register, true);
     THREAD_CREATE(server_thread_register, serverloop_register);
 
     ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    waitForRegisterRequestCompletion();
 }
 
 static void
@@ -369,65 +377,88 @@ FindAndCheck(const UA_String expectedUris[], size_t expectedUrisSize,
     return found;
 }
 
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
-
-static void
-FindOnNetworkAndCheck(UA_String expectedServerNames[], size_t expectedServerNamesSize,
-                      const char *filterUri, const char *filterLocale,
-                      const char** filterCapabilities, size_t filterCapabilitiesSize) {
+static UA_Boolean
+FindAndCheckDiscoveryUrls(const char *requestedEndpointUrl,
+                          const char *filterUri,
+                          UA_Boolean expectSelf,
+                          UA_Boolean expectRegistered) {
     UA_Client *client = UA_Client_newForUnitTest();
 
-    UA_ServerOnNetwork* serverOnNetwork = NULL;
-    size_t serverOnNetworkSize = 0;
-
-    size_t  serverCapabilityFilterSize = 0;
-    UA_String *serverCapabilityFilter = NULL;
-
-    if(filterCapabilitiesSize) {
-        serverCapabilityFilterSize = filterCapabilitiesSize;
-        serverCapabilityFilter =
-            (UA_String*)UA_malloc(sizeof(UA_String) * filterCapabilitiesSize);
-        for(size_t i = 0; i < filterCapabilitiesSize; i++)
-            serverCapabilityFilter[i] = UA_String_fromChars(filterCapabilities[i]);
+    UA_StatusCode retval = UA_Client_connect(client, requestedEndpointUrl);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_Client_delete(client);
+        return false;
     }
 
-    UA_StatusCode retval =
-        UA_Client_findServersOnNetwork(client, "opc.tcp://localhost:4840", 0, 0,
-                                       serverCapabilityFilterSize, serverCapabilityFilter,
-                                       &serverOnNetworkSize, &serverOnNetwork);
+    UA_FindServersRequest request;
+    UA_FindServersRequest_init(&request);
+    request.endpointUrl = UA_STRING((char*)(uintptr_t)requestedEndpointUrl);
+    UA_String filter = UA_STRING_NULL;
+    if(filterUri) {
+        filter = UA_STRING((char*)(uintptr_t)filterUri);
+        request.serverUrisSize = 1;
+        request.serverUris = &filter;
+    }
 
-    if(serverCapabilityFilterSize)
-        UA_Array_delete(serverCapabilityFilter, serverCapabilityFilterSize,
-                        &UA_TYPES[UA_TYPES_STRING]);
+    UA_ApplicationDescription *applicationDescriptionArray = NULL;
+    size_t applicationDescriptionArraySize = 0;
 
-    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    UA_FindServersResponse response;
+    __UA_Client_Service(client, &request, &UA_TYPES[UA_TYPES_FINDSERVERSREQUEST],
+                        &response, &UA_TYPES[UA_TYPES_FINDSERVERSRESPONSE]);
+    ck_assert_uint_eq(response.responseHeader.serviceResult, UA_STATUSCODE_GOOD);
 
-    // only the discovery server is expected
-    ck_assert_uint_eq(serverOnNetworkSize , expectedServerNamesSize);
+    applicationDescriptionArray = response.servers;
+    applicationDescriptionArraySize = response.serversSize;
 
-    if(expectedServerNamesSize > 0)
-        ck_assert_ptr_ne(serverOnNetwork, NULL);
+    UA_Boolean ok = true;
+    UA_String requested = UA_STRING((char*)(uintptr_t)requestedEndpointUrl);
+    UA_String selfUri =
+        UA_STRING("urn:open62541.test.local_discovery_server");
+    UA_String registeredUri =
+        UA_STRING("urn:open62541.test.server_register");
+    UA_Boolean foundSelf = false;
+    UA_Boolean foundRegistered = false;
+    size_t expectedSize = (size_t)expectSelf + (size_t)expectRegistered;
+    if(applicationDescriptionArraySize != expectedSize)
+        ok = false;
 
-    if(serverOnNetwork != NULL) {
-        for(size_t i = 0; i < expectedServerNamesSize; i++) {
-            UA_Boolean expectedServerNameInServerOnNetwork = false;
-            for(size_t j = 0;
-                j < expectedServerNamesSize && !expectedServerNameInServerOnNetwork; j++) {
-                expectedServerNameInServerOnNetwork =
-                    UA_String_equal(&serverOnNetwork[j].serverName,
-                                    &expectedServerNames[i]);
-            }
-            ck_assert_msg(expectedServerNameInServerOnNetwork,
-                          "Expected %.*s in serverOnNetwork list, but not found",
-                          (int)expectedServerNames[i].length, expectedServerNames[i].data);
+    for(size_t i = 0; ok && i < applicationDescriptionArraySize; i++) {
+        UA_ApplicationDescription *ad = &applicationDescriptionArray[i];
+        if(UA_String_equal(&ad->applicationUri, &selfUri)) {
+            foundSelf = true;
+            if(ad->discoveryUrlsSize != 1 ||
+               !UA_String_equal(&ad->discoveryUrls[0], &requested))
+                ok = false;
+            continue;
         }
+
+        if(UA_String_equal(&ad->applicationUri, &registeredUri)) {
+            foundRegistered = true;
+            UA_Boolean foundUrl = false;
+            for(size_t j = 0; j < ad->discoveryUrlsSize; j++) {
+                if(UA_String_equal(&ad->discoveryUrls[j],
+                                   &registeredDiscoveryUrl)) {
+                    foundUrl = true;
+                    break;
+                }
+            }
+            if(!foundUrl)
+                ok = false;
+            continue;
+        }
+
+        /* No other server was registered in this test. */
+        ok = false;
     }
 
-    UA_Array_delete(serverOnNetwork, serverOnNetworkSize,
-                    &UA_TYPES[UA_TYPES_SERVERONNETWORK]);
+    if(foundSelf != expectSelf || foundRegistered != expectRegistered)
+        ok = false;
 
+    UA_FindServersResponse_clear(&response);
     UA_Client_disconnect(client);
     UA_Client_delete(client);
+    return ok;
 }
 
 static UA_StatusCode
@@ -521,44 +552,6 @@ Client_filter_locale(void) {
     return FindAndCheck(expectedUris, 2, expectedLocales, expectedNames, NULL, "en");
 }
 
-// Test if registered server is returned from LDS using FindServersOnNetwork
-static void
-Client_find_on_network_registered(void) {
-    char urls[2][384];
-    UA_String expectedUris[2];
-    char hostname[256];
-
-    ck_assert_int_eq(gethostname(hostname, 255), 0);
-
-    // DNS limits name to max 63 chars (+ \0). We need this ugly casting,
-    // otherwise gcc >7.2 will complain about format-truncation, but we want it
-    // here
-    void *hostnameVoid = (void*)hostname;
-    snprintf(urls[0], 384, "LDS_test-%s", (char*)hostnameVoid);
-    snprintf(urls[1], 384, "Register_test-%s", (char*)hostnameVoid);
-    expectedUris[0] = UA_STRING(urls[0]);
-    expectedUris[1] = UA_STRING(urls[1]);
-    FindOnNetworkAndCheck(expectedUris, 2, NULL, NULL, NULL, 0);
-
-    // filter by Capabilities
-    const char* capsLDS[] = {"LDS"};
-    const char* capsNA[] = {"NA"};
-    const char* capsMultipleNone[] = {"LDS", "NA"};
-    const char* capsMultipleCustom[] = {"LDS", "MyFancyCap"};
-    const char* capsMultipleCustomIgnoreCase[] = {"LDS", "myfancycap"};
-
-    // only LDS expected
-    FindOnNetworkAndCheck(expectedUris, 1, NULL, NULL, capsLDS, 1);
-    // only register server expected
-    FindOnNetworkAndCheck(&expectedUris[1], 1, NULL, NULL, capsNA, 1);
-    // no server expected
-    FindOnNetworkAndCheck(NULL, 0, NULL, NULL, capsMultipleNone, 2);
-    // only LDS expected
-    FindOnNetworkAndCheck(expectedUris, 1, NULL, NULL, capsMultipleCustom, 2);
-    // only LDS expected
-    FindOnNetworkAndCheck(expectedUris, 1, NULL, NULL, capsMultipleCustomIgnoreCase, 2);
-}
-
 // Test if filtering with uris works
 static UA_Boolean
 Client_find_filter(void) {
@@ -586,8 +579,6 @@ Client_get_endpoints(void) {
                          NULL);
 }
 
-#endif
-
 // Test if discovery server lists himself as registered server, before any other registration.
 static UA_Boolean
 Client_find_discovery(void) {
@@ -604,6 +595,118 @@ Client_find_registered(void) {
     expectedUris[1] = UA_STRING("urn:open62541.test.server_register");
     return FindAndCheck(expectedUris, 2, NULL, NULL, NULL, NULL);
 }
+
+static UA_Boolean
+hasAsyncResponseType(UA_Client *client, const UA_DataType *responseType) {
+    if(!client)
+        return false;
+    AsyncServiceCall *ac;
+    LIST_FOREACH(ac, &client->asyncServiceCalls, pointers) {
+        if(ac->responseType == responseType)
+            return true;
+    }
+    return false;
+}
+
+/* Stop immediately after the LDS has handled RegisterServer2. Its response can
+ * already be queued in IOCP, but has not been dispatched by the registering
+ * server's event loop. */
+static UA_Client *
+driveToPendingRegisterResponse(void) {
+    for(size_t i = 0; i < 1000; i++) {
+        UA_Server_run_iterate(server_register, true);
+        UA_Client *client = UA_DiscoveryManager_getPendingRegistration(
+            server_register, NULL);
+        if(!hasAsyncResponseType(
+               client, &UA_TYPES[UA_TYPES_REGISTERSERVER2RESPONSE]))
+            continue;
+        if(Client_find_registered())
+            return client;
+    }
+    return NULL;
+}
+
+static UA_Boolean
+drainRegisterRequestsStopped(void) {
+    for(size_t i = 0; i < 2000; i++) {
+        if(!UA_DiscoveryManager_getPendingRegistration(server_register, NULL))
+            return true;
+        UA_Server_run_iterate(server_register, true);
+    }
+    return false;
+}
+
+START_TEST(Server_registerInFlightTimeoutCleanup) {
+    UA_StatusCode beginResult = beginRegisterServerStopped();
+    UA_Client *client = NULL;
+    if(beginResult == UA_STATUSCODE_GOOD)
+        client = driveToPendingRegisterResponse();
+    UA_Boolean reachedPendingResponse = (client != NULL);
+
+    /* Keep the already-queued RegisterServer2 response pending. The first
+     * clock jump expires RegisterServer2 and starts the RegisterServer
+     * fallback. With the LDS stopped, the second jump expires the fallback. */
+    UA_atomic_store(&running_lds, false);
+    THREAD_JOIN(server_thread_lds);
+    UA_Boolean register2TimedOut = false;
+    if(reachedPendingResponse) {
+        UA_fakeSleep(10001);
+        UA_Server_run_iterate(server_register, false);
+        UA_Boolean register2 = true;
+        client = UA_DiscoveryManager_getPendingRegistration(server_register,
+                                                            &register2);
+        register2TimedOut = (client && !register2);
+        if(hasAsyncResponseType(
+               client, &UA_TYPES[UA_TYPES_REGISTERSERVERRESPONSE]))
+            UA_fakeSleep(10001);
+    }
+    UA_Boolean drained =
+        reachedPendingResponse && drainRegisterRequestsStopped();
+
+    UA_atomic_store(&running_lds, true);
+    THREAD_CREATE(server_thread_lds, serverloop_lds);
+    UA_atomic_store(&running_register, true);
+    THREAD_CREATE(server_thread_register, serverloop_register);
+
+    ck_assert_uint_eq(beginResult, UA_STATUSCODE_GOOD);
+    ck_assert(reachedPendingResponse);
+    ck_assert(register2TimedOut);
+    ck_assert(drained);
+
+    /* Cleanup must leave the request slots and IOCP connection reusable. */
+    registerServer();
+}
+END_TEST
+
+START_TEST(Server_registerInFlightCancelCleanup) {
+    UA_StatusCode beginResult = beginRegisterServerStopped();
+    UA_Client *client = NULL;
+    if(beginResult == UA_STATUSCODE_GOOD)
+        client = driveToPendingRegisterResponse();
+    UA_Boolean reachedPendingResponse = (client != NULL);
+    UA_StatusCode cancelResult = UA_STATUSCODE_BADINTERNALERROR;
+    if(reachedPendingResponse) {
+        /* This is the state used after the registration response callback has
+         * requested asynchronous SecureChannel shutdown. */
+        cancelResult =
+            UA_DiscoveryManager_cancelPendingRegistration(server_register);
+    }
+    UA_Boolean drained =
+        reachedPendingResponse && drainRegisterRequestsStopped();
+
+    UA_atomic_store(&running_register, true);
+    THREAD_CREATE(server_thread_register, serverloop_register);
+
+    ck_assert_uint_eq(beginResult, UA_STATUSCODE_GOOD);
+    ck_assert(reachedPendingResponse);
+    ck_assert_uint_eq(cancelResult, UA_STATUSCODE_GOOD);
+    ck_assert(drained);
+
+    /* A response/cancellation crossing must clean up exactly once and leave
+     * the discovery manager usable. */
+    registerServer();
+}
+END_TEST
 
 START_TEST(Server_new_delete) {
     UA_Server *pServer = UA_Server_newForUnitTest();
@@ -656,17 +759,36 @@ START_TEST(Server_registerTimeout) {
 }
 END_TEST
 
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
-START_TEST(Server_registerFindServers) {
+START_TEST(Server_findServers_preserves_registered_discoveryUrls) {
     while(!Client_find_discovery()) {}
 
     registerServer();
 
     while(!Client_find_registered()) {}
 
-    UA_fakeSleep(4000);
+    /* The local server mirrors the requested DiscoveryUrl. The registered
+     * server retains its own URLs. */
+    while(!FindAndCheckDiscoveryUrls("opc.tcp://localhost:4840", NULL,
+                                     true, true)) {}
 
-    Client_find_on_network_registered();
+    /* Filtering out the local server must not cause the first registered
+     * server entry to be overwritten with the LDS URL. */
+    while(!FindAndCheckDiscoveryUrls(
+        "opc.tcp://localhost:4840", "urn:open62541.test.server_register",
+        false, true)) {}
+
+    unregisterServer();
+
+    while(!Client_find_discovery()) {}
+}
+END_TEST
+
+START_TEST(Server_registerFindServers) {
+    while(!Client_find_discovery()) {}
+
+    registerServer();
+
+    while(!Client_find_registered()) {}
 
     while(!Client_find_filter()) {}
 
@@ -681,7 +803,6 @@ START_TEST(Server_registerFindServers) {
     while(!Client_filter_discovery()) {}
 }
 END_TEST
-#endif
 
 static Suite* testSuite_Client(void) {
     Suite *s = suite_create("Register Server and Client");
@@ -695,15 +816,24 @@ static Suite* testSuite_Client(void) {
     tcase_add_unchecked_fixture(tc_register, setup_lds, teardown_lds);
     tcase_add_unchecked_fixture(tc_register, setup_register, teardown_register);
     tcase_add_test(tc_register, Server_registerUnregister);
+    tcase_add_test(tc_register,
+                   Server_findServers_preserves_registered_discoveryUrls);
     suite_add_tcase(s,tc_register);
 
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
     TCase *tc_register_find = tcase_create("RegisterServer and FindServers");
     tcase_add_unchecked_fixture(tc_register_find, setup_lds, teardown_lds);
     tcase_add_unchecked_fixture(tc_register_find, setup_register, teardown_register);
     tcase_add_test(tc_register_find, Server_registerFindServers);
     suite_add_tcase(s,tc_register_find);
-#endif
+
+    TCase *tc_register_races = tcase_create("RegisterServer async cleanup");
+    tcase_add_unchecked_fixture(tc_register_races, setup_lds, teardown_lds);
+    tcase_add_unchecked_fixture(tc_register_races,
+                                setup_register, teardown_register);
+    tcase_set_timeout(tc_register_races, 30);
+    tcase_add_test(tc_register_races, Server_registerInFlightTimeoutCleanup);
+    tcase_add_test(tc_register_races, Server_registerInFlightCancelCleanup);
+    suite_add_tcase(s, tc_register_races);
 
     // register server again, then wait for timeout and auto unregister
     TCase *tc_register_timeout = tcase_create("RegisterServer timeout");

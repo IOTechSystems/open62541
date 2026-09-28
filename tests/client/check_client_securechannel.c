@@ -12,28 +12,29 @@
 
 #include <check.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "test_helpers.h"
 #include "testing_clock.h"
 #include "thread_wrapper.h"
 
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 THREAD_HANDLE server_thread;
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
         UA_Server_run_iterate(server, true);
     return 0;
 }
 
 static void runServer(void) {
-    running = true;
+    UA_atomic_store(&running, true);
     THREAD_CREATE(server_thread, serverloop);
 }
 
 static void pauseServer(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
 }
 
@@ -50,10 +51,59 @@ static void teardown(void) {
     UA_Server_delete(server);
 }
 
+START_TEST(SecureChannel_shortServerNonceResponseIsCleared) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    ck_assert(client != NULL);
+
+    /* Force the 1.5-specific minimum-length rejection path. */
+    UA_SecurityPolicy *securityPolicy = &client->config.securityPolicies[0];
+    securityPolicy->nonceLength = 32;
+    client->channel.securityPolicy = securityPolicy;
+
+    UA_NodeId responseType =
+        UA_NS0ID(OPENSECURECHANNELRESPONSE_ENCODING_DEFAULTBINARY);
+    UA_OpenSecureChannelResponse response;
+    UA_OpenSecureChannelResponse_init(&response);
+    response.serverNonce = UA_BYTESTRING_ALLOC("short");
+
+    UA_ByteString encodedType = UA_BYTESTRING_NULL;
+    UA_ByteString encodedResponse = UA_BYTESTRING_NULL;
+    ck_assert_uint_eq(UA_encodeBinary(&responseType, &UA_TYPES[UA_TYPES_NODEID],
+                                     &encodedType, NULL),
+                      UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(UA_encodeBinary(
+        &response, &UA_TYPES[UA_TYPES_OPENSECURECHANNELRESPONSE],
+        &encodedResponse, NULL), UA_STATUSCODE_GOOD);
+
+    UA_ByteString message;
+    ck_assert_uint_eq(UA_ByteString_allocBuffer(
+        &message, encodedType.length + encodedResponse.length),
+        UA_STATUSCODE_GOOD);
+    memcpy(message.data, encodedType.data, encodedType.length);
+    memcpy(message.data + encodedType.length, encodedResponse.data,
+           encodedResponse.length);
+
+    lockClient(client);
+    processOPNResponse(client, &message);
+    unlockClient(client);
+    ck_assert_uint_eq(client->connectStatus,
+                      UA_STATUSCODE_BADSECURITYCHECKSFAILED);
+
+    UA_ByteString_clear(&message);
+    UA_ByteString_clear(&encodedResponse);
+    UA_ByteString_clear(&encodedType);
+    UA_OpenSecureChannelResponse_clear(&response);
+    UA_Client_delete(client);
+}
+END_TEST
+
 START_TEST(SecureChannel_timeout_max) {
     UA_Client *client = UA_Client_newForUnitTest();
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* To generate the namespace mapping table */
+    UA_Client_run_iterate(client, 1);
 
     UA_ClientConfig *cconfig = UA_Client_getConfig(client);
     UA_fakeSleep(cconfig->secureChannelLifeTime);
@@ -74,6 +124,14 @@ START_TEST(SecureChannel_renew) {
     UA_Client *client = UA_Client_newForUnitTest();
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* To generate the namespace mapping table */
+    size_t max_stop_iteration_count = 100000;
+    size_t iteration = 0;
+    while(!client->haveNamespaces && iteration < max_stop_iteration_count) {
+        UA_Client_run_iterate(client, 0);
+        iteration++;
+    }
 
     pauseServer();
 
@@ -106,6 +164,52 @@ START_TEST(SecureChannel_renew) {
 }
 END_TEST
 
+/* Renew again without an intervening symmetric response from the server.
+ * This exercises NEWTOKEN_CLIENT -> SENT with an old token still retained. */
+START_TEST(SecureChannel_repeatedRenewalWithoutServiceTraffic) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    ck_assert_uint_eq(UA_Client_connect(client, "opc.tcp://localhost:4840"),
+                      UA_STATUSCODE_GOOD);
+    for(size_t i = 0; !client->haveNamespaces && i < 1000; i++)
+        UA_Client_run_iterate(client, 1);
+    ck_assert(client->haveNamespaces);
+    pauseServer();
+    UA_UInt32 channelId = client->channel.securityToken.channelId;
+
+    for(size_t renewal = 0; renewal < 2; renewal++) {
+        UA_UInt32 oldToken = client->channel.securityToken.tokenId;
+        UA_fakeSleep((UA_UInt32)(client->channel.securityToken.revisedLifetime * 0.8));
+        ck_assert_uint_eq(UA_Client_renewSecureChannel(client), UA_STATUSCODE_GOOD);
+        ck_assert_int_eq(client->channel.renewState, UA_SECURECHANNELRENEWSTATE_SENT);
+        for(size_t i = 0;
+            client->channel.renewState == UA_SECURECHANNELRENEWSTATE_SENT && i < 1000; i++) {
+            UA_Server_run_iterate(server, false);
+            UA_Client_run_iterate(client, 1);
+        }
+        ck_assert_int_eq(client->channel.renewState,
+                         UA_SECURECHANNELRENEWSTATE_NEWTOKEN_CLIENT);
+        ck_assert_uint_ne(client->channel.securityToken.tokenId, oldToken);
+        ck_assert_uint_eq(client->channel.altSecurityToken.tokenId, oldToken);
+        /* An immediate extra renewal must not discard the overlap state. */
+        ck_assert_uint_eq(UA_Client_renewSecureChannel(client), UA_STATUSCODE_GOODCALLAGAIN);
+        ck_assert_int_eq(client->channel.renewState,
+                         UA_SECURECHANNELRENEWSTATE_NEWTOKEN_CLIENT);
+    }
+
+    runServer();
+    UA_Variant value;
+    UA_Variant_init(&value);
+    ck_assert_uint_eq(UA_Client_readValueAttribute(client,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE), &value),
+        UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&value);
+    ck_assert_uint_eq(client->channel.securityToken.channelId, channelId);
+    ck_assert_int_eq(client->channel.renewState, UA_SECURECHANNELRENEWSTATE_NORMAL);
+    ck_assert_uint_eq(client->channel.altSecurityToken.tokenId, 0);
+    UA_Client_disconnect(client);
+    UA_Client_delete(client);
+} END_TEST
+
 /* Send the next message after the securechannel timed out */
 START_TEST(SecureChannel_timeout_fail) {
     UA_Client *client = UA_Client_newForUnitTest();
@@ -113,8 +217,9 @@ START_TEST(SecureChannel_timeout_fail) {
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     UA_ClientConfig *cconfig = UA_Client_getConfig(client);
+    pauseServer();
     UA_fakeSleep(cconfig->secureChannelLifeTime + 1);
-    UA_realSleep(200 + 1); // UA_MAXTIMEOUT+1 wait to be sure UA_Server_run_iterate can be completely executed
+    runServer();
 
     UA_Variant val;
     UA_Variant_init(&val);
@@ -172,7 +277,9 @@ START_TEST(SecureChannel_reconnect) {
 
     UA_ClientConfig *cconfig = UA_Client_getConfig(client);
     UA_fakeSleep(cconfig->secureChannelLifeTime + 1);
-    UA_realSleep(50 + 1);
+    pauseServer();
+    UA_Server_run_iterate(server, true);
+    runServer();
 
     retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
@@ -208,15 +315,72 @@ START_TEST(SecureChannel_cableunplugged) {
 }
 END_TEST
 
+/* Some servers have a certificate in their endpoint which they do not use for
+ * #None SecureChannels. To be compatible with them, only check if the
+ * certificate matches IF it gets sent in th asymHeader of the OPN message. */
+START_TEST(SecureChannel_serverCert) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig_setDefault(UA_Client_getConfig(client));
+
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Copy the endpont and disconnect */
+    UA_EndpointDescription endpoint;
+    UA_EndpointDescription_copy(&client->endpoint, &endpoint);
+    UA_Client_disconnect(client);
+
+    /* Add a fake certificate information to the endpoint - which is not getting
+     * used during the connect with #None. */
+    endpoint.serverCertificate = UA_STRING_ALLOC("random 123");
+    client->config.endpoint = endpoint;
+
+    /* Reconnect */
+    retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_Variant val;
+    UA_Variant_init(&val);
+    UA_NodeId nodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STATE);
+    retval = UA_Client_readValueAttribute(client, nodeId, &val);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_Variant_clear(&val);
+    UA_Client_delete(client);
+}
+END_TEST
+
+/* The monotonic clock is 24h in the future */
+static UA_DateTime
+dateTime_nowMonotonicWithOffset(UA_EventLoop *el) {
+    return UA_DateTime_now_fake(el) + (UA_DATETIME_SEC * 24 * 3600);
+}
+
+/* Simulate a deviation between the "wallclock" and the monotonic clock */
+START_TEST(SecureChannel_differentMonotonicClock) {
+    UA_Client *client = UA_Client_newForUnitTest();
+    UA_ClientConfig_setDefault(UA_Client_getConfig(client));
+
+    UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_Client_delete(client);
+}
+END_TEST
+
 int main(void) {
     TCase *tc_sc = tcase_create("Client SecureChannel");
     tcase_add_checked_fixture(tc_sc, setup, teardown);
+    tcase_add_test(tc_sc, SecureChannel_shortServerNonceResponseIsCleared);
     tcase_add_test(tc_sc, SecureChannel_renew);
+    tcase_add_test(tc_sc, SecureChannel_repeatedRenewalWithoutServiceTraffic);
     tcase_add_test(tc_sc, SecureChannel_timeout_max);
     tcase_add_test(tc_sc, SecureChannel_timeout_fail);
     tcase_add_test(tc_sc, SecureChannel_networkfail);
     tcase_add_test(tc_sc, SecureChannel_reconnect);
     tcase_add_test(tc_sc, SecureChannel_cableunplugged);
+    tcase_add_test(tc_sc, SecureChannel_serverCert);
+    tcase_add_test(tc_sc, SecureChannel_differentMonotonicClock);
 
     Suite *s = suite_create("Client");
     suite_add_tcase(s, tc_sc);

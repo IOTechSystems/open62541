@@ -6,6 +6,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import argparse
+import datetime
 import os.path
 import re
 
@@ -25,6 +26,16 @@ if pos > 0:
 include_re = re.compile("^#[\\s]*include (\".*\").*$|^#[\\s]*include (<open62541/.*>).*$")
 guard_re = re.compile(r"^#(?:(?:ifndef|define)\s*[A-Z_]+_H_|endif /\* [A-Z_]+_H_ \*/|endif // [A-Z_]+_H_|endif\s*/\*\s*!?[A-Z_]+_H[_]+\s*\*/)")
 
+# End year of the copyright range. Honor SOURCE_DATE_EPOCH so that
+# reproducible builds get a stable header
+# (https://reproducible-builds.org/specs/source-date-epoch/).
+source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+if source_date_epoch:
+    copyright_year = datetime.datetime.fromtimestamp(
+        int(source_date_epoch), datetime.timezone.utc).year
+else:
+    copyright_year = datetime.date.today().year
+
 print ("Starting amalgamating file "+ args.outfile)
 
 file = open(args.outfile, 'w', encoding='utf8', errors='replace')
@@ -34,7 +45,8 @@ file.write("""/* THIS IS A SINGLE-FILE DISTRIBUTION CONCATENATED FROM THE OPEN62
  */
 
 /*
- * Copyright (C) 2014-2021 the contributors as stated in the AUTHORS file
+ * Copyright (C) 2014-%d the open62541 contributors, as named in the
+ * per-file copyright headers reproduced below
  *
  * This file is part of open62541. open62541 is free software: you can
  * redistribute it and/or modify it under the terms of the Mozilla Public
@@ -43,7 +55,7 @@ file.write("""/* THIS IS A SINGLE-FILE DISTRIBUTION CONCATENATED FROM THE OPEN62
  * open62541 is distributed in the hope that it will be useful, but WITHOUT ANY
  * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
  * A PARTICULAR PURPOSE.
- */\n\n""" % args.version)
+ */\n\n""" % (args.version, copyright_year))
 
 if is_c:
     file.write('''#ifndef UA_DYNAMIC_LINKING_EXPORT
@@ -73,13 +85,12 @@ for fname in args.inputs:
         pos = fname.find("src")
     if pos < 0:
         continue
-    if pos - 1 < initial:
-        initial = pos - 1
+    initial = min(initial, pos - 1)
 
 for fname in args.inputs:
     with open(fname, encoding='utf8', errors='replace') as infile:
         file.write("\n/**** amalgamated original file \"" + fname[initial:] + "\" ****/\n\n")
-        print ("Integrating file '" + fname + "' ... ", end=""),
+        print ("Integrating file '" + fname + "' ... ", end="")
         for line in infile:
             inc_res = include_re.match(line)
             guard_res = guard_re.match(line)
@@ -88,7 +99,7 @@ for fname in args.inputs:
         # Ensure file is written to disk.
         file.flush()
         os.fsync(file.fileno())
-        print ("done."),
+        print ("done.")
 
 if not is_c:
     file.write("#endif /* %s */\n" % (outname.upper() + "_H_"))

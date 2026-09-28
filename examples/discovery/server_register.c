@@ -19,10 +19,10 @@
 
 #define DISCOVERY_SERVER_ENDPOINT "opc.tcp://localhost:4840"
 
-UA_Boolean running = true;
+static volatile UA_Boolean running = true;
 
 static void stopHandler(int sign) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "received ctrl-c");
+    (void)sign;
     running = false;
 }
 
@@ -36,10 +36,10 @@ readInteger(UA_Server *server, const UA_NodeId *sessionId,
     UA_Variant_setScalarCopy(&value->value, myInteger, &UA_TYPES[UA_TYPES_INT32]);
 
     // we know the nodeid is a string
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Node read %.*s",
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "Node read %.*s",
                 (int)nodeId->identifier.string.length,
                 nodeId->identifier.string.data);
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                 "read value %i", *(UA_UInt32 *)myInteger);
     return UA_STATUSCODE_GOOD;
 }
@@ -55,10 +55,10 @@ writeInteger(UA_Server *server, const UA_NodeId *sessionId,
         *myInteger = *(UA_Int32 *)value->value.data;
 
     // we know the nodeid is a string
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Node written %.*s",
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION, "Node written %.*s",
                 (int)nodeId->identifier.string.length,
                 nodeId->identifier.string.data);
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                 "written value %i", *(UA_UInt32 *)myInteger);
     return UA_STATUSCODE_GOOD;
 }
@@ -74,7 +74,6 @@ int main(int argc, char **argv) {
     UA_String_clear(&config->applicationDescription.applicationUri);
     config->applicationDescription.applicationUri =
         UA_String_fromChars("urn:open62541.example.server_register");
-    config->mdnsConfig.mdnsServerName = UA_String_fromChars("Sample-Server");
     // See http://www.opcfoundation.org/UA/schemas/1.04/ServerCapabilities.csv
     //config.serverCapabilitiesSize = 1;
     //UA_String caps = UA_String_fromChars("LDS");
@@ -102,6 +101,7 @@ int main(int argc, char **argv) {
     UA_ClientConfig cc;
     memset(&cc, 0, sizeof(UA_ClientConfig));
     UA_ClientConfig_setDefault(&cc);
+    cc.securityMode = UA_MESSAGESECURITYMODE_NONE;
 
     UA_StatusCode retval =
         UA_Server_registerDiscovery(server, &cc,

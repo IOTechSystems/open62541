@@ -34,17 +34,17 @@
 #include <sys/stat.h>
 
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 pthread_t server_thread;
 
 static void * serverloop(void *_) {
-    while(running)
+    while(UA_atomic_load(&running))
         UA_Server_run_iterate(server, true);
     return NULL;
 }
 
 static void start_server(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     /* less log output */
     UA_ServerConfig initialConfig;
@@ -55,15 +55,13 @@ static void start_server(void) {
 
     UA_ServerConfig *config = UA_Server_getConfig(server);
     config->applicationDescription.applicationType = UA_APPLICATIONTYPE_SERVER;
-    config->mdnsEnabled = true;
-    config->mdnsConfig.mdnsServerName = UA_String_fromChars("Sample-Multicast-Server");
 
     UA_Server_run_startup(server);
     pthread_create(&server_thread, NULL, serverloop, NULL);
 }
 
 static void teardown_server(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     pthread_join(server_thread, NULL);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
@@ -86,7 +84,7 @@ static void emptyCorpusDir(void) {
 
 /*************************************************
  * The following list of client requests is based
- * on ua_server_binary.c:getServicePointers to
+ * on ua_transport_tcp.c:getServicePointers to
  * cover all possible services and their inputs
  ************************************************/
 
@@ -197,14 +195,6 @@ registerServer2Request(UA_Client *client) {
 
     initUaRegisterServer(&request.server);
 
-    request.discoveryConfigurationSize = 1;
-    request.discoveryConfiguration = UA_ExtensionObject_new();
-    UA_ExtensionObject_init(&request.discoveryConfiguration[0]);
-    // Set to NODELETE so that we can just use a pointer to the mdns config
-    request.discoveryConfiguration[0].encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
-    request.discoveryConfiguration[0].content.decoded.type = &UA_TYPES[UA_TYPES_MDNSDISCOVERYCONFIGURATION];
-    request.discoveryConfiguration[0].content.decoded.data = &server->config.mdnsConfig;
-
     // First try with RegisterServer2, if that isn't implemented, use RegisterServer
     UA_RegisterServer2Response response;
     UA_RegisterServer2Response_init(&response);
@@ -213,7 +203,6 @@ registerServer2Request(UA_Client *client) {
 
     ASSERT_GOOD(response.responseHeader.serviceResult);
     UA_free(request.server.discoveryUrls);
-    UA_ExtensionObject_delete(request.discoveryConfiguration);
 
     UA_RegisterServer2Response_clear(&response);
 
@@ -425,15 +414,20 @@ subscriptionRequests(UA_Client *client) {
     monId = monResponse.monitoredItemId;
 
     // publishRequest
+    // Both helpers are internal and require the client lock to be held.
     UA_PublishRequest publishRequest;
     UA_PublishRequest_init(&publishRequest);
-    ASSERT_GOOD(UA_Client_preparePublishRequest(client, &publishRequest));
-    __UA_Client_AsyncService(client, &publishRequest,
-                             &UA_TYPES[UA_TYPES_PUBLISHREQUEST], NULL,
-                             &UA_TYPES[UA_TYPES_PUBLISHRESPONSE], NULL, NULL);
-    // here we don't care about the return value since it may be UA_STATUSCODE_BADMESSAGENOTAVAILABLE
-    // ASSERT_GOOD(publishResponse.responseHeader.serviceResult);
+    lockClient(client);
+    UA_StatusCode publishRetval = __Client_preparePublishRequest(client, &publishRequest);
+    if(publishRetval == UA_STATUSCODE_GOOD)
+        __Client_AsyncService(client, &publishRequest,
+                              &UA_TYPES[UA_TYPES_PUBLISHREQUEST], NULL,
+                              &UA_TYPES[UA_TYPES_PUBLISHRESPONSE], NULL, NULL);
+    unlockClient(client);
+    // here we don't care about the async return value since it may be
+    // UA_STATUSCODE_BADMESSAGENOTAVAILABLE
     UA_PublishRequest_clear(&publishRequest);
+    ASSERT_GOOD(publishRetval);
 
     // republishRequest
     UA_RepublishRequest republishRequest;

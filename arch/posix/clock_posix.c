@@ -1,0 +1,68 @@
+/* This work is licensed under a Creative Commons CCZero 1.0 Universal License.
+ * See http://creativecommons.org/publicdomain/zero/1.0/ for more information.
+ *
+ *    Copyright 2016-2017 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
+ *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
+ *    Copyright 2017 (c) Thomas Stalder, Blue Time Concept SA
+ */
+
+#include <open62541/types.h>
+
+/* Note that the EventLoop plugin provides its own internal time source (which
+ * is typically just the normal system time). All internal access to the time
+ * source should be through the EventLoop. The below is therefore for developer
+ * convenience to just use UA_DateTime_now(). */
+
+#if defined(UA_ARCHITECTURE_POSIX)
+
+#include <time.h>
+#include <sys/time.h>
+
+#if defined(__APPLE__) && defined(__MACH__)
+# include <mach/clock.h>
+# include <mach/mach.h>
+#endif
+
+UA_DateTime UA_DateTime_now(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (tv.tv_sec * UA_DATETIME_SEC) +
+        (tv.tv_usec * UA_DATETIME_USEC) +
+        UA_DATETIME_UNIX_EPOCH;
+}
+
+/* Compare broken-down representations of the same instant. Avoid mktime(),
+ * which interprets UTC fields as local time and refreshes global timezone state. */
+UA_Int64 UA_DateTime_localTimeUtcOffset(void) {
+    time_t rawtime = time(NULL);
+    struct tm local, utc;
+    if(!localtime_r(&rawtime, &local) || !gmtime_r(&rawtime, &utc))
+        return 0;
+    int days = local.tm_yday - utc.tm_yday;
+    if(local.tm_year != utc.tm_year)
+        days = (local.tm_year > utc.tm_year) ? 1 : -1;
+    return ((UA_Int64)days * 86400 + (local.tm_hour - utc.tm_hour) * 3600 +
+            (local.tm_min - utc.tm_min) * 60 + local.tm_sec - utc.tm_sec) * UA_DATETIME_SEC;
+}
+
+UA_DateTime UA_DateTime_nowMonotonic(void) {
+#if defined(__APPLE__) && defined(__MACH__)
+    /* OS X does not have clock_gettime, use clock_get_time */
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    return (mts.tv_sec * UA_DATETIME_SEC) + (mts.tv_nsec / 100) + UA_DATETIME_UNIX_EPOCH;
+#elif !defined(CLOCK_MONOTONIC_RAW)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (ts.tv_sec * UA_DATETIME_SEC) + (ts.tv_nsec / 100) + UA_DATETIME_UNIX_EPOCH;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (ts.tv_sec * UA_DATETIME_SEC) + (ts.tv_nsec / 100) + UA_DATETIME_UNIX_EPOCH;
+#endif
+}
+
+#endif /* UA_ARCHITECTURE_POSIX */

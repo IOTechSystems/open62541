@@ -4,9 +4,9 @@
  * Copyright (c) 2022 Fraunhofer IOSB (Author: Noel Graf)
  */
 
-#include <open62541/plugin/log_stdout.h>
 #include <open62541/server.h>
 #include <open62541/server_pubsub.h>
+#include <open62541/plugin/log_stdout.h>
 #include <open62541/plugin/securitypolicy_default.h>
 
 #include <stdio.h>
@@ -42,7 +42,7 @@
 #define CA_FILE_PATH                    "/path/to/server.cert"
 #endif
 
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && !defined(UA_ENABLE_JSON_ENCODING)
+#if defined(UA_ENABLE_ENCRYPTION)
 #define UA_AES128CTR_SIGNING_KEY_LENGTH 32
 #define UA_AES128CTR_KEY_LENGTH 16
 #define UA_AES128CTR_KEYNONCE_LENGTH 4
@@ -111,8 +111,8 @@ addReaderGroup(UA_Server *server) {
         readerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_JSON;
 
     /* configure the mqtt publish topic */
-    UA_BrokerWriterGroupTransportDataType brokerTransportSettings;
-    memset(&brokerTransportSettings, 0, sizeof(UA_BrokerWriterGroupTransportDataType));
+    UA_BrokerDataSetReaderTransportDataType brokerTransportSettings;
+    memset(&brokerTransportSettings, 0, sizeof(UA_BrokerDataSetReaderTransportDataType));
     /* Assign the Topic at which MQTT publish should happen */
     /*ToDo: Pass the topic as argument from the reader group */
     brokerTransportSettings.queueName = UA_STRING(SUBSCRIBER_TOPIC);
@@ -131,23 +131,25 @@ addReaderGroup(UA_Server *server) {
 
     readerGroupConfig.transportSettings = transportSettings;
 
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && !defined(UA_ENABLE_JSON_ENCODING)
-    /* Encryption settings */
-    UA_ServerConfig *config = UA_Server_getConfig(server);
-    readerGroupConfig.securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
-    readerGroupConfig.securityPolicy = &config->pubSubConfig.securityPolicies[0];
+#if defined(UA_ENABLE_ENCRYPTION)
+    /* Message security is only defined for the UADP encoding */
+    if(!useJson) {
+        UA_ServerConfig *config = UA_Server_getConfig(server);
+        readerGroupConfig.securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+        readerGroupConfig.securityPolicy = &config->pubSubConfig.securityPolicies[0];
+    }
 #endif
 
     UA_Server_addReaderGroup(server, connectionIdent, &readerGroupConfig,
                              &readerGroupIdent);
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && !defined(UA_ENABLE_JSON_ENCODING)
+#if defined(UA_ENABLE_ENCRYPTION)
     /* Add the encryption key informaton */
-    UA_ByteString sk = {UA_AES128CTR_SIGNING_KEY_LENGTH, signingKey};
-    UA_ByteString ek = {UA_AES128CTR_KEY_LENGTH, encryptingKey};
-    UA_ByteString kn = {UA_AES128CTR_KEYNONCE_LENGTH, keyNonce};
-
-    // TODO security token not necessary for readergroup (extracted from security-header)
-    UA_Server_setReaderGroupEncryptionKeys(server, readerGroupIdent, 1, sk, ek, kn);
+    if(!useJson) {
+        UA_ByteString sk = {UA_AES128CTR_SIGNING_KEY_LENGTH, signingKey};
+        UA_ByteString ek = {UA_AES128CTR_KEY_LENGTH, encryptingKey};
+        UA_ByteString kn = {UA_AES128CTR_KEYNONCE_LENGTH, keyNonce};
+        UA_Server_setReaderGroupEncryptionKeys(server, readerGroupIdent, 1, sk, ek, kn);
+    }
 #endif
 }
 
@@ -215,8 +217,8 @@ addSubscribedVariables (UA_Server *server, UA_NodeId dataSetReaderId) {
  * received DataSet fields and target Variables in the Subscriber AddressSpace.
  * The values subscribed from the Publisher are updated in the value field of these variables */
     /* Create the TargetVariables with respect to DataSetMetaData fields */
-    UA_FieldTargetVariable *targetVars = (UA_FieldTargetVariable *)
-        UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetVariable));
+    UA_FieldTargetDataType  *targetVars = (UA_FieldTargetDataType *)
+        UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetDataType));
     for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++) {
         /* Variable to subscribe data */
         UA_VariableAttributes vAttr = UA_VariableAttributes_default;
@@ -233,17 +235,13 @@ addSubscribedVariables (UA_Server *server, UA_NodeId dataSetReaderId) {
                                   UA_NS0ID(BASEDATAVARIABLETYPE),
                                   vAttr, NULL, &newNode);
 
-        /* For creating Targetvariables */
-        UA_FieldTargetDataType_init(&targetVars[i].targetVariable);
-        targetVars[i].targetVariable.attributeId  = UA_ATTRIBUTEID_VALUE;
-        targetVars[i].targetVariable.targetNodeId = newNode;
+        targetVars[i].attributeId  = UA_ATTRIBUTEID_VALUE;
+        targetVars[i].targetNodeId = newNode;
     }
 
     UA_Server_DataSetReader_createTargetVariables(server, dataSetReaderId,
                                                   readerConfig.dataSetMetaData.fieldsSize,
                                                   targetVars);
-    for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++)
-        UA_FieldTargetDataType_clear(&targetVars[i].targetVariable);
 
     UA_free(targetVars);
     UA_free(readerConfig.dataSetMetaData.fields);
@@ -346,7 +344,7 @@ int main(int argc, char **argv) {
     /* Return value initialized to Status Good */
     UA_Server *server = UA_Server_new();
 
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS)
+#if defined(UA_ENABLE_ENCRYPTION)
     /* Instantiate the PubSub SecurityPolicy */
     UA_ServerConfig *config = UA_Server_getConfig(server);
     config->pubSubConfig.securityPolicies = (UA_PubSubSecurityPolicy*)

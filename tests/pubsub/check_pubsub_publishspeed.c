@@ -10,6 +10,8 @@
 
 #include "test_helpers.h"
 #include "ua_pubsub_internal.h"
+#include "pubsub_test_helpers.h"
+
 #include "ua_server_internal.h"
 
 #include <check.h>
@@ -29,7 +31,7 @@ static void setup(void) {
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(UA_PubSubConnectionConfig));
     connectionConfig.name = UA_STRING("UADP Connection");
-    UA_NetworkAddressUrlDataType networkAddressUrl = {UA_STRING_NULL, UA_STRING("opc.udp://224.0.0.22:4840/")};
+    UA_NetworkAddressUrlDataType networkAddressUrl = UA_PUBSUB_TEST_NETWORKADDRESSURL(UA_PUBSUB_TEST_UDP_MULTICAST_URL_4840);
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri = UA_STRING("http://opcfoundation.org/UA-Profile/Transport/pubsub-udp-uadp");
@@ -66,6 +68,8 @@ START_TEST(PublishSpeedTest) {
     dataSetFieldConfig.field.variable.publishParameters.publishedVariable = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME);
     dataSetFieldConfig.field.variable.publishParameters.attributeId = UA_ATTRIBUTEID_VALUE;
     UA_StatusCode retval = UA_Server_addDataSetField(server, publishedDataSet1, &dataSetFieldConfig, NULL).result;
+    ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Server_enableAllPubSubComponents(server);
     ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
 
     UA_PubSubManager *psm = getPSM(server);

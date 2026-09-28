@@ -23,7 +23,7 @@
 #include <check.h>
 
 UA_Server *server;
-UA_Boolean running;
+UA_atomic(uintptr_t) running;
 THREAD_HANDLE server_thread;
 
 #if defined(__OpenBSD__)
@@ -110,7 +110,7 @@ loginCallback(const UA_String *userName, const UA_ByteString *password,
         for (i = 0; i < sizeof(salt) - 1 && i < loginList->password.length; i++) {
             if (dollar == 3)
                 break;
-            salt[i] = loginList->password.data[i];
+            salt[i] = (char)loginList->password.data[i];
             if (salt[i] == '$')
                 dollar++;
         }
@@ -131,16 +131,17 @@ loginCallback(const UA_String *userName, const UA_ByteString *password,
 #endif
 
 THREAD_CALLBACK(serverloop) {
-    while(running)
+    while(UA_atomic_load(&running))
         UA_Server_run_iterate(server, true);
     return 0;
 }
 
 static void setup(void) {
-    running = true;
+    UA_atomic_store(&running, true);
     server = UA_Server_newForUnitTest();
     ck_assert_msg(server, "UA_Server_new");
     UA_ServerConfig *config = UA_Server_getConfig(server);
+    config->allowNonePolicyPassword = true;
     UA_String policy = UA_STRING_STATIC("http://opcfoundation.org/UA/SecurityPolicy#None");
     UA_UsernamePasswordLogin login[] = {
         { UA_STRING_STATIC("user"),
@@ -165,7 +166,7 @@ static void setup(void) {
 }
 
 static void teardown(void) {
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);

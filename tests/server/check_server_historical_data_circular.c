@@ -27,7 +27,7 @@
 
 static UA_Server *server;
 static UA_HistoryDataGathering *gathering;
-static UA_Boolean running;
+static UA_atomic(uintptr_t) running;
 static THREAD_HANDLE server_thread;
 
 static UA_Client *client;
@@ -36,14 +36,14 @@ static UA_NodeId parentReferenceNodeId;
 static UA_NodeId outNodeId;
 
 THREAD_CALLBACK(serverloop) {
-    while(running) {
+    while(UA_atomic_load(&running)) {
         UA_Server_run_iterate(server, false);
     }
     return 0;
 }
 
 static void setup(void) {
-    running = true;
+    UA_atomic_store(&running, true);
 
     server = UA_Server_newForUnitTest();
     ck_assert(server != NULL);
@@ -69,7 +69,8 @@ static void setup(void) {
     attr.displayName = UA_LOCALIZEDTEXT("en-US","the answer");
     attr.dataType = UA_TYPES[UA_TYPES_UINT32].typeId;
     attr.accessLevel = UA_ACCESSLEVELMASK_READ | UA_ACCESSLEVELMASK_WRITE |
-        UA_ACCESSLEVELMASK_HISTORYREAD | UA_ACCESSLEVELMASK_HISTORYWRITE;
+        UA_ACCESSLEVELMASK_HISTORYREAD | UA_ACCESSLEVELMASK_HISTORYWRITE |
+        UA_ACCESSLEVELMASK_STATUSWRITE | UA_ACCESSLEVELMASK_TIMESTAMPWRITE;
     attr.historizing = true;
 
     /* Add the variable node to the information model */
@@ -103,7 +104,7 @@ static void teardown(void) {
     /* cleanup */
     UA_Client_disconnect(client);
     UA_Client_delete(client);
-    running = false;
+    UA_atomic_store(&running, false);
     THREAD_JOIN(server_thread);
     UA_NodeId_clear(&parentNodeId);
     UA_NodeId_clear(&parentReferenceNodeId);
@@ -154,9 +155,9 @@ requestHistory(UA_DateTime start,
     request.nodesToReadSize = 1;
     request.nodesToRead = valueId;
 
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     Service_HistoryRead(server, &server->adminSession, &request, response);
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     UA_HistoryReadRequest_clear(&request);
 }
 
@@ -170,9 +171,9 @@ START_TEST(Server_HistorizingStrategyValueSet) {
     setting.historizingBackend = UA_HistoryDataBackend_Memory_Circular(3, 10);
     setting.maxHistoryDataResponseSize = 10;
     setting.historizingUpdateStrategy = UA_HISTORIZINGUPDATESTRATEGY_VALUESET;
-    UA_LOCK(&server->serviceMutex);
+    lockServer(server);
     retval = gathering->registerNodeId(server, gathering->context, &outNodeId, setting);
-    UA_UNLOCK(&server->serviceMutex);
+    unlockServer(server);
     ck_assert_str_eq(UA_StatusCode_name(retval), UA_StatusCode_name(UA_STATUSCODE_GOOD));
 
     // Fill the data overcoming the buffer size and starting to write new values replacing the old ones.
@@ -225,12 +226,49 @@ START_TEST(Server_HistorizingStrategyValueSet) {
 }
 END_TEST
 
+START_TEST(Server_HistorizingRejectsForgedContinuationPoint) {
+    UA_HistorizingNodeIdSettings setting;
+    setting.historizingBackend = UA_HistoryDataBackend_Memory_Circular(1, 10);
+    setting.maxHistoryDataResponseSize = 1;
+    setting.historizingUpdateStrategy = UA_HISTORIZINGUPDATESTRATEGY_VALUESET;
+    lockServer(server);
+    UA_StatusCode retval = gathering->registerNodeId(server, gathering->context,
+                                                     &outNodeId, setting);
+    unlockServer(server);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    retval = setUInt32(client, outNodeId, 1);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = setUInt32(client, outNodeId, 2);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_ByteString continuationPoint;
+    retval = UA_ByteString_allocBuffer(&continuationPoint, sizeof(size_t));
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    *((size_t*)continuationPoint.data) = 3;
+
+    UA_HistoryReadResponse response;
+    UA_HistoryReadResponse_init(&response);
+    requestHistory(0, 0, &response, 0, false, &continuationPoint);
+
+    ck_assert_uint_eq(response.responseHeader.serviceResult, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(response.resultsSize, 1);
+    ck_assert_uint_eq(response.results[0].statusCode,
+                      UA_STATUSCODE_BADCONTINUATIONPOINTINVALID);
+
+    UA_ByteString_clear(&continuationPoint);
+    UA_HistoryReadResponse_clear(&response);
+    UA_HistoryDataBackend_Memory_clear(&setting.historizingBackend);
+}
+END_TEST
+
 static Suite *
 testSuite_Client(void) {
     Suite *s = suite_create("Server Historical Data");
     TCase *tc_server = tcase_create("Server Historical Data Circular");
     tcase_add_checked_fixture(tc_server, setup, teardown);
     tcase_add_test(tc_server, Server_HistorizingStrategyValueSet);
+    tcase_add_test(tc_server, Server_HistorizingRejectsForgedContinuationPoint);
     suite_add_tcase(s, tc_server);
 
     return s;

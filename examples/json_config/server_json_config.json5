@@ -1,0 +1,228 @@
+// Example JSON5 server configuration for UA_Server_newFromFile() and
+// UA_ServerConfig_loadFromFile().
+//
+// This file intentionally documents every currently supported key. Keep the
+// active values runnable for a local example server and use comments for
+// optional or feature-gated alternatives.
+{
+  // Build information exposed by the server.
+  buildInfo: {
+    productUri: "urn:open62541.example.server",
+    manufacturerName: "open62541",
+    productName: "open62541 JSON5 Server",
+    softwareVersion: "1.0.0",
+    buildNumber: "1",
+    buildDate: "2026-03-20T00:00:00Z",
+  },
+
+  // ApplicationDescription values published in discovery.
+  applicationDescription: {
+    applicationUri: "urn:open62541.server.application",
+    productUri: "urn:open62541.example.server",
+    applicationName: {
+      locale: "en-US",
+      text: "open62541 JSON5 Server"
+    },
+    // Accepted strings: "Client", "Server", "ClientAndServer",
+    // "DiscoveryServer". Numeric enum values also work.
+    applicationType: "Server",
+    // gatewayServerUri: "",
+    // discoveryProfileUri: "",
+    // discoveryUrls: [
+    //   "opc.tcp://localhost:4840"
+    // ],
+  },
+
+  // Delay in milliseconds before the server process shuts down after a stop.
+  shutdownDelay: 5000.0,
+
+  // Rule handling values:
+  //   0 = DEFAULT, 1 = ABORT, 2 = WARN, 3 = ACCEPT
+  verifyRequestTimestamp: 0,
+  allowEmptyVariables: 0,
+
+  // Socket listener setup. All listed URLs are opened on startup.
+  serverUrls: [
+    "opc.tcp://localhost:4840",
+    // "opc.wss://localhost:4843/opcua",
+  ],
+  tcpEnabled: true,
+  tcp: {
+    tcpBufSize: 65535,
+    tcpMaxMsgSize: 0,
+    tcpMaxChunks: 0,
+  },
+
+  // OPC UA Binary over WebSockets is opt-in. Uncomment the opc.wss URL above,
+  // provide the TLS files and enable this block. These TLS credentials protect
+  // the WebSocket transport and are separate from OPC UA SecurityPolicies.
+  webSocketEnabled: false,
+  webSocket: {
+    webSocketBufSize: 65535,
+    webSocketMaxMsgSize: 0,
+    webSocketMaxChunks: 0,
+    webSocketMaxQueueSize: 1048576,
+    // certificate: "./certs/server_cert.der",
+    // privateKey: "./certs/server_key.pem",
+    // privateKeyPassword: "secret",
+  },
+
+  // OPC UA services over HTTP(S) are opt-in. Part 6 defines opc.https;
+  // opc.http is a non-standard testing extension and additionally requires
+  // httpAllowUnencrypted. The ServerUrl is the advertised endpoint;
+  // listenAddress only controls the local bind. Binary
+  // and JSON service bodies may coexist on the same URL via Content-Type. JSON
+  // needs UA_ENABLE_JSON_ENCODING. gzip/deflate needs
+  // UA_ENABLE_HTTP_COMPRESSION.
+  httpEnabled: false,
+  httpAllowUnencrypted: false,
+  http: {
+    maxMsgSize: 0,
+    maxDecompressedMsgSize: 0, // 0 uses the 64 MiB safety default
+    timeout: 60,
+    // listenAddress: "", // Bind all interfaces
+    // certificate: "./certs/server_cert.der",
+    // privateKey: "./certs/server_key.pem",
+    // privateKeyPassword: "secret",
+  },
+
+  // Endpoint definitions exposed to clients. Match the client configuration.
+  // endpoints: [
+  //   {
+  //     endpointUrl: "opc.tcp://localhost:4840",
+  //     securityMode: "None",
+  //     securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#None",
+  //     transportProfileUri: "http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary",
+  //     securityLevel: 0,
+  //     userIdentityTokens: [
+  //       {
+  //         policyId: "anonymous",
+  //         tokenType: "Anonymous",
+  //         securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#None"
+  //       },
+  //       {
+  //         policyId: "username",
+  //         tokenType: "UserName",
+  //         securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#None"
+  //       },
+  //       {
+  //         policyId: "certificate",
+  //         tokenType: "Certificate",
+  //         securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256"
+  //       }
+  //     ]
+  //   }
+  // ],
+
+  // Allow SecurityPolicy#None only on discovery endpoints.
+  securityPolicyNoneDiscoveryOnly: false,
+
+  // Apply modelling rules automatically when creating instances.
+  modellingRulesOnInstances: false,
+  copyMethodsOnInstances: false,
+
+  // Resource limits.
+  maxSecureChannels: 10,
+  maxSecurityTokenLifetime: 300000,
+  maxSessions: 50,
+  maxSessionTimeout: 3600000.0,
+  maxNodesPerRead: 10000,
+  maxNodesPerWrite: 10000,
+  maxNodesPerMethodCall: 10000,
+  maxNodesPerBrowse: 10000,
+  maxNodesPerRegisterNodes: 10000,
+  maxNodesPerTranslateBrowsePathsToNodeIds: 10000,
+  maxNodesPerNodeManagement: 10000,
+  maxMonitoredItemsPerCall: 10000,
+  maxReferencesPerNode: 0,
+
+  // Reverse-connect retry interval in milliseconds.
+  reverseReconnectInterval: 20000,
+
+  // Only available in multithreaded builds.
+  asyncOperationTimeout: 120000.0,
+  maxAsyncOperationQueueSize: 1000000,
+
+  // Only available when discovery support is enabled.
+  registeredServersEnabled: true,
+  registeredServerCleanupTimeout: 600,
+  serversOnNetworkEnabled: false,
+
+  // Subscription and MonitoredItem limits (UA_ENABLE_SUBSCRIPTIONS).
+  subscriptionsEnabled: true,
+  subscriptions: {
+    maxSubscriptions: 100,
+    maxSubscriptionsPerSession: 50,
+    publishingIntervalLimits: {
+      min: 100.0,
+      max: 3600000.0,
+    },
+    lifeTimeCountLimits: {
+      min: 3,
+      max: 15000,
+    },
+    keepAliveCountLimits: {
+      min: 1,
+      max: 100,
+    },
+    maxNotificationsPerPublish: 1000,
+    enableRetransmissionQueue: true,
+    maxRetransmissionQueueSize: 0,
+    maxEventsPerNode: 0,
+    maxMonitoredItems: 0,
+    maxMonitoredItemsPerSubscription: 0,
+    samplingIntervalLimits: {
+      min: 50.0,
+      max: 86400000.0,
+    },
+    queueSizeLimits: {
+      min: 1,
+      max: 100,
+    },
+    maxPublishReqPerSession: 5,
+  },
+
+  // Historizing capability flags (UA_ENABLE_HISTORIZING).
+  historizingEnabled: true,
+  historizing: {
+    accessHistoryDataCapability: false,
+    maxReturnDataValues: 0,
+    accessHistoryEventsCapability: false,
+    maxReturnEventValues: 0,
+    insertDataCapability: false,
+    insertEventCapability: false,
+    insertAnnotationsCapability: false,
+    replaceDataCapability: false,
+    replaceEventCapability: false,
+    updateDataCapability: false,
+    updateEventCapability: false,
+    deleteRawCapability: false,
+    deleteEventCapability: false,
+    deleteAtTimeDataCapability: false,
+  },
+
+  // PubSub feature flags (UA_ENABLE_PUBSUB).
+  pubsubEnabled: true,
+  pubsub: {
+    enableDeltaFrames: true,
+    enableInformationModelMethods: true,
+  },
+
+  // Security policy configuration requires encryption support and valid file
+  // paths. Uncomment the entries that should be exposed by the server.
+  // securityPolicies: [
+  //   {
+  //     policy: "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256",
+  //     certificate: "./certs/server_cert.der",
+  //     privateKey: "./certs/server_key.pem"
+  //   },
+  //   {
+  //     policy: "http://opcfoundation.org/UA/SecurityPolicy#Aes256_Sha256_RsaPss",
+  //     certificate: "./certs/server_cert.der",
+  //     privateKey: "./certs/server_key.pem"
+  //   }
+  // ],
+
+  // PKI store folder used by the default certificate verification plugin.
+  // pkiFolder: "./pki",
+}

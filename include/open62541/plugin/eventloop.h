@@ -4,6 +4,7 @@
  *
  *    Copyright 2021 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2021 (c) Fraunhofer IOSB (Author: Jan Hermes)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_EVENTLOOP_H_
@@ -13,6 +14,7 @@
 #include <open62541/types_generated.h>
 #include <open62541/util.h>
 #include <open62541/plugin/log.h>
+#include <open62541/plugin/certificategroup.h>
 
 _UA_BEGIN_DECLS
 
@@ -29,7 +31,7 @@ struct UA_InterruptManager;
 typedef struct UA_InterruptManager UA_InterruptManager;
 
 /**
- * Event Loop Subsystem
+ * EventLoop Plugin API
  * ====================
  * An OPC UA-enabled application can have several clients and servers. And
  * server can serve different transport-level protocols for OPC UA. The
@@ -76,7 +78,7 @@ typedef void (*UA_Callback)(void *application, void *context);
 /* Delayed callbacks are executed not when they are registered, but in the
  * following EventLoop cycle */
 typedef struct UA_DelayedCallback {
-    struct UA_DelayedCallback *next;
+    UA_atomic(struct UA_DelayedCallback *)next;
     UA_Callback callback;
     void *application;
     void *context;
@@ -162,10 +164,12 @@ struct UA_EventLoop {
     /* Timer Callbacks
      * ~~~~~~~~~~~~~~~
      * Timer callbacks are executed at a defined time or regularly with a
-     * periodic interval. */
+     * periodic interval. The timer subsystem always uses the
+     * monotonic clock. */
 
     /* Time of the next timer. Returns the UA_DATETIME_MAX if no timer is
-     * registered. */
+     * registered. Returns the current monotonic time if a delayed
+     * callback is registered for immediate execution. */
     UA_DateTime (*nextTimer)(UA_EventLoop *el);
 
     /* The execution interval is in ms. The first execution time is baseTime +
@@ -223,6 +227,18 @@ struct UA_EventLoop {
     /* Stops the EventSource before deregistrering it */
     UA_StatusCode
     (*deregisterEventSource)(UA_EventLoop *el, UA_EventSource *es);
+
+    /* Locking
+     * ~~~~~~~
+     *
+     * For multi-threading the EventLoop is protected by a mutex. The mutex is
+     * expected to be recursive (can be taken more than once from the same
+     * thread). A common approach to avoid deadlocks is to establish an absolute
+     * ordering between the locks. Where the "lower" locks needs to be taken
+     * before the "upper" lock. The EventLoop-mutex is exposed here to allow it
+     * to be taken from the outside. */
+    void (*lock)(UA_EventLoop *el);
+    void (*unlock)(UA_EventLoop *el);
 };
 
 /**
@@ -439,14 +455,13 @@ struct UA_InterruptManager {
     (*deregisterInterrupt)(UA_InterruptManager *im, uintptr_t interruptHandle);
 };
 
-#if defined(UA_ARCHITECTURE_POSIX) || defined(UA_ARCHITECTURE_WIN32)
+#if (defined(UA_ARCHITECTURE_POSIX) && !defined(UA_ARCHITECTURE_LWIP)) || defined(UA_ARCHITECTURE_WIN32)
 
 /**
- * POSIX EventLop Implementation
- * -----------------------------
- * The POSIX compatibility of Win32 is 'close enough'. So a joint implementation
- * is provided. The configuration paramaters must be set before starting the
- * EventLoop.
+ * Native EventLoop Implementations
+ * --------------------------------
+ * POSIX uses readiness polling. Win32 uses I/O completion ports. Configuration
+ * parameters must be set before starting the EventLoop.
  *
  * **Clock configuration (Linux and BSDs only)**
  *
@@ -460,8 +475,45 @@ struct UA_InterruptManager {
  *   a clock source id for a character-device such as /dev/ptp0. (default:
  *   CLOCK_MONOTONIC_RAW) */
 
+#if defined(UA_ARCHITECTURE_POSIX) && !defined(UA_ARCHITECTURE_LWIP)
 UA_EXPORT UA_EventLoop *
 UA_EventLoop_new_POSIX(const UA_Logger *logger);
+#endif
+
+#ifdef UA_ARCHITECTURE_WIN32
+UA_EXPORT UA_EventLoop *
+UA_EventLoop_new_WIN32(const UA_Logger *logger);
+#endif
+
+#ifdef UA_ENABLE_EVENTLOOP_GLIB
+
+/**
+ * GLib EventLoop Implementation
+ * ------------------------------
+ * A drop-in alternative to ``UA_EventLoop_new_POSIX`` that is driven by a
+ * GLib ``GMainContext`` instead of directly calling select()/epoll_wait().
+ * All ConnectionManagers documented below (TCP, UDP, Ethernet, ...) work
+ * unchanged with this EventLoop.
+ *
+ * Once started, the EventLoop attaches a ``GSource`` to the given
+ * ``GMainContext``. From that point on, sockets and timers are serviced
+ * automatically whenever that context is iterated -- for example by
+ * ``g_main_loop_run()``, ``gtk_main()``, ``g_application_run()``, or any
+ * other GLib-based application main loop. It is therefore not necessary to
+ * call the EventLoop's own ``run`` method at all; the open62541 stack can be
+ * fully driven by GLib. ``run`` is still provided (performing a single
+ * bounded iteration of the ``GMainContext``) for backwards compatibility
+ * with code that pumps the EventLoop itself (e.g. ``UA_Server_run``).
+ *
+ * @param logger The logger for the EventLoop.
+ * @param glibMainContext The ``GMainContext*`` to attach to. If ``NULL``,
+ *        the process-wide default context (``g_main_context_default()``) is
+ *        used -- the same context iterated by a plain
+ *        ``g_main_loop_new(NULL, ...)`` or by GTK/GNOME applications. */
+UA_EXPORT UA_EventLoop *
+UA_EventLoop_new_GLib(const UA_Logger *logger, void *glibMainContext);
+
+#endif /* UA_ENABLE_EVENTLOOP_GLIB */
 
 /**
  * TCP Connection Manager
@@ -482,14 +534,21 @@ UA_EventLoop_new_POSIX(const UA_Logger *logger);
  *
  * **Configuration parameters for the ConnectionManager (set before start)**
  *
+ * 0:max-connections [uint32]
+ *    max connections (default: 0 -> unbounded).
+ *    The server sockets get deactivated if the limit is reached.
+ *
  * 0:recv-bufsize [uint32]
  *    Size of the buffer that is statically allocated for receiving messages
  *    (default 64kB).
  *
  * 0:send-bufsize [uint32]
- *    Size of the statically allocated buffer for sending messages. This then
- *    becomes an upper bound for the message size. If undefined a fresh buffer
- *    is allocated for every `allocNetworkBuffer` (default: no buffer).
+ *    Size of the statically allocated buffer for sending messages. The buffer
+ *    is reused for every `allocNetworkBuffer` to avoid a heap allocation per
+ *    message; a message larger than the buffer falls back to a fresh
+ *    allocation. A dedicated send buffer is used (never the recv buffer), so
+ *    sending while received data is still being processed is safe. If
+ *    undefined, the send buffer defaults to the recv-bufsize.
  *
  * **Open Connection Parameters:**
  *
@@ -527,8 +586,15 @@ UA_EventLoop_new_POSIX(const UA_Logger *logger);
  *
  * No additional parameters for sending over an established TCP socket
  * defined. */
+#if defined(UA_ARCHITECTURE_POSIX) && !defined(UA_ARCHITECTURE_LWIP)
 UA_EXPORT UA_ConnectionManager *
 UA_ConnectionManager_new_POSIX_TCP(const UA_String eventSourceName);
+#endif
+
+#ifdef UA_ARCHITECTURE_WIN32
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_WIN32_TCP(const UA_String eventSourceName);
+#endif
 
 /**
  * UDP Connection Manager
@@ -543,9 +609,12 @@ UA_ConnectionManager_new_POSIX_TCP(const UA_String eventSourceName);
  *    (default 64kB).
  *
  * 0:send-bufsize [uint32]
- *    Size of the statically allocated buffer for sending messages. This then
- *    becomes an upper bound for the message size. If undefined a fresh buffer
- *    is allocated for every `allocNetworkBuffer` (default: no buffer).
+ *    Size of the statically allocated buffer for sending messages. The buffer
+ *    is reused for every `allocNetworkBuffer` to avoid a heap allocation per
+ *    message; a message larger than the buffer falls back to a fresh
+ *    allocation. A dedicated send buffer is used (never the recv buffer), so
+ *    sending while received data is still being processed is safe. If
+ *    undefined, the send buffer defaults to the recv-bufsize.
  *
  * **Open Connection Parameters:**
  *
@@ -599,8 +668,17 @@ UA_ConnectionManager_new_POSIX_TCP(const UA_String eventSourceName);
  * **Send Parameters:**
  *
  * No additional parameters for sending over an UDP connection defined. */
+#if defined(UA_ARCHITECTURE_POSIX) && !defined(UA_ARCHITECTURE_LWIP)
 UA_EXPORT UA_ConnectionManager *
 UA_ConnectionManager_new_POSIX_UDP(const UA_String eventSourceName);
+#endif
+
+#ifdef UA_ARCHITECTURE_WIN32
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_WIN32_UDP(const UA_String eventSourceName);
+#endif
+
+#if defined(__linux__) /* Linux only so far */
 
 /**
  * Ethernet Connection Manager
@@ -616,9 +694,12 @@ UA_ConnectionManager_new_POSIX_UDP(const UA_String eventSourceName);
  *    (default 64kB).
  *
  * 0:send-bufsize [uint32]
- *    Size of the statically allocated buffer for sending messages. This then
- *    becomes an upper bound for the message size. If undefined a fresh buffer
- *    is allocated for every `allocNetworkBuffer` (default: no buffer).
+ *    Size of the statically allocated buffer for sending messages. The buffer
+ *    is reused for every `allocNetworkBuffer` to avoid a heap allocation per
+ *    message; a message larger than the buffer falls back to a fresh
+ *    allocation. A dedicated send buffer is used (never the recv buffer), so
+ *    sending while received data is still being processed is safe. If
+ *    undefined, the send buffer defaults to the recv-bufsize.
  *
  * **Open Connection Parameters:**
  *
@@ -685,6 +766,210 @@ UA_ConnectionManager_new_POSIX_UDP(const UA_String eventSourceName);
  *    Drop message if it cannot be sent in time (default: true). */
 UA_EXPORT UA_ConnectionManager *
 UA_ConnectionManager_new_POSIX_Ethernet(const UA_String eventSourceName);
+#endif
+
+
+/**
+ * HTTP Connection Manager
+ * ~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * The HTTP ConnectionManager uses libwebsockets for HTTP client and server
+ * connections. A server listener announces each accepted peer connection
+ * with its own connection id and context. Request bodies are reassembled and
+ * delivered in a callback on that accepted connection. Send the response with
+ * ``sendWithConnection`` and the accepted connection id. Sequential HTTP/1.1
+ * keep-alive requests reuse the same id and context.
+ *
+ * **Open Connection Parameters:**
+ *
+ * 0:address [string]
+ *    Remote hostname or IPv4/IPv6 address for clients (required), or local
+ *    interface for listeners. Listeners default to all interfaces.
+ *
+ * 0:port [uint16]
+ *    Remote or listening port (required; zero selects a dynamic server port).
+ *
+ * 0:content-coding-policy [string]
+ *    Server responses only. ``identity`` forces an uncompressed response;
+ *    ``gzip`` restricts negotiation to gzip or identity. This lets an
+ *    application protocol narrow the generic HTTP coding set.
+ *
+ * 0:timeout [uint16]
+ *    Connection or request timeout in seconds (default: 30).
+ *
+ * 0:listen [boolean]
+ *    Create a listening connection (default: false).
+ *
+ * 0:useSSL [bool]
+ *    Encrypt the connection with TLS (default: false).
+ *
+ * 0:certificate [bytestring]
+ *    DER or PEM encoded local certificate. For listeners this is the server
+ *    certificate. For clients it enables mutual TLS.
+ *
+ * 0:private-key [bytestring]
+ *    DER or PEM encoded private key for ``certificate``.
+ *
+ * 0:private-key-password [string]
+ *    Password for an encrypted private key.
+ *
+ * 0:ca-certificate [bytestring]
+ *    DER or PEM encoded CA certificate used to validate the TLS peer. For a
+ *    listener, setting this requires clients to present a trusted certificate.
+ *    A client uses the system trust store when this parameter is omitted.
+ *
+ * 0:recv-max-message-size [uint32]
+ *    Maximum size of a reassembled response body for clients or request body
+ *    on the wire for listeners. Zero or omission means unlimited.
+ *
+ * 0:recv-max-decompressed-message-size [uint32]
+ *    Maximum request body size after HTTP Content-Encoding decompression for
+ *    listeners, or response body size after decompression for clients. It
+ *    defaults to ``recv-max-message-size`` when that limit is set, otherwise
+ *    to 64 MiB for listeners. A client only advertises supported compression
+ *    when this limit is non-zero.
+ *
+ * 0:send-max-message-size [uint32]
+ *    Maximum request body size for clients or response body size for listeners.
+ *    Zero or omission means unlimited.
+ *
+ * 0:validate [boolean]
+ *    Validate parameters without opening a connection.
+ *
+ * **Send Parameters:**
+ *
+ * 0:path [string]
+ *    Request-target path (default: ``/``).
+ *
+ * 0:method [string]
+ *    HTTP request method (default: ``GET``).
+ *
+ * 0:status-code [uint16]
+ *    HTTP response status for server requests (default: 200). Not valid for
+ *    client requests.
+ *
+ * 0:headers [KeyValuePair array]
+ *    Additional request or response headers. Every pair uses the header name as
+ *    its QualifiedName with namespace index zero and a scalar String value.
+ *    Header names are case-insensitive. Content-Length, Transfer-Encoding and
+ *    Connection are managed internally and cannot be supplied.
+ *
+ * 0:request-handle [Variant]
+ *    Opaque caller-defined metadata for an HTTP client request. Scalar, array
+ *    and custom DataTypes are accepted. The value is copied when sending,
+ *    returned unchanged in every response callback and never transmitted as
+ *    an HTTP header. Concurrent client requests require handles; callers are
+ *    responsible for choosing values that distinguish their requests. Without
+ *    a handle only one request may be outstanding.
+ *
+ * 0:timeout [uint16]
+ *    Timeout in seconds for this request. Zero or omission uses the timeout
+ *    configured when opening the client binding.
+ *
+ * The ``buf`` argument passed to ``sendWithConnection`` is used as the request
+ * body. It may be ``NULL`` for an empty body and, like all ConnectionManager
+ * send buffers, is released internally even if sending fails.
+ *
+ * Listener callbacks provide ``listen-address`` and ``listen-port``. An
+ * accepted connection is first announced with ``remote-address`` and an empty
+ * body. Its subsequent request callbacks provide ``method``, ``path``,
+ * ``headers``, ``remote-address`` and ``request-random``. The latter is a
+ * 32-byte ByteString filled by the libwebsockets platform random source. Client
+ * response callbacks provide ``status-code`` and ``headers`` when the response
+ * is established. Identity response-body fragments also provide
+ * ``content-length``. Decompressed fragments omit it because the wire length
+ * no longer describes the delivered body. A final callback contains
+ * ``response-complete`` set to true and an
+ * empty body. It also contains ``request-status`` with the terminal transport
+ * StatusCode. All callbacks contain ``request-handle`` when it was supplied
+ * by the caller. A failed client request does not close sibling requests or
+ * the client binding.
+ *
+ * Every accepted peer connection has an independent connection context and
+ * produces exactly one final ``UA_CONNECTIONSTATE_CLOSING`` callback. Its
+ * connection id remains valid across sequential requests until it is
+ * explicitly closed, the peer disconnects or the configured inactivity
+ * timeout expires. Only one request is active at a time on an HTTP/1.1
+ * connection. Closing a listener also closes all of its accepted connections
+ * before the ConnectionManager reaches the stopped state. Incoming chunked
+ * request bodies are decoded and delivered as one reassembled message. */
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_HTTP(const UA_String eventSourceName);
+
+/**
+ * libwebsockets WebSocket Connection Manager
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * Provides WebSocket client and server connections. Each buffer passed to
+ * ``sendWithConnection`` is sent as one binary WebSocket message. Incoming
+ * fragments belonging to one WebSocket message are reassembled and delivered
+ * together in one connection callback.
+ *
+ * **Open Connection Parameters:**
+ *
+ * 0:address [string]
+ *    Remote hostname for clients or local interface for listeners. Listeners
+ *    default to all interfaces.
+ *
+ * 0:port [uint16]
+ *    Remote or listening port (required; zero selects a dynamic server port).
+ *
+ * 0:listen [boolean]
+ *    Create a listening connection (default: false).
+ *
+ * 0:path [string]
+ *    WebSocket request path (default: ``/``). Clients request this path and
+ *    listeners reject upgrade requests for any other path.
+ *
+ * 0:subprotocol [string]
+ *    WebSocket subprotocol to request or accept. By default no subprotocol is
+ *    negotiated. When configured, listeners reject clients that do not
+ *    offer this exact subprotocol. A client may offer additional protocols.
+ *
+ * 0:binary-only [boolean]
+ *    Reject incoming text messages and accept only binary WebSocket messages
+ *    (default: true).
+ *
+ * 0:useSSL [bool]
+ *    Encrypt the connection with TLS (default: false). TLS listeners require
+ *    ``certificate`` and ``private-key``.
+ *
+ * 0:certificate [bytestring]
+ *    DER or PEM encoded local certificate. For listeners this is the server
+ *    certificate. For clients it enables mutual TLS.
+ *
+ * 0:private-key [bytestring]
+ *    DER or PEM encoded private key for ``certificate``.
+ *
+ * 0:private-key-password [string]
+ *    Password for an encrypted private key.
+ *
+ * 0:ca-certificate [bytestring]
+ *    DER or PEM encoded CA certificate used to validate the TLS peer for
+ *    client connections. If omitted, the system trust store is used.
+ *
+ * 0:recv-max-message-size [uint32]
+ *    Maximum size of one reconstructed incoming WebSocket message. Zero or
+ *    omission means unlimited. For ``opcua+uacp`` this is the negotiated
+ *    receive buffer size because each WebSocket message carries one UACP
+ *    MessageChunk.
+ *
+ * 0:send-max-message-size [uint32]
+ *    Maximum size of one outgoing WebSocket message. Zero or omission means
+ *    unlimited. For ``opcua+uacp`` this is the negotiated send buffer size.
+ *
+ * 0:send-max-queue-size [uint32]
+ *    Maximum total payload size queued for sending on one connection. Zero or
+ *    omission means unlimited.
+ *
+ * 0:validate [boolean]
+ *    Validate parameters without opening a connection.
+ *
+ * Listener callbacks provide ``listen-address`` and ``listen-port``. Active
+ * and accepted connections provide ``remote-address``. Secure client
+ * connections validate the server certificate and hostname using either
+ * ``ca-certificate`` or the system trust store. */
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_LWS_WebSocket(const UA_String eventSourceName);
 
 /**
  * MQTT Connection Manager
@@ -711,6 +996,23 @@ UA_ConnectionManager_new_POSIX_Ethernet(const UA_String eventSourceName);
  *
  * 0:password [string]
  *    Password to use (default: none)
+ *
+ * 0:useSSL [bool]
+ *    Encrypt the broker connection with TLS (default: false).
+ *
+ * 0:certificate [bytestring]
+ *    DER or PEM encoded client certificate for mutual TLS.
+ *
+ * 0:private-key [bytestring]
+ *    DER or PEM encoded private key for ``certificate``.
+ *
+ * 0:private-key-password [string]
+ *    Password for an encrypted private key.
+ *
+ * 0:ca-certificate [bytestring]
+ *    DER or PEM encoded CA certificate used to validate the broker
+ *    certificate. If omitted, the system trust store is used. The broker
+ *    certificate and hostname are always validated for TLS connections.
  *
  * 0:keep-alive [uint16]
  *   Number of seconds for the keep-alive (ping) (default: 400).
@@ -742,15 +1044,281 @@ UA_EXPORT UA_ConnectionManager *
 UA_ConnectionManager_new_MQTT(const UA_String eventSourceName);
 
 /**
+ * Libwebsockets MQTT Connection Manager
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * Implements the same MQTT ConnectionManager contract and parameters as
+ * ``UA_ConnectionManager_new_MQTT``, using the MQTT client role provided by
+ * libwebsockets. Enable this implementation with ``UA_ENABLE_LWS_MQTT``. The
+ * libwebsockets library must be built with
+ * ``LWS_ROLE_MQTT=ON``. */
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_LWS_MQTT(const UA_String eventSourceName);
+
+/**
  * Signal Interrupt Manager
  * ~~~~~~~~~~~~~~~~~~~~~~~~
  * Create an instance of the interrupt manager that handles POSX signals. This
  * interrupt manager takes the numerical interrupt identifiers from <signal.h>
  * for the interruptHandle. */
+#if defined(UA_ARCHITECTURE_POSIX) && !defined(UA_ARCHITECTURE_LWIP)
 UA_EXPORT UA_InterruptManager *
 UA_InterruptManager_new_POSIX(const UA_String eventSourceName);
+#endif
 
-#endif /* defined(UA_ARCHITECTURE_POSIX) || defined(UA_ARCHITECTURE_WIN32) */
+#ifdef UA_ARCHITECTURE_WIN32
+UA_EXPORT UA_InterruptManager *
+UA_InterruptManager_new_WIN32(const UA_String eventSourceName);
+#endif
+
+#ifdef UA_ENABLE_EVENTLOOP_GLIB
+
+/**
+ * GLib Signal Interrupt Manager
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * Same contract as UA_InterruptManager_new_POSIX (interruptHandle is a
+ * <signal.h> signal number), but each interrupt is registered as a native
+ * GLib GSource (g_unix_signal_source_new) attached to the GMainContext of
+ * the owning EventLoop (see UA_EventLoop_new_GLib), instead of installing a
+ * sigaction handler writing to a self-pipe. GLib handles the OS-level signal
+ * reception itself.
+ *
+ * Two behavioral differences from UA_InterruptManager_new_POSIX, both
+ * inherent to GLib:
+ *
+ * - Delivery is asynchronous: GLib forwards a received signal to the
+ *   EventLoop via an internal worker thread. A signal may therefore not yet
+ *   be visible to a single non-blocking EventLoop iteration performed
+ *   immediately after it was raised; callers polling for a specific
+ *   interrupt should use one or more blocking iterations (a nonzero `run`
+ *   timeout), not assume synchronous delivery.
+ * - If the same signal number is registered on two independent GLib-backed
+ *   InterruptManagers (or GSources) in the same process, GLib delivers each
+ *   occurrence to only one of them, not both -- unlike
+ *   UA_InterruptManager_new_POSIX, which fans a signal out to every one of
+ *   its own registered listeners. Use different signal numbers if multiple
+ *   independent GLib InterruptManagers need to run side by side.
+ *
+ * Do not register the same signal on both a UA_InterruptManager_new_POSIX
+ * and a UA_InterruptManager_new_GLib instance in the same process -- they
+ * install the OS-level handler through different, mutually-unaware
+ * mechanisms and will race over it. Only available on Unix (Linux/Darwin),
+ * not Win32. */
+UA_EXPORT UA_InterruptManager *
+UA_InterruptManager_new_GLib(const UA_String eventSourceName);
+
+#endif /* UA_ENABLE_EVENTLOOP_GLIB */
+
+#elif defined(UA_ARCHITECTURE_ZEPHYR)
+
+UA_EXPORT UA_EventLoop *
+UA_EventLoop_new_Zephyr(const UA_Logger *logger);
+
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_Zephyr_TCP(const UA_String eventSourceName);
+
+#elif defined(UA_ARCHITECTURE_LWIP)
+
+struct UA_EventLoopConfiguration;
+typedef struct UA_EventLoopConfiguration UA_EventLoopConfiguration;
+
+/**
+ * Event Loop Configuration
+ * ------------------------
+ * Defines the configuration parameters and optional callback functions for managing
+ * the network interface within the EventLoop.
+ *
+ * The functions for initializing, polling, and shutting down the network interface
+ * are optional. If they are not provided, the initialization and management of the
+ * network interface must be handled externally.
+ *
+ * ** Configuration Parameters for the EventLoop**
+ *
+ * 0:ipaddr [string]
+ *    IPv4 address of the network interface (optional).
+ *
+ * 0:netmask [string]
+ *    Netmask of the network interface (optional).
+ *
+ * 0:gateway [string]
+ *    Gateway of the network interface (optional).
+ */
+
+struct UA_EventLoopConfiguration {
+ UA_KeyValueMap params;
+
+ UA_StatusCode (*netifInit)(UA_EventLoop *el, const UA_String *ipaddr,
+                            const UA_String *netmask, const UA_String *gw);
+ UA_StatusCode (*netifPoll)(UA_EventLoop *el);
+ void (*netifShutdown)(UA_EventLoop *el);
+};
+
+/**
+ * LWIP EventLoop Implementation
+ * -----------------------------
+ * This EventLoop is built on LWIP's socket-like API.
+ * The configuration paramaters must be set before starting the EventLoop.
+ *
+ * **Clock configuration (Linux and BSDs only)**
+ *
+ * 0:clock-source [int32]
+ *    Clock source (default: CLOCK_REALTIME).
+ *
+ * 0:clock-source-monotonic [int32]:
+ *   Clock source used for time intervals. A non-monotonic source can be used as
+ *   well. But expect accordingly longer sleep-times for timed events when the
+ *   clock is set to the past. See the man-page of "clock_gettime" on how to get
+ *   a clock source id for a character-device such as /dev/ptp0. (default:
+ *   CLOCK_MONOTONIC_RAW) */
+
+UA_EXPORT UA_EventLoop *
+UA_EventLoop_new_LWIP(const UA_Logger *logger, UA_EventLoopConfiguration *config);
+
+/**
+ * TCP Connection Manager
+ * ~~~~~~~~~~~~~~~~~~~~~~
+ * Listens on the network and manages TCP connections. This should be available
+ * for all architectures.
+ *
+ * The `openConnection` callback is used to create both client and server
+ * sockets. A server socket listens and accepts incoming connections (creates an
+ * active connection). This is distinguished by the key-value parameters passed
+ * to `openConnection`. Note that a single call to `openConnection` for a server
+ * connection may actually create multiple connections (one per hostname /
+ * device).
+ *
+ * The `connectionCallback` of the server socket and `context` of the server
+ * socket is reused for each new connection. But the key-value parameters for
+ * the first callback are different between server and client connections.
+ *
+ * **Configuration parameters for the ConnectionManager (set before start)**
+ *
+ * 0:recv-bufsize [uint32]
+ *    Size of the buffer that is statically allocated for receiving messages
+ *    (default 64kB).
+ *
+ * 0:send-bufsize [uint32]
+ *    Size of the statically allocated buffer for sending messages. The buffer
+ *    is reused for every `allocNetworkBuffer` to avoid a heap allocation per
+ *    message; a message larger than the buffer falls back to a fresh
+ *    allocation. A dedicated send buffer is used (never the recv buffer), so
+ *    sending while received data is still being processed is safe. If
+ *    undefined, the send buffer defaults to the recv-bufsize.
+ *
+ * **Open Connection Parameters:**
+ *
+ * 0:address [string | array of string]
+ *    Hostname or IPv4/v6 address for the connection (scalar parameter required
+ *    for active connections). For listen-connections the address contains the
+ *    local hostnames or IP addresses for listening. If undefined, listen on all
+ *    interfaces INADDR_ANY. (default: undefined)
+ *
+ * 0:port [uint16]
+ *    Port of the target host (required).
+ *
+ * 0:listen [boolean]
+ *    Listen-connection or active-connection (default: false)
+ *
+ * 0:validate [boolean]
+ *    If true, the connection setup will act as a dry-run without actually
+ *    creating any connection but solely validating the provided parameters
+ *    (default: false)
+ *
+ * **Active Connection Connection Callback Parameters (first callback only):**
+ *
+ * 0:remote-address [string]
+ *    Address of the remote side (hostname or IP address).
+ *
+ * **Listen Connection Connection Callback Parameters (first callback only):**
+ *
+ * 0:listen-address [string]
+ *    Local address (IP or hostname) for the new listen-connection.
+ *
+ * 0:listen-port [uint16]
+ *    Port on which the new connection listens.
+ *
+ * **Send Parameters:**
+ *
+ * No additional parameters for sending over an established TCP socket
+ * defined. */
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_LWIP_TCP(const UA_String eventSourceName);
+
+/**
+ * UDP Connection Manager
+ * ~~~~~~~~~~~~~~~~~~~~~~
+ * Manages UDP connections. This should be available for all architectures. The
+ * configuration parameters have to set before calling _start to take effect.
+ *
+ * **Configuration parameters for the ConnectionManager (set before start)**
+ *
+ * 0:recv-bufsize [uint32]
+ *    Size of the buffer that is statically allocated for receiving messages
+ *    (default 64kB).
+ *
+ * 0:send-bufsize [uint32]
+ *    Size of the statically allocated buffer for sending messages. The buffer
+ *    is reused for every `allocNetworkBuffer` to avoid a heap allocation per
+ *    message; a message larger than the buffer falls back to a fresh
+ *    allocation. A dedicated send buffer is used (never the recv buffer), so
+ *    sending while received data is still being processed is safe. If
+ *    undefined, the send buffer defaults to the recv-bufsize.
+ *
+ * **Open Connection Parameters:**
+ *
+ * 0:listen [boolean]
+ *    Use the connection for listening or for sending (default: false)
+ *
+ * 0:address [string | string array]
+ *    Hostname (or IPv4/v6 address) for sending or receiving. A scalar is
+ *    required for sending. For listening a string array for the list-hostnames
+ *    is possible as well (default: list on all hostnames).
+ *
+ * 0:port [uint16]
+ *    Port for sending or listening (required).
+ *
+ * 0:interface [string]
+ *    Network interface for listening or sending (e.g. when using multicast
+ *    addresses). Can be either the IP address of the network interface
+ *    or the interface name (e.g. 'eth0').
+ *
+ * 0:ttl [uint32]
+ *    Multicast time to live, (optional, default: 1 - meaning multicast is
+ *    available only to the local subnet).
+ *
+ * 0:loopback [boolean]
+ *    Whether or not to use multicast loopback, enabling local interfaces
+ *    belonging to the multicast group to receive packages. (default: enabled).
+ *
+ * 0:reuse [boolean]
+ *    Enables sharing of the same listening address on different sockets
+ *    (default: disabled).
+ *
+ * 0:sockpriority [uint32]
+ *    The socket priority (optional) - only available on linux. packets with a
+ *    higher priority may be processed first depending on the selected device
+ *    queueing discipline. Setting a priority outside the range 0 to 6 requires
+ *    the CAP_NET_ADMIN capability (on Linux).
+ *
+ * 0:validate [boolean]
+ *    If true, the connection setup will act as a dry-run without actually
+ *    creating any connection but solely validating the provided parameters
+ *    (default: false)
+ *
+ * **Connection Callback Parameters:**
+ *
+ * 0:remote-address [string]
+ *    Contains the remote IP address.
+ *
+ * 0:remote-port [uint16]
+ *    Contains the remote port.
+ *
+ * **Send Parameters:**
+ *
+ * No additional parameters for sending over an UDP connection defined. */
+UA_EXPORT UA_ConnectionManager *
+UA_ConnectionManager_new_LWIP_UDP(const UA_String eventSourceName);
+
+#endif
 
 _UA_END_DECLS
 

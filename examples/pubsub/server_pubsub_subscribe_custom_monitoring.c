@@ -13,10 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-UA_NodeId connectionIdentifier;
-UA_NodeId readerGroupIdentifier;
-UA_NodeId readerIdentifier;
-UA_DataSetReaderConfig readerConfig;
+static UA_NodeId connectionIdentifier;
+static UA_NodeId readerGroupIdentifier;
+static UA_NodeId readerIdentifier;
+static UA_DataSetReaderConfig readerConfig;
 
 static void
 addPubSubConnection(UA_Server *server, UA_String *transportProfile,
@@ -123,8 +123,8 @@ addSubscribedVariables(UA_Server *server, UA_NodeId dataSetReaderId) {
                             UA_NS0ID(BASEOBJECTTYPE), oAttr, NULL, &folderId);
 
     /* Create the TargetVariables with respect to DataSetMetaData fields */
-    UA_FieldTargetVariable *targetVars = (UA_FieldTargetVariable *)
-            UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetVariable));
+    UA_FieldTargetDataType *targetVars = (UA_FieldTargetDataType*)
+            UA_calloc(readerConfig.dataSetMetaData.fieldsSize, sizeof(UA_FieldTargetDataType));
     for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++) {
         /* Variable to subscribe data */
         UA_VariableAttributes vAttr = UA_VariableAttributes_default;
@@ -141,15 +141,14 @@ addSubscribedVariables(UA_Server *server, UA_NodeId dataSetReaderId) {
                                   UA_NS0ID(BASEDATAVARIABLETYPE), vAttr, NULL, &newNode);
 
         /* For creating Targetvariables */
-        UA_FieldTargetDataType_init(&targetVars[i].targetVariable);
-        targetVars[i].targetVariable.attributeId  = UA_ATTRIBUTEID_VALUE;
-        targetVars[i].targetVariable.targetNodeId = newNode;
+        targetVars[i].attributeId  = UA_ATTRIBUTEID_VALUE;
+        targetVars[i].targetNodeId = newNode;
     }
 
     UA_Server_DataSetReader_createTargetVariables(server, dataSetReaderId,
                                                   readerConfig.dataSetMetaData.fieldsSize, targetVars);
     for(size_t i = 0; i < readerConfig.dataSetMetaData.fieldsSize; i++)
-        UA_FieldTargetDataType_clear(&targetVars[i].targetVariable);
+        UA_FieldTargetDataType_clear(&targetVars[i]);
 
     UA_free(targetVars);
     UA_free(readerConfig.dataSetMetaData.fields);
@@ -164,7 +163,7 @@ pubsubStateChangeCallback(UA_Server *server,
     if(!UA_NodeId_equal(&pubsubComponentId, &readerIdentifier))
         return;
 
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                 "State of the Reader changed to '%i' with StatusCode %s",
                 state, UA_StatusCode_name(code));
 }

@@ -4,6 +4,9 @@
  *    Copyright 2017-2018 (c) Mark Giraud, Fraunhofer IOSB
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
  *    Copyright 2018 (c) Daniel Feist, Precitec GmbH & Co. KG
+ *    Copyright 2024 (c) Siemens AG (Authors: Tin Raic, Thomas Zeschg)
+ *    Copyright 2026 (c) o6 Automation GmbH (Author: Andreas Ebner)
+ *    Copyright 2025 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #ifndef UA_SECURITYPOLICIES_H_
@@ -50,14 +53,78 @@ UA_SecurityPolicy_Aes256Sha256RsaPss(UA_SecurityPolicy *policy,
                                      const UA_ByteString localPrivateKey,
                                      const UA_Logger *logger);
 
-#ifdef __linux__ /* Linux only so far */
+/* Deprecated (OPC UA Part 7): superseded by the AEAD policies
+ * UA_SecurityPolicy_EccNistP256AesGcm / EccNistP256ChaChaPoly. */
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccNistP256(UA_SecurityPolicy *policy,
+                            const UA_ApplicationType applicationType,
+                            const UA_ByteString localCertificate,
+                            const UA_ByteString localPrivateKey,
+                            const UA_Logger *logger);
+
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccNistP256AesGcm(UA_SecurityPolicy *policy,
+                                    const UA_ApplicationType applicationType,
+                                    const UA_ByteString localCertificate,
+                                    const UA_ByteString localPrivateKey,
+                                    const UA_Logger *logger);
+
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccNistP256ChaChaPoly(UA_SecurityPolicy *policy,
+                                        const UA_ApplicationType applicationType,
+                                        const UA_ByteString localCertificate,
+                                        const UA_ByteString localPrivateKey,
+                                        const UA_Logger *logger);
+
+/* Deprecated (OPC UA Part 7): superseded by the AEAD policies
+ * UA_SecurityPolicy_EccNistP384AesGcm / EccNistP384ChaChaPoly. */
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccNistP384(UA_SecurityPolicy *policy,
+                              const UA_ApplicationType applicationType,
+                              const UA_ByteString localCertificate,
+                              const UA_ByteString localPrivateKey,
+                              const UA_Logger *logger);
+
+/* Deprecated (OPC UA Part 7): superseded by the AEAD policies
+ * UA_SecurityPolicy_EccBrainpoolP256r1AesGcm / EccBrainpoolP256r1ChaChaPoly. */
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccBrainpoolP256r1(UA_SecurityPolicy *policy,
+                                     const UA_ApplicationType applicationType,
+                                     const UA_ByteString localCertificate,
+                                     const UA_ByteString localPrivateKey,
+                                     const UA_Logger *logger);
+
+/* Deprecated (OPC UA Part 7): superseded by the AEAD policies
+ * UA_SecurityPolicy_EccBrainpoolP384r1AesGcm / EccBrainpoolP384r1ChaChaPoly. */
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccBrainpoolP384r1(UA_SecurityPolicy *policy,
+                                     const UA_ApplicationType applicationType,
+                                     const UA_ByteString localCertificate,
+                                     const UA_ByteString localPrivateKey,
+                                     const UA_Logger *logger);
+
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccCurve25519(UA_SecurityPolicy *policy,
+                                const UA_ApplicationType applicationType,
+                                const UA_ByteString localCertificate,
+                                const UA_ByteString localPrivateKey,
+                                const UA_Logger *logger);
+
+UA_EXPORT UA_StatusCode
+UA_SecurityPolicy_EccCurve448(UA_SecurityPolicy *policy,
+                              const UA_ApplicationType applicationType,
+                              const UA_ByteString localCertificate,
+                              const UA_ByteString localPrivateKey,
+                              const UA_Logger *logger);
+
+#if defined(__linux__) || defined(UA_ARCHITECTURE_WIN32)
 UA_EXPORT UA_StatusCode
 UA_SecurityPolicy_Filestore(UA_SecurityPolicy *policy,
                             UA_SecurityPolicy *innerPolicy,
                             const UA_String storePath);
-#endif
+#endif /* defined(__linux__) || defined(UA_ARCHITECTURE_WIN32) */
 
-#endif
+#endif /* UA_ENABLE_ENCRYPTION */
 
 UA_EXPORT UA_StatusCode
 UA_PubSubSecurityPolicy_Aes128Ctr(UA_PubSubSecurityPolicy *policy,

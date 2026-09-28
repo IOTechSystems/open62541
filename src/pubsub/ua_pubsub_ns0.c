@@ -2,20 +2,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
- * Copyright (c) 2017-2022 Fraunhofer IOSB (Author: Andreas Ebner)
+ * Copyright (c) 2017-2025 Fraunhofer IOSB (Author: Andreas Ebner)
  * Copyright (c) 2019-2021 Kalycito Infotech Private Limited
  * Copyright (c) 2020 Yannick Wallerer, Siemens AG
  * Copyright (c) 2020-2022 Thomas Fischer, Siemens AG
  * Copyright (c) 2022 Linutronix GmbH (Author: Muddasir Shakil)
+ * Copyright (c) 2025 Fraunhofer IOSB (Author: Julius Pfrommer)
+ * Copyright 2025 (c) o6 Automation GmbH (Author: Andreas Ebner)
+ * Copyright 2025 (c) o6 Automation GmbH (Author: Julius Pfrommer)
  */
 
 #include "ua_pubsub_internal.h"
 
-#ifdef UA_ENABLE_PUBSUB_SKS
-#include "ua_pubsub_keystorage.h"
-#endif
-
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL /* conditional compilation */
+
+static UA_StatusCode
+checkMethodArgumentCounts(size_t inputSize, size_t expectedInputSize,
+                          size_t outputSize, size_t expectedOutputSize) {
+    if(inputSize < expectedInputSize)
+        return UA_STATUSCODE_BADARGUMENTSMISSING;
+    if(inputSize > expectedInputSize)
+        return UA_STATUSCODE_BADTOOMANYARGUMENTS;
+    return checkMethodOutputArguments(outputSize, expectedOutputSize);
+}
 
 typedef struct {
     UA_NodeId parentNodeId;
@@ -62,120 +71,308 @@ findSingleChildNode(UA_Server *server, UA_QualifiedName targetName,
     return resultNodeId;
 }
 
-static void
-onReadLocked(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
-             const UA_NodeId *nodeid, void *context,
-             const UA_NumericRange *range, const UA_DataValue *data) {
+static UA_StatusCode
+findPubSubComponentFromStatus(UA_Server *server, const UA_NodeId *statusObjectId,
+                              void **component, UA_Boolean *isPublishSubscribeObject) {
     UA_LOCK_ASSERT(&server->serviceMutex);
 
     UA_PubSubManager *psm = getPSM(server);
     if(!psm)
-        return;
+        return UA_STATUSCODE_BADINTERNALERROR;
+
+    *isPublishSubscribeObject = false;
+
+    /* Enable/Disable on the root PubSub Status (PUBLISHSUBSCRIBE_STATUS,
+     * NS0 id 17405) cannot be resolved via the inverse HasComponent browse
+     * below; match the well-known Status ID and route to the PubSubManager. */
+    UA_NodeId statusId = UA_NS0ID(PUBLISHSUBSCRIBE_STATUS);
+    UA_NodeId publishSubscribeId = UA_NS0ID(PUBLISHSUBSCRIBE);
+    if(UA_NodeId_equal(statusObjectId, &statusId) ||
+       UA_NodeId_equal(statusObjectId, &publishSubscribeId)) {
+        *component = psm;
+        *isPublishSubscribeObject = true;
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* Find the parent PubSub component by browsing up from the Status object */
+    UA_BrowseDescription bd;
+    UA_BrowseDescription_init(&bd);
+    bd.nodeId = *statusObjectId;
+    bd.browseDirection = UA_BROWSEDIRECTION_INVERSE;
+    bd.referenceTypeId = UA_NS0ID(HASCOMPONENT);
+    bd.includeSubtypes = false;
+    bd.nodeClassMask = UA_NODECLASS_OBJECT;
+    bd.resultMask = UA_BROWSERESULTMASK_REFERENCETYPEID | UA_BROWSERESULTMASK_TYPEDEFINITION;
+
+    UA_BrowseResult br = UA_Server_browse(server, 0, &bd);
+    if(br.statusCode != UA_STATUSCODE_GOOD || br.referencesSize == 0) {
+        UA_BrowseResult_clear(&br);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    UA_NodeId componentNodeId = br.references[0].nodeId.nodeId;
+    UA_NodeId parentTypeId = br.references[0].typeDefinition.nodeId;
+    UA_BrowseResult_clear(&br);
+
+    /* The top-level PublishSubscribe node's Status child resolves directly to
+     * the PubSubManager. Match it explicitly so Enable/Disable route to the
+     * manager instead of relying on the browse fallback below. */
+    if(UA_NodeId_equal(&componentNodeId, &publishSubscribeId)) {
+        *isPublishSubscribeObject = true;
+        *component = psm;
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* Identify component type and find the component */
+    UA_NodeId pubsubconnectionTypeId = UA_NS0ID(PUBSUBCONNECTIONTYPE);
+    UA_NodeId writergroupTypeId = UA_NS0ID(WRITERGROUPTYPE);
+    UA_NodeId readergroupTypeId = UA_NS0ID(READERGROUPTYPE);
+    UA_NodeId datasetreaderTypeId = UA_NS0ID(DATASETREADERTYPE);
+    UA_NodeId datasetwriterTypeId = UA_NS0ID(DATASETWRITERTYPE);
+    UA_NodeId publishsubscribeTypeId = UA_NS0ID(PUBLISHSUBSCRIBETYPE);
+
+    if(UA_NodeId_equal(&parentTypeId, &publishsubscribeTypeId)) {
+        *isPublishSubscribeObject = true;
+        *component = psm;
+        return UA_STATUSCODE_GOOD;
+    } else if(UA_NodeId_equal(&parentTypeId, &pubsubconnectionTypeId)) {
+        *component = UA_PubSubConnection_find(psm, componentNodeId);
+    } else if(UA_NodeId_equal(&parentTypeId, &writergroupTypeId)) {
+        *component = UA_WriterGroup_find(psm, componentNodeId);
+    } else if(UA_NodeId_equal(&parentTypeId, &readergroupTypeId)) {
+        *component = UA_ReaderGroup_find(psm, componentNodeId);
+    } else if(UA_NodeId_equal(&parentTypeId, &datasetreaderTypeId)) {
+        *component = UA_DataSetReader_find(psm, componentNodeId);
+    } else if(UA_NodeId_equal(&parentTypeId, &datasetwriterTypeId)) {
+        *component = UA_DataSetWriter_find(psm, componentNodeId);
+    } else {
+        return UA_STATUSCODE_BADNOTSUPPORTED;
+    }
+
+    if(!*component)
+        return UA_STATUSCODE_BADNOTFOUND;
+
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+pubSubStateVariableDataSourceRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
+                                  const UA_NodeId *nodeid, void *context, UA_Boolean includeSourceTimeStamp,
+                                  const UA_NumericRange *range, UA_DataValue *value) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+
+    /* Find the parent Status object by browsing inverse from State variable */
+    UA_BrowseDescription bd;
+    UA_BrowseDescription_init(&bd);
+    bd.nodeId = *nodeid;
+    bd.browseDirection = UA_BROWSEDIRECTION_INVERSE;
+    bd.referenceTypeId = UA_NS0ID(HASCOMPONENT);
+    bd.includeSubtypes = false;
+    bd.nodeClassMask = UA_NODECLASS_OBJECT;
+    bd.resultMask = UA_BROWSERESULTMASK_REFERENCETYPEID;
+
+    UA_BrowseResult br = UA_Server_browse(server, 0, &bd);
+    if(br.statusCode != UA_STATUSCODE_GOOD || br.referencesSize == 0) {
+        UA_BrowseResult_clear(&br);
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    UA_NodeId statusObjectId = br.references[0].nodeId.nodeId;
+    UA_BrowseResult_clear(&br);
+
+    void *component = NULL;
+    UA_Boolean isPublishSubscribeObject = false;
+    
+    UA_StatusCode retVal = findPubSubComponentFromStatus(server, &statusObjectId,
+                                                         &component,
+                                                         &isPublishSubscribeObject);
+    if(retVal != UA_STATUSCODE_GOOD)
+        return retVal;
+
+    UA_PubSubState state = isPublishSubscribeObject ?
+        UA_PubSubManager_getPubSubState((UA_PubSubManager*)component) :
+        ((UA_PubSubComponentHead*)component)->state;
+
+    value->hasValue = true;
+    return UA_Variant_setScalarCopy(&value->value, &state, &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
+}
+
+static UA_StatusCode
+setPubSubObjectEnabled(UA_Server *server, const UA_NodeId *objectId,
+                       UA_Boolean enabled) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+
+    void *component = NULL;
+    UA_Boolean isPublishSubscribeObject = false;
+    UA_StatusCode res = findPubSubComponentFromStatus(
+        server, objectId, &component, &isPublishSubscribeObject);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+
+    UA_PubSubManager *psm = getPSM(server);
+    if(!psm)
+        return UA_STATUSCODE_BADINTERNALERROR;
+
+    if(isPublishSubscribeObject) {
+        UA_Boolean stopped = (psm->drv.state == UA_LIFECYCLESTATE_STOPPED);
+        if(enabled != stopped)
+            return UA_STATUSCODE_BADINVALIDSTATE;
+        if(enabled)
+            return psm->drv.start(&psm->drv);
+        psm->drv.stop(&psm->drv);
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* The information-model method is intentionally not idempotent. The
+     * internal state machines remain the single authority for transitions. */
+    UA_PubSubComponentHead *head = (UA_PubSubComponentHead*)component;
+    UA_Boolean disabled = (head->state == UA_PUBSUBSTATE_DISABLED);
+    if(enabled != disabled)
+        return UA_STATUSCODE_BADINVALIDSTATE;
+    return UA_PubSubComponent_setPubSubState(
+        psm, component, head->componentType,
+        enabled ? UA_PUBSUBSTATE_OPERATIONAL : UA_PUBSUBSTATE_DISABLED,
+        UA_STATUSCODE_GOOD);
+}
+
+static UA_StatusCode
+enablePubSubObjectAction(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
+                         const UA_NodeId *methodId, void *methodContext,
+                         const UA_NodeId *objectId, void *objectContext,
+                         size_t inputSize, const UA_Variant *input,
+                         size_t outputSize, UA_Variant *output) {
+    return setPubSubObjectEnabled(server, objectId, true);
+}
+
+static UA_StatusCode
+disablePubSubObjectAction(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
+                          const UA_NodeId *methodId, void *methodContext,
+                          const UA_NodeId *objectId, void *objectContext,
+                          size_t inputSize, const UA_Variant *input,
+                          size_t outputSize, UA_Variant *output) {
+    return setPubSubObjectEnabled(server, objectId, false);
+}
+
+static UA_StatusCode
+ReadCallback(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
+             const UA_NodeId *nodeid, void *context, UA_Boolean includeSourceTimeStamp,
+             const UA_NumericRange *range, UA_DataValue *value) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+
+    UA_PubSubManager *psm = getPSM(server);
+    if(!psm)
+        return UA_STATUSCODE_BADINTERNALERROR;
 
     const UA_NodePropertyContext *nodeContext = (const UA_NodePropertyContext*)context;
     const UA_NodeId *myNodeId = &nodeContext->parentNodeId;
 
-    UA_PublishedVariableDataType *pvd = NULL;
-    UA_PublishedDataSet *publishedDataSet = NULL;
-
-    UA_Variant value;
-    UA_Variant_init(&value);
-    UA_Boolean isConnected;
-
+    /* Resolve the property's owning PubSub component and copy its current
+     * value into the read result. */
     switch(nodeContext->parentClassifier) {
     case UA_NS0ID_PUBSUBCONNECTIONTYPE: {
         UA_PubSubConnection *pubSubConnection = UA_PubSubConnection_find(psm, *myNodeId);
-        switch(nodeContext->elementClassiefier) {
-        case UA_NS0ID_PUBSUBCONNECTIONTYPE_PUBLISHERID:
-            UA_PublisherId_toVariant(&pubSubConnection->config.publisherId, &value);
-            break;
-        default:
-            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                           "Read error! Unknown property.");
+        if(!pubSubConnection)
+            return UA_STATUSCODE_BADNOTFOUND;
+        if(nodeContext->elementClassiefier == UA_NS0ID_PUBSUBCONNECTIONTYPE_PUBLISHERID) {
+            UA_Variant tmp;
+            UA_PublisherId_toVariant(&pubSubConnection->config.publisherId, &tmp);
+            value->hasValue = true;
+            return UA_Variant_copy(&tmp, &value->value);
         }
         break;
     }
     case UA_NS0ID_READERGROUPTYPE: {
         UA_ReaderGroup *readerGroup = UA_ReaderGroup_find(psm, *myNodeId);
         if(!readerGroup)
-            return;
-        switch(nodeContext->elementClassiefier) {
-        case UA_NS0ID_PUBSUBGROUPTYPE_STATUS_STATE:
-            UA_Variant_setScalar(&value, &readerGroup->head.state,
-                                 &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
-            break;
-        default:
-            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                           "Read error! Unknown property.");
+            return UA_STATUSCODE_BADNOTFOUND;
+        if(nodeContext->elementClassiefier == UA_NS0ID_PUBSUBGROUPTYPE_STATUS_STATE) {
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &readerGroup->head.state,
+                                            &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
         }
         break;
     }
+
+    /* Expose the reader's publisher filter and current runtime state. */
     case UA_NS0ID_DATASETREADERTYPE: {
         UA_DataSetReader *dataSetReader = UA_DataSetReader_find(psm, *myNodeId);
         if(!dataSetReader)
-            return;
-
+            return UA_STATUSCODE_BADNOTFOUND;
         switch(nodeContext->elementClassiefier) {
-        case UA_NS0ID_DATASETREADERTYPE_PUBLISHERID:
-            UA_PublisherId_toVariant(&dataSetReader->config.publisherId, &value);
-            break;
+        case UA_NS0ID_DATASETREADERTYPE_PUBLISHERID: {
+            UA_Variant tmp;
+            UA_PublisherId_toVariant(&dataSetReader->config.publisherId, &tmp);
+            value->hasValue = true;
+            return UA_Variant_copy(&tmp, &value->value);
+        }
         case UA_NS0ID_DATASETREADERTYPE_STATUS_STATE:
-            UA_Variant_setScalar(&value, &dataSetReader->head.state,
-                                 &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
-            break;
-        default:
-            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                           "Read error! Unknown property.");
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &dataSetReader->head.state,
+                                            &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
+        default: break;
         }
         break;
     }
+
+    /* Expose the publishing interval and the writer group's runtime state. */
     case UA_NS0ID_WRITERGROUPTYPE: {
         UA_WriterGroup *writerGroup = UA_WriterGroup_find(psm, *myNodeId);
         if(!writerGroup)
-            return;
+            return UA_STATUSCODE_BADNOTFOUND;
         switch(nodeContext->elementClassiefier){
         case UA_NS0ID_WRITERGROUPTYPE_PUBLISHINGINTERVAL:
-            UA_Variant_setScalar(&value, &writerGroup->config.publishingInterval,
-                                 &UA_TYPES[UA_TYPES_DURATION]);
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value,
+                                            &writerGroup->config.publishingInterval,
+                                            &UA_TYPES[UA_TYPES_DURATION]);
             break;
         case UA_NS0ID_PUBSUBGROUPTYPE_STATUS_STATE:
-            UA_Variant_setScalar(&value, &writerGroup->head.state,
-                                 &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &writerGroup->head.state,
+                                            &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
             break;
-        default:
-            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                           "Read error! Unknown property.");
+        default: break;
         }
         break;
     }
     case UA_NS0ID_DATASETWRITERTYPE: {
         UA_DataSetWriter *dataSetWriter = UA_DataSetWriter_find(psm, *myNodeId);
         if(!dataSetWriter)
-            return;
-
+            return UA_STATUSCODE_BADNOTFOUND;
         switch(nodeContext->elementClassiefier) {
-            case UA_NS0ID_DATASETWRITERTYPE_DATASETWRITERID:
-                UA_Variant_setScalar(&value, &dataSetWriter->config.dataSetWriterId,
-                                     &UA_TYPES[UA_TYPES_UINT16]);
-                break;
-            case UA_NS0ID_DATASETWRITERTYPE_STATUS_STATE:
-                UA_Variant_setScalar(&value, &dataSetWriter->head.state,
-                                     &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
-                break;
-            default:
-                UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                               "Read error! Unknown property.");
+        case UA_NS0ID_DATASETWRITERTYPE_DATASETWRITERID:
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &dataSetWriter->config.dataSetWriterId,
+                                            &UA_TYPES[UA_TYPES_UINT16]);
+        case UA_NS0ID_DATASETWRITERTYPE_STATUS_STATE:
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &dataSetWriter->head.state,
+                                            &UA_TYPES[UA_TYPES_PUBSUBSTATE]);
+        default: break;
         }
         break;
     }
+
+    /* Build PublishedData from the configured fields, or copy the dataset
+     * metadata and version requested by the property. */
     case UA_NS0ID_PUBLISHEDDATAITEMSTYPE: {
-        publishedDataSet = UA_PublishedDataSet_find(psm, *myNodeId);
+        UA_PublishedDataSet *publishedDataSet = UA_PublishedDataSet_find(psm, *myNodeId);
         if(!publishedDataSet)
-            return;
+            return UA_STATUSCODE_BADNOTFOUND;
         switch(nodeContext->elementClassiefier) {
         case UA_NS0ID_PUBLISHEDDATAITEMSTYPE_PUBLISHEDDATA: {
-            pvd = (UA_PublishedVariableDataType *)
-                UA_calloc(publishedDataSet->fieldSize, sizeof(UA_PublishedVariableDataType));
+            if(publishedDataSet->fieldSize == 0) {
+                value->hasValue = true;
+                UA_Variant_setArray(&value->value, UA_EMPTY_ARRAY_SENTINEL, 0,
+                                    &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
+                return UA_STATUSCODE_GOOD;
+            }
+
+            UA_PublishedVariableDataType *pvd = (UA_PublishedVariableDataType*)
+                UA_calloc(publishedDataSet->fieldSize,
+                          sizeof(UA_PublishedVariableDataType));
+            if(!pvd)
+                return UA_STATUSCODE_BADOUTOFMEMORY;
             size_t counter = 0;
             UA_DataSetField *field;
             TAILQ_FOREACH(field, &publishedDataSet->fields, listEntry) {
@@ -186,140 +383,117 @@ onReadLocked(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext
                                &pvd[counter].publishedVariable);
                 counter++;
             }
-            UA_Variant_setArray(&value, pvd, publishedDataSet->fieldSize,
+            value->hasValue = true;
+            UA_Variant_setArray(&value->value, pvd, publishedDataSet->fieldSize,
                                 &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
-            break;
+            return UA_STATUSCODE_GOOD;
         }
-        case UA_NS0ID_PUBLISHEDDATASETTYPE_DATASETMETADATA: {
-            UA_Variant_setScalar(&value, &publishedDataSet->dataSetMetaData,
-                                 &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
-            break;
-        }
-        case UA_NS0ID_PUBLISHEDDATASETTYPE_CONFIGURATIONVERSION: {
-            UA_Variant_setScalar(&value, &publishedDataSet->dataSetMetaData.configurationVersion,
-                                     &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]);
-            break;
-        }
-        default:
-            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                           "Read error! Unknown property.");
+        case UA_NS0ID_PUBLISHEDDATASETTYPE_DATASETMETADATA:
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &publishedDataSet->dataSetMetaData,
+                                            &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
+        case UA_NS0ID_PUBLISHEDDATASETTYPE_CONFIGURATIONVERSION:
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value,
+                                            &publishedDataSet->dataSetMetaData.configurationVersion,
+                                            &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]);
+        default: break;
         }
         break;
-    }    
+    }
+
+    /* Read standalone dataset targets, metadata and reader attachment state. */
     case UA_NS0ID_STANDALONESUBSCRIBEDDATASETREFDATATYPE: {
         UA_SubscribedDataSet *sds = UA_SubscribedDataSet_find(psm, *myNodeId);
+        if(!sds)
+            return UA_STATUSCODE_BADNOTFOUND;
         switch(nodeContext->elementClassiefier) {
-            case UA_NS0ID_STANDALONESUBSCRIBEDDATASETTYPE_ISCONNECTED: {
-                isConnected = (sds->connectedReader != NULL);
-                UA_Variant_setScalar(&value, &isConnected,
-                                     &UA_TYPES[UA_TYPES_BOOLEAN]);
-                break;
-            }
-            case UA_NS0ID_STANDALONESUBSCRIBEDDATASETTYPE_DATASETMETADATA: {
-                UA_Variant_setScalar(&value, &sds->config.dataSetMetaData,
-                                     &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
-                break;
-            }
-            default:
-            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                            "Read error! Unknown property.");
+        case UA_NS0ID_TARGETVARIABLESTYPE_TARGETVARIABLES:
+            value->hasValue = true;
+            return UA_Variant_setArrayCopy(&value->value,
+                sds->config.subscribedDataSet.target.targetVariables,
+                sds->config.subscribedDataSet.target.targetVariablesSize,
+                &UA_TYPES[UA_TYPES_FIELDTARGETDATATYPE]);
+        case UA_NS0ID_STANDALONESUBSCRIBEDDATASETTYPE_ISCONNECTED: {
+            UA_Boolean isConnected = (sds->connectedReader != NULL);
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &isConnected,
+                                            &UA_TYPES[UA_TYPES_BOOLEAN]);
+        }
+        case UA_NS0ID_STANDALONESUBSCRIBEDDATASETTYPE_DATASETMETADATA: {
+            value->hasValue = true;
+            return UA_Variant_setScalarCopy(&value->value, &sds->config.dataSetMetaData,
+                                            &UA_TYPES[UA_TYPES_DATASETMETADATATYPE]);
+        }
+        default: break;
         }
         break;
     }
-    default:
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                       "Read error! Unknown parent element.");
+    default: break;
     }
 
-    writeValueAttribute(server, *nodeid, &value);
-    if(pvd && publishedDataSet) {
-        UA_Array_delete(pvd, publishedDataSet->fieldSize,
-                        &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]);
-    }
+    UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
+                   "Read error! Unknown property");
+    return UA_STATUSCODE_BADINTERNALERROR;
 }
 
-static void
-onRead(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
-       const UA_NodeId *nodeid, void *context,
-       const UA_NumericRange *range, const UA_DataValue *data) {
-    UA_LOCK(&server->serviceMutex);
-    onReadLocked(server, sessionId, sessionContext, nodeid, context, range, data);
-    UA_UNLOCK(&server->serviceMutex);
-}
-
-static void
-onWriteLocked(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
+static UA_StatusCode
+WriteCallback(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
               const UA_NodeId *nodeId, void *nodeContext,
               const UA_NumericRange *range, const UA_DataValue *data) {
     UA_LOCK_ASSERT(&server->serviceMutex);
+
     UA_NodePropertyContext *npc = (UA_NodePropertyContext *)nodeContext;
 
     UA_PubSubManager *psm = getPSM(server);
     if(!psm)
-        return;
+        return UA_STATUSCODE_BADNOTFOUND;
+
     UA_WriterGroup *writerGroup = NULL;
-    UA_StatusCode res = UA_STATUSCODE_GOOD;
+    UA_StatusCode res = UA_STATUSCODE_BADNOTWRITABLE;
     switch(npc->parentClassifier) {
-        case UA_NS0ID_PUBSUBCONNECTIONTYPE:
-            //no runtime writable attributes
-            break;
-        case UA_NS0ID_WRITERGROUPTYPE: {
-            writerGroup = UA_WriterGroup_find(psm, npc->parentNodeId);
-            if(!writerGroup) {
-                res = UA_STATUSCODE_BADNOTFOUND;
-                break;
+    case UA_NS0ID_PUBSUBCONNECTIONTYPE:
+        break;
+    case UA_NS0ID_WRITERGROUPTYPE: {
+        writerGroup = UA_WriterGroup_find(psm, npc->parentNodeId);
+        if(!writerGroup)
+            return UA_STATUSCODE_BADNOTFOUND;
+        switch(npc->elementClassiefier) {
+        case UA_NS0ID_WRITERGROUPTYPE_PUBLISHINGINTERVAL: {
+            if(!UA_Variant_hasScalarType(&data->value, &UA_TYPES[UA_TYPES_DURATION]) &&
+               !UA_Variant_hasScalarType(&data->value, &UA_TYPES[UA_TYPES_DOUBLE]))
+                return UA_STATUSCODE_BADTYPEMISMATCH;
+            UA_Duration interval = *((UA_Duration *) data->value.data);
+            if(interval <= 0.0)
+                return UA_STATUSCODE_BADOUTOFRANGE;
+
+            /* Apply the interval and reschedule publishing if the group is
+             * running. */
+            writerGroup->config.publishingInterval = interval;
+            if(writerGroup->head.state == UA_PUBSUBSTATE_OPERATIONAL) {
+                UA_WriterGroup_removePublishCallback(psm, writerGroup);
+                UA_WriterGroup_addPublishCallback(psm, writerGroup);
             }
-            switch(npc->elementClassiefier) {
-                case UA_NS0ID_WRITERGROUPTYPE_PUBLISHINGINTERVAL:
-                    if(!UA_Variant_hasScalarType(&data->value, &UA_TYPES[UA_TYPES_DURATION]) &&
-                       !UA_Variant_hasScalarType(&data->value, &UA_TYPES[UA_TYPES_DOUBLE])) {
-                        res = UA_STATUSCODE_BADTYPEMISMATCH;
-                        break;
-                    }
-                    UA_Duration interval = *((UA_Duration *) data->value.data);
-                    if(interval <= 0.0) {
-                        res = UA_STATUSCODE_BADOUTOFRANGE;
-                        break;
-                    }
-                    writerGroup->config.publishingInterval = interval;
-                    if(writerGroup->head.state == UA_PUBSUBSTATE_OPERATIONAL) {
-                        UA_WriterGroup_removePublishCallback(psm, writerGroup);
-                        UA_WriterGroup_addPublishCallback(psm, writerGroup);
-                    }
-                    break;
-                default:
-                    UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                                   "Write error! Unknown property element.");
-            }
-            break;
+            return UA_STATUSCODE_GOOD;
         }
-        default:
-            UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                           "Read error! Unknown parent element.");
+        default: break;
+        }
+        break;
+    }
+    default: break;
     }
 
-    if(res != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
-                       "Changing the ReaderGroupConfig failed with status %s",
-                       UA_StatusCode_name(res));
-    }
-}
-
-static void
-onWrite(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
-        const UA_NodeId *nodeId, void *nodeContext,
-        const UA_NumericRange *range, const UA_DataValue *data) {
-    UA_LOCK(&server->serviceMutex);
-    onWriteLocked(server, sessionId, sessionContext, nodeId, nodeContext, range, data);
-    UA_UNLOCK(&server->serviceMutex);
+    UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
+                   "Changing the ReaderGroupConfig failed");
+    return res;
 }
 
 static UA_StatusCode
-addVariableValueSource(UA_Server *server, UA_ValueCallback valueCallback,
+setVariableValueSource(UA_Server *server, const UA_CallbackValueSource evs,
                        UA_NodeId node, UA_NodePropertyContext *context){
     UA_LOCK_ASSERT(&server->serviceMutex);
     setNodeContext(server, node, context);
-    return setVariableNode_valueCallback(server, node, valueCallback);
+    return setVariableNode_callbackValueSource(server, node, evs);
 }
 
 static UA_StatusCode
@@ -335,7 +509,8 @@ addPubSubConnectionConfig(UA_Server *server, UA_PubSubConnectionDataType *pubsub
     UA_NetworkAddressUrlDataType networkAddressUrl;
     memset(&networkAddressUrl, 0, sizeof(networkAddressUrl));
     UA_ExtensionObject *eo = &pubsubConnection->address;
-    if(eo->encoding == UA_EXTENSIONOBJECT_DECODED &&
+    if((eo->encoding == UA_EXTENSIONOBJECT_DECODED ||
+        eo->encoding == UA_EXTENSIONOBJECT_DECODED_NODELETE) &&
        eo->content.decoded.type == &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]) {
         void *data = eo->content.decoded.data;
         retVal =
@@ -352,9 +527,15 @@ addPubSubConnectionConfig(UA_Server *server, UA_PubSubConnectionDataType *pubsub
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
 
-    retVal |= UA_PublisherId_fromVariant(&connectionConfig.publisherId,
-                                         &pubsubConnection->publisherId);
-    retVal |= UA_PubSubConnection_create(psm, &connectionConfig, connectionId);
+    retVal = UA_PublisherId_fromVariant(&connectionConfig.publisherId,
+                                        &pubsubConnection->publisherId);
+    if(retVal != UA_STATUSCODE_GOOD) {
+        UA_NetworkAddressUrlDataType_clear(&networkAddressUrl);
+        return retVal;
+    }
+
+    retVal = UA_PubSubConnection_create(psm, &connectionConfig, connectionId);
+    UA_PublisherId_clear(&connectionConfig.publisherId);
     UA_NetworkAddressUrlDataType_clear(&networkAddressUrl);
     return retVal;
 }
@@ -373,32 +554,40 @@ addWriterGroupConfig(UA_Server *server, UA_NodeId connectionId,
     if(!psm)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    /* Now we create a new WriterGroupConfig and add the group to the existing
-     * PubSubConnection. */
-    UA_WriterGroupConfig writerGroupConfig;
-    memset(&writerGroupConfig, 0, sizeof(UA_WriterGroupConfig));
-    writerGroupConfig.name = writerGroup->name;
-    writerGroupConfig.publishingInterval = writerGroup->publishingInterval;
-    writerGroupConfig.writerGroupId = writerGroup->writerGroupId;
-    //TODO remove hard coded UADP
-    writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_UADP;
-    writerGroupConfig.priority = writerGroup->priority;
+    /* The native create operation owns a deep copy of this borrowed
+     * configuration. Passing the complete ExtensionObjects preserves newer
+     * transport types and their nested address/QoS settings. */
+    UA_WriterGroupConfig config;
+    memset(&config, 0, sizeof(config));
+    config.name = writerGroup->name;
+    config.publishingInterval = writerGroup->publishingInterval;
+    config.writerGroupId = writerGroup->writerGroupId;
+    config.priority = writerGroup->priority;
+    config.securityMode = writerGroup->securityMode;
+    config.securityGroupId = writerGroup->securityGroupId;
+    config.groupProperties.map = writerGroup->groupProperties;
+    config.groupProperties.mapSize = writerGroup->groupPropertiesSize;
+    config.messageSettings = writerGroup->messageSettings;
+    config.transportSettings = writerGroup->transportSettings;
 
-    UA_UadpWriterGroupMessageDataType writerGroupMessage;
-    UA_ExtensionObject *eoWG = &writerGroup->messageSettings;
-    if(eoWG->encoding == UA_EXTENSIONOBJECT_DECODED){
-        writerGroupConfig.messageSettings.encoding  = UA_EXTENSIONOBJECT_DECODED;
-        if(eoWG->content.decoded.type == &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE]){
-            if(UA_UadpWriterGroupMessageDataType_copy((UA_UadpWriterGroupMessageDataType *) eoWG->content.decoded.data,
-                                                        &writerGroupMessage) != UA_STATUSCODE_GOOD){
-                return UA_STATUSCODE_BADOUTOFMEMORY;
-            }
-            writerGroupConfig.messageSettings.content.decoded.type = &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE];
-            writerGroupConfig.messageSettings.content.decoded.data = &writerGroupMessage;
-        }
+    if(UA_ExtensionObject_hasDecodedType(
+           &config.messageSettings,
+           &UA_TYPES[UA_TYPES_JSONWRITERGROUPMESSAGEDATATYPE])) {
+        config.encodingMimeType = UA_PUBSUB_ENCODING_JSON;
+        if(!UA_ExtensionObject_hasDecodedType(
+               &config.transportSettings,
+               &UA_TYPES[UA_TYPES_BROKERWRITERGROUPTRANSPORTDATATYPE]))
+            return UA_STATUSCODE_BADCONFIGURATIONERROR;
+    } else if(config.messageSettings.encoding == UA_EXTENSIONOBJECT_ENCODED_NOBODY ||
+              UA_ExtensionObject_hasDecodedType(
+                  &config.messageSettings,
+                  &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE])) {
+        config.encodingMimeType = UA_PUBSUB_ENCODING_UADP;
+    } else {
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     }
 
-    return UA_WriterGroup_create(psm, connectionId, &writerGroupConfig, writerGroupId);
+    return UA_WriterGroup_create(psm, connectionId, &config, writerGroupId);
 }
 
 /**
@@ -418,16 +607,17 @@ addDataSetWriterConfig(UA_Server *server, const UA_NodeId *writerGroupId,
         return UA_STATUSCODE_BADINTERNALERROR;
 
     UA_NodeId publishedDataSetId = UA_NODEID_NULL;
-    UA_PublishedDataSet *tmpPDS;
-    TAILQ_FOREACH(tmpPDS, &psm->publishedDataSets, listEntry){
-        if(UA_String_equal(&dataSetWriter->dataSetName, &tmpPDS->config.name)) {
-            publishedDataSetId = tmpPDS->head.identifier;
-            break;
+    if(dataSetWriter->dataSetName.length > 0) {
+        UA_PublishedDataSet *tmpPDS;
+        TAILQ_FOREACH(tmpPDS, &psm->publishedDataSets, listEntry) {
+            if(UA_String_equal(&dataSetWriter->dataSetName, &tmpPDS->config.name)) {
+                publishedDataSetId = tmpPDS->head.identifier;
+                break;
+            }
         }
+        if(UA_NodeId_isNull(&publishedDataSetId))
+            return UA_STATUSCODE_BADPARENTNODEIDINVALID;
     }
-
-    if(UA_NodeId_isNull(&publishedDataSetId))
-        return UA_STATUSCODE_BADPARENTNODEIDINVALID;
 
     /* We need now a DataSetWriter within the WriterGroup. This means we must
      * create a new DataSetWriterConfig and add call the addWriterGroup function. */
@@ -460,9 +650,29 @@ addReaderGroupConfig(UA_Server *server, UA_NodeId connectionId,
 
     UA_ReaderGroupConfig readerGroupConfig;
     memset(&readerGroupConfig, 0, sizeof(UA_ReaderGroupConfig));
-    readerGroupConfig.name = readerGroup->name;
-    return UA_ReaderGroup_create(psm, connectionId,
-                                 &readerGroupConfig, readerGroupId);
+    UA_StatusCode retVal = UA_String_copy(&readerGroup->name,
+                                          &readerGroupConfig.name);
+    retVal |= UA_String_copy(&readerGroup->securityGroupId,
+                             &readerGroupConfig.securityGroupId);
+    retVal |= UA_ExtensionObject_copy(&readerGroup->transportSettings,
+                                      &readerGroupConfig.transportSettings);
+    readerGroupConfig.securityMode = readerGroup->securityMode;
+    readerGroupConfig.groupProperties.map = readerGroup->groupProperties;
+    readerGroupConfig.groupProperties.mapSize = readerGroup->groupPropertiesSize;
+    if(readerGroup->dataSetReadersSize > 0) {
+        UA_ExtensionObject *settings =
+            &readerGroup->dataSetReaders[0].messageSettings;
+        if(settings->encoding == UA_EXTENSIONOBJECT_DECODED &&
+           settings->content.decoded.type ==
+               &UA_TYPES[UA_TYPES_JSONDATASETREADERMESSAGEDATATYPE])
+            readerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_JSON;
+    }
+    if(retVal == UA_STATUSCODE_GOOD)
+        retVal = UA_ReaderGroup_create(psm, connectionId,
+                                       &readerGroupConfig, readerGroupId);
+    readerGroupConfig.groupProperties = UA_KEYVALUEMAP_NULL;
+    UA_ReaderGroupConfig_clear(&readerGroupConfig);
+    return retVal;
 }
 
 /**
@@ -480,14 +690,30 @@ addSubscribedVariables(UA_Server *server, UA_NodeId dataSetReaderId,
     if(!psm)
         return UA_STATUSCODE_BADINTERNALERROR;
 
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
     UA_ExtensionObject *eoTargetVar = &dataSetReader->subscribedDataSet;
-    if(eoTargetVar->encoding != UA_EXTENSIONOBJECT_DECODED ||
-       eoTargetVar->content.decoded.type != &UA_TYPES[UA_TYPES_TARGETVARIABLESDATATYPE])
-        return UA_STATUSCODE_BADUNEXPECTEDERROR;
+    if(eoTargetVar->encoding == UA_EXTENSIONOBJECT_ENCODED_NOBODY)
+        return UA_STATUSCODE_GOOD;
+    if(!UA_ExtensionObject_hasDecodedType(
+           eoTargetVar, &UA_TYPES[UA_TYPES_TARGETVARIABLESDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
 
     const UA_TargetVariablesDataType *targetVars =
         (UA_TargetVariablesDataType*)eoTargetVar->content.decoded.data;
+
+    /* Validate the mapping before creating the folder. Otherwise an invalid
+     * request leaves an orphan object in the AddressSpace. */
+    if(targetVars->targetVariablesSize > pMetaData->fieldsSize) {
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
+                     "AddSubscribedVariables: targetVariablesSize (%u) exceeds "
+                     "DataSetMetaData fieldsSize (%u)",
+                     (unsigned)targetVars->targetVariablesSize,
+                     (unsigned)pMetaData->fieldsSize);
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    }
+
+    UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dataSetReaderId);
+    if(!dsr)
+        return UA_STATUSCODE_BADINTERNALERROR;
 
     UA_NodeId folderId;
     UA_String folderName = pMetaData->name;
@@ -503,51 +729,57 @@ addSubscribedVariables(UA_Server *server, UA_NodeId dataSetReaderId,
         folderBrowseName = UA_QUALIFIEDNAME(1, "Subscribed Variables");
     }
 
-    addNode(server, UA_NODECLASS_OBJECT, UA_NODEID_NULL,
-            UA_NS0ID(OBJECTSFOLDER), UA_NS0ID(ORGANIZES),
-            folderBrowseName, UA_NS0ID(BASEOBJECTTYPE),
-            &oAttr, &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES],
-            NULL, &folderId);
+    UA_StatusCode res = addNode(server, UA_NODECLASS_OBJECT, UA_NODEID_NULL,
+                                UA_NS0ID(OBJECTSFOLDER), UA_NS0ID(ORGANIZES),
+                                folderBrowseName, UA_NS0ID(BASEOBJECTTYPE),
+                                &oAttr, &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES],
+                                NULL, &folderId);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
 
     /* The SubscribedDataSet option TargetVariables defines a list of Variable
      * mappings between received DataSet fields and target Variables in the
      * Subscriber AddressSpace. The values subscribed from the Publisher are
      * updated in the value field of these variables */
 
-    /* Create the TargetVariables with respect to DataSetMetaData fields */
-    UA_FieldTargetVariable *targetVarsData = (UA_FieldTargetVariable *)
-        UA_calloc(targetVars->targetVariablesSize, sizeof(UA_FieldTargetVariable));
+    /* Add variable for the fields. */
     for(size_t i = 0; i < targetVars->targetVariablesSize; i++) {
-        /* Prepare the output structure */
-        UA_FieldTargetDataType_init(&targetVarsData[i].targetVariable);
-        targetVarsData[i].targetVariable.attributeId  = targetVars->targetVariables[i].attributeId;
-
-        /* Add variable for the field */
+        /* Existing FE inputs are mappings, not requests to create new nodes.
+         * Re-adding them overwrites the target NodeId output on failure. */
+        const UA_Node *existing = UA_NODESTORE_GET(
+            server, &targetVars->targetVariables[i].targetNodeId);
+        if(existing) {
+            UA_Boolean isVariable = existing->head.nodeClass == UA_NODECLASS_VARIABLE;
+            UA_NODESTORE_RELEASE(server, existing);
+            if(!isVariable)
+                return UA_STATUSCODE_BADNODECLASSINVALID;
+            continue;
+        }
         UA_VariableAttributes vAttr = UA_VariableAttributes_default;
         vAttr.description = pMetaData->fields[i].description;
         vAttr.displayName.locale = UA_STRING("");
         vAttr.displayName.text = pMetaData->fields[i].name;
         vAttr.dataType = pMetaData->fields[i].dataType;
         UA_QualifiedName varname = {1, pMetaData->fields[i].name};
-        retVal |= addNode(server, UA_NODECLASS_VARIABLE,
-                          targetVars->targetVariables[i].targetNodeId, folderId,
-                          UA_NS0ID(HASCOMPONENT), varname, UA_NS0ID(BASEDATAVARIABLETYPE),
-                          &vAttr, &UA_TYPES[UA_TYPES_VARIABLEATTRIBUTES],
-                          NULL, &targetVarsData[i].targetVariable.targetNodeId);
+        res = addNode(server, UA_NODECLASS_VARIABLE,
+                      targetVars->targetVariables[i].targetNodeId, folderId,
+                      UA_NS0ID(HASCOMPONENT), varname,
+                      UA_NS0ID(BASEDATAVARIABLETYPE), &vAttr,
+                      &UA_TYPES[UA_TYPES_VARIABLEATTRIBUTES], NULL,
+                      &targetVars->targetVariables[i].targetNodeId);
+        if(res != UA_STATUSCODE_GOOD) {
+            UA_Server_deleteNode(server, folderId, true);
+            return res;
+        }
+    }
 
-    }
-    UA_DataSetReader *dsr = UA_DataSetReader_find(psm, dataSetReaderId);
-    if(dsr) {
-        retVal = DataSetReader_createTargetVariables(psm, dsr,
-                                                     targetVars->targetVariablesSize,
-                                                     targetVarsData);
-    } else {
-        retVal = UA_STATUSCODE_BADINTERNALERROR;
-    }
-    for(size_t j = 0; j < targetVars->targetVariablesSize; j++)
-        UA_FieldTargetDataType_clear(&targetVarsData[j].targetVariable);
-    UA_free(targetVarsData);
-    return retVal;
+    /* Set the TargetVariables in the DSR config */
+    res = DataSetReader_createTargetVariables(psm, dsr,
+                                              targetVars->targetVariablesSize,
+                                              targetVars->targetVariables);
+    if(res != UA_STATUSCODE_GOOD)
+        UA_Server_deleteNode(server, folderId, true);
+    return res;
 }
 
 /**
@@ -571,40 +803,60 @@ addDataSetReaderConfig(UA_Server *server, UA_NodeId readerGroupId,
     UA_DataSetReaderConfig readerConfig;
     memset(&readerConfig, 0, sizeof(UA_DataSetReaderConfig));
 
-    UA_StatusCode retVal =
-        UA_PublisherId_fromVariant(&readerConfig.publisherId,
-                                   &dataSetReader->publisherId);
-    readerConfig.name = dataSetReader->name;
+    UA_StatusCode retVal = UA_String_copy(&dataSetReader->name,
+                                          &readerConfig.name);
+    retVal |= UA_PublisherId_fromVariant(&readerConfig.publisherId,
+                                         &dataSetReader->publisherId);
+    if(retVal == UA_STATUSCODE_GOOD)
+        readerConfig.publisherIdFilterEnabled = true;
     readerConfig.writerGroupId = dataSetReader->writerGroupId;
     readerConfig.dataSetWriterId = dataSetReader->dataSetWriterId;
+    readerConfig.dataSetFieldContentMask =
+        dataSetReader->dataSetFieldContentMask;
+    readerConfig.messageReceiveTimeout =
+        dataSetReader->messageReceiveTimeout;
+    retVal |= UA_ExtensionObject_copy(&dataSetReader->messageSettings,
+                                      &readerConfig.messageSettings);
+    retVal |= UA_ExtensionObject_copy(&dataSetReader->transportSettings,
+                                      &readerConfig.transportSettings);
 
-    /* Setting up Meta data configuration in DataSetReader */
-    UA_DataSetMetaDataType *pMetaData;
-    pMetaData = &readerConfig.dataSetMetaData;
-    UA_DataSetMetaDataType_init (pMetaData);
-    pMetaData->name =  dataSetReader->dataSetMetaData.name;
-    pMetaData->fieldsSize = dataSetReader->dataSetMetaData.fieldsSize;
-    pMetaData->fields = (UA_FieldMetaData*)UA_Array_new (pMetaData->fieldsSize,
-                        &UA_TYPES[UA_TYPES_FIELDMETADATA]);
-    for(size_t i = 0; i < pMetaData->fieldsSize; i++){
-        UA_FieldMetaData_init (&pMetaData->fields[i]);
-        UA_NodeId_copy(&dataSetReader->dataSetMetaData.fields[i].dataType,
-                       &pMetaData->fields[i].dataType);
-        pMetaData->fields[i].builtInType = dataSetReader->dataSetMetaData.fields[i].builtInType;
-        pMetaData->fields[i].name = dataSetReader->dataSetMetaData.fields[i].name;
-        pMetaData->fields[i].valueRank = dataSetReader->dataSetMetaData.fields[i].valueRank;
+    /* Copy the complete metadata, including configuration versions, array
+     * dimensions and string bounds. */
+    retVal |= UA_DataSetMetaDataType_copy(&dataSetReader->dataSetMetaData,
+                                          &readerConfig.dataSetMetaData);
+    if(retVal != UA_STATUSCODE_GOOD) {
+        UA_DataSetReaderConfig_clear(&readerConfig);
+        return retVal;
+    }
+
+    UA_ExtensionObject *subscribed = &dataSetReader->subscribedDataSet;
+    UA_Boolean standalone =
+        (subscribed->encoding == UA_EXTENSIONOBJECT_DECODED ||
+         subscribed->encoding == UA_EXTENSIONOBJECT_DECODED_NODELETE) &&
+        subscribed->content.decoded.type ==
+            &UA_TYPES[UA_TYPES_STANDALONESUBSCRIBEDDATASETREFDATATYPE];
+    if(standalone) {
+        UA_StandaloneSubscribedDataSetRefDataType *ref =
+            (UA_StandaloneSubscribedDataSetRefDataType*)subscribed->content.decoded.data;
+        retVal = UA_String_copy(&ref->dataSetName,
+                                &readerConfig.linkedStandaloneSubscribedDataSetName);
+        if(retVal != UA_STATUSCODE_GOOD || UA_String_isEmpty(&ref->dataSetName)) {
+            UA_DataSetReaderConfig_clear(&readerConfig);
+            return retVal != UA_STATUSCODE_GOOD ? retVal : UA_STATUSCODE_BADINVALIDARGUMENT;
+        }
     }
 
     retVal |= UA_DataSetReader_create(psm, readerGroupId,
                                       &readerConfig, dataSetReaderId);
-    UA_PublisherId_clear(&readerConfig.publisherId);
+    UA_DataSetMetaDataType *pMetaData = &readerConfig.dataSetMetaData;
     if(retVal != UA_STATUSCODE_GOOD) {
-        UA_free(pMetaData->fields);
+        UA_DataSetReaderConfig_clear(&readerConfig);
         return retVal;
     }
 
-    retVal |= addSubscribedVariables(server, *dataSetReaderId, dataSetReader, pMetaData);
-    UA_free(pMetaData->fields);
+    if(!standalone)
+        retVal |= addSubscribedVariables(server, *dataSetReaderId, dataSetReader, pMetaData);
+    UA_DataSetReaderConfig_clear(&readerConfig);
     return retVal;
 }
 
@@ -641,6 +893,8 @@ addPubSubConnectionRepresentation(UA_Server *server, UA_PubSubConnection *connec
 
     retVal |= addNode_finish(server, &server->adminSession, &connection->head.identifier);
 
+    /* Locate the instantiated address and configuration properties before
+     * populating them from the runtime connection. */
     UA_NodeId addressNode =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Address"),
                             UA_NS0ID(HASCOMPONENT), connection->head.identifier);
@@ -659,6 +913,9 @@ addPubSubConnectionRepresentation(UA_Server *server, UA_PubSubConnection *connec
     UA_NodeId transportProfileUri =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "TransportProfileUri"),
                             UA_NS0ID(HASCOMPONENT), connection->head.identifier);
+    UA_NodeId statusIdNode =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
+                            UA_NS0ID(HASCOMPONENT), connection->head.identifier);
 
     if(UA_NodeId_isNull(&addressNode) || UA_NodeId_isNull(&urlNode) ||
        UA_NodeId_isNull(&interfaceNode) || UA_NodeId_isNull(&publisherIdNode) ||
@@ -667,6 +924,7 @@ addPubSubConnectionRepresentation(UA_Server *server, UA_PubSubConnection *connec
         return UA_STATUSCODE_BADNOTFOUND;
     }
 
+    /* Populate the static connection properties and transport address. */
     retVal |= writePubSubNs0VariableArray(server, connectionPropertyNode,
                                           connection->config.connectionProperties.map,
                                           connection->config.connectionProperties.mapSize,
@@ -686,17 +944,32 @@ addPubSubConnectionRepresentation(UA_Server *server, UA_PubSubConnection *connec
     UA_Variant_setScalar(&value, &connection->config.transportProfileUri, &UA_TYPES[UA_TYPES_STRING]);
     writeValueAttribute(server, transportProfileUri, &value);
 
+    /* Bind PublisherId and State to runtime reads so clients see current
+     * values. */
     UA_NodePropertyContext *connectionPublisherIdContext =
         (UA_NodePropertyContext *)UA_malloc(sizeof(UA_NodePropertyContext));
     connectionPublisherIdContext->parentNodeId = connection->head.identifier;
     connectionPublisherIdContext->parentClassifier = UA_NS0ID_PUBSUBCONNECTIONTYPE;
     connectionPublisherIdContext->elementClassiefier = UA_NS0ID_PUBSUBCONNECTIONTYPE_PUBLISHERID;
-    UA_ValueCallback valueCallback;
-    valueCallback.onRead = onRead;
-    valueCallback.onWrite = NULL;
-    retVal |= addVariableValueSource(server, valueCallback, publisherIdNode,
+
+    UA_CallbackValueSource valueCallback;
+    valueCallback.read = ReadCallback;
+    valueCallback.write = NULL;
+    retVal |= setVariableValueSource(server, valueCallback, publisherIdNode,
                                      connectionPublisherIdContext);
 
+    if(!UA_NodeId_isNull(&statusIdNode)) {
+        UA_NodeId stateNodeId = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                                   UA_NS0ID(HASCOMPONENT), statusIdNode);
+        if(!UA_NodeId_isNull(&stateNodeId)) {
+            UA_DataSource stateDataSource;
+            stateDataSource.read = pubSubStateVariableDataSourceRead;
+            stateDataSource.write = NULL;
+            retVal |= UA_Server_setVariableNode_dataSource(server, stateNodeId, stateDataSource);
+        }
+    }
+
+    /* Expose connection configuration and state methods when enabled. */
     if(server->config.pubSubConfig.enableInformationModelMethods) {
         retVal |= addRef(server, connection->head.identifier, UA_NS0ID(HASCOMPONENT),
                          UA_NS0ID(PUBSUBCONNECTIONTYPE_ADDWRITERGROUP), true);
@@ -704,12 +977,21 @@ addPubSubConnectionRepresentation(UA_Server *server, UA_PubSubConnection *connec
                          UA_NS0ID(PUBSUBCONNECTIONTYPE_ADDREADERGROUP), true);
         retVal |= addRef(server, connection->head.identifier, UA_NS0ID(HASCOMPONENT),
                          UA_NS0ID(PUBSUBCONNECTIONTYPE_REMOVEGROUP), true);
+        
+        if(!UA_NodeId_isNull(&statusIdNode)) {
+            retVal |= addRef(server, statusIdNode,
+                            UA_NS0ID(HASCOMPONENT),
+                            UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), true);
+            retVal |= addRef(server, statusIdNode,
+                            UA_NS0ID(HASCOMPONENT),
+                            UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), true);
+        }
     }
     return retVal;
 }
 
 static UA_StatusCode
-addPubSubConnectionLocked(UA_Server *server,
+addPubSubConnectionAction(UA_Server *server,
                           const UA_NodeId *sessionId, void *sessionContext,
                           const UA_NodeId *methodId, void *methodContext,
                           const UA_NodeId *objectId, void *objectContext,
@@ -717,17 +999,25 @@ addPubSubConnectionLocked(UA_Server *server,
                           size_t outputSize, UA_Variant *output) {
     UA_LOCK_ASSERT(&server->serviceMutex);
 
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 1);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!input || !UA_Variant_hasScalarType(
+           &input[0], &UA_TYPES[UA_TYPES_PUBSUBCONNECTIONDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+
     UA_PubSubManager *psm = getPSM(server);
     if(!psm)
         return UA_STATUSCODE_BADINTERNALERROR;
 
     UA_StatusCode retVal = UA_STATUSCODE_GOOD;
+    UA_StatusCode rollbackRetVal;
     UA_PubSubConnectionDataType *pubSubConnection =
         (UA_PubSubConnectionDataType *) input[0].data;
 
-    //call API function and create the connection
+    /* Create the connection through the configuration API. */
     UA_NodeId connectionId;
-    retVal |= addPubSubConnectionConfig(server, pubSubConnection, &connectionId);
+    retVal = addPubSubConnectionConfig(server, pubSubConnection, &connectionId);
     if(retVal != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "addPubSubConnection failed");
@@ -737,20 +1027,20 @@ addPubSubConnectionLocked(UA_Server *server,
     for(size_t i = 0; i < pubSubConnection->writerGroupsSize; i++) {
         UA_NodeId writerGroupId;
         UA_WriterGroupDataType *writerGroup = &pubSubConnection->writerGroups[i];
-        retVal |= addWriterGroupConfig(server, connectionId, writerGroup, &writerGroupId);
+        retVal = addWriterGroupConfig(server, connectionId, writerGroup, &writerGroupId);
         if(retVal != UA_STATUSCODE_GOOD) {
             UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                          "addWriterGroup failed");
-            return retVal;
+            goto rollback;
         }
 
         for(size_t j = 0; j < writerGroup->dataSetWritersSize; j++) {
             UA_DataSetWriterDataType *dataSetWriter = &writerGroup->dataSetWriters[j];
-            retVal |= addDataSetWriterConfig(server, &writerGroupId, dataSetWriter, NULL);
+            retVal = addDataSetWriterConfig(server, &writerGroupId, dataSetWriter, NULL);
             if(retVal != UA_STATUSCODE_GOOD) {
                 UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                              "addDataSetWriter failed");
-                return retVal;
+                goto rollback;
             }
         }
 
@@ -769,22 +1059,22 @@ addPubSubConnectionLocked(UA_Server *server,
     for(size_t i = 0; i < pubSubConnection->readerGroupsSize; i++){
         UA_NodeId readerGroupId;
         UA_ReaderGroupDataType *readerGroup = &pubSubConnection->readerGroups[i];
-        retVal |= addReaderGroupConfig(server, connectionId, readerGroup, &readerGroupId);
+        retVal = addReaderGroupConfig(server, connectionId, readerGroup, &readerGroupId);
         if(retVal != UA_STATUSCODE_GOOD) {
             UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                          "addReaderGroup failed");
-            return retVal;
+            goto rollback;
         }
 
         for(size_t j = 0; j < readerGroup->dataSetReadersSize; j++) {
             UA_NodeId dataSetReaderId;
             UA_DataSetReaderDataType *dataSetReader = &readerGroup->dataSetReaders[j];
-            retVal |= addDataSetReaderConfig(server, readerGroupId,
-                                             dataSetReader, &dataSetReaderId);
+            retVal = addDataSetReaderConfig(server, readerGroupId,
+                                            dataSetReader, &dataSetReaderId);
             if(retVal != UA_STATUSCODE_GOOD) {
                 UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                              "addDataSetReader failed");
-                return retVal;
+                goto rollback;
             }
 
         }
@@ -801,25 +1091,32 @@ addPubSubConnectionLocked(UA_Server *server,
         }
     }
 
-    /* Set ouput value */
-    UA_Variant_setScalarCopy(output, &connectionId, &UA_TYPES[UA_TYPES_NODEID]);
-    return UA_STATUSCODE_GOOD;
-}
+    UA_PubSubConnection *connection =
+        UA_PubSubConnection_find(psm, connectionId);
+    if(!connection) {
+        retVal = UA_STATUSCODE_BADINTERNALERROR;
+        goto rollback;
+    }
+    retVal = UA_PubSubConnection_setPubSubState(
+        psm, connection, pubSubConnection->enabled ?
+        UA_PUBSUBSTATE_OPERATIONAL : UA_PUBSUBSTATE_DISABLED);
+    if(retVal != UA_STATUSCODE_GOOD)
+        goto rollback;
 
-static UA_StatusCode
-addPubSubConnectionAction(UA_Server *server,
-                          const UA_NodeId *sessionId, void *sessionContext,
-                          const UA_NodeId *methodId, void *methodContext,
-                          const UA_NodeId *objectId, void *objectContext,
-                          size_t inputSize, const UA_Variant *input,
-                          size_t outputSize, UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = addPubSubConnectionLocked(server, sessionId, sessionContext,
-                                                  methodId, methodContext,
-                                                  objectId, objectContext,
-                                                  inputSize, input, outputSize, output);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
+    /* Set output value */
+    retVal = UA_Variant_setScalarCopy(output, &connectionId,
+                                      &UA_TYPES[UA_TYPES_NODEID]);
+    if(retVal == UA_STATUSCODE_GOOD)
+        return retVal;
+
+rollback:
+    rollbackRetVal = UA_Server_removePubSubConnection(server, connectionId);
+    if(rollbackRetVal != UA_STATUSCODE_GOOD) {
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
+                     "Could not roll back PubSubConnection: %s",
+                     UA_StatusCode_name(rollbackRetVal));
+    }
+    return retVal;
 }
 
 static UA_StatusCode
@@ -829,7 +1126,12 @@ removeConnectionAction(UA_Server *server,
                        const UA_NodeId *objectId, void *objectContext,
                        size_t inputSize, const UA_Variant *input,
                        size_t outputSize, UA_Variant *output){
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
+    UA_StatusCode retVal =
+        checkMethodArgumentCounts(inputSize, 1, outputSize, 0);
+    if(retVal != UA_STATUSCODE_GOOD)
+        return retVal;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_NODEID]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     UA_NodeId nodeToRemove = *((UA_NodeId *) input[0].data);
     retVal |= UA_Server_removePubSubConnection(server, nodeToRemove);
     if(retVal == UA_STATUSCODE_BADNOTFOUND)
@@ -880,9 +1182,8 @@ addDataSetReaderRepresentation(UA_Server *server, UA_DataSetReader *dataSetReade
                                               UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
                                               dataSetReader->head.identifier);
 
-    if(UA_NodeId_isNull(&statusIdNode)) {
+    if(UA_NodeId_isNull(&statusIdNode))
         return UA_STATUSCODE_BADNOTFOUND;
-    }
 
     stateIdNode = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
                                               UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
@@ -891,30 +1192,28 @@ addDataSetReaderRepresentation(UA_Server *server, UA_DataSetReader *dataSetReade
     if(UA_NodeId_isNull(&publisherIdNode) ||
        UA_NodeId_isNull(&writerGroupIdNode) ||
        UA_NodeId_isNull(&dataSetwriterIdNode) ||
-       UA_NodeId_isNull(&stateIdNode)) {
+       UA_NodeId_isNull(&stateIdNode))
         return UA_STATUSCODE_BADNOTFOUND;
-    }
 
     UA_NodePropertyContext *dataSetReaderPublisherIdContext =
         (UA_NodePropertyContext *) UA_malloc(sizeof(UA_NodePropertyContext));
     dataSetReaderPublisherIdContext->parentNodeId = dataSetReader->head.identifier;
     dataSetReaderPublisherIdContext->parentClassifier = UA_NS0ID_DATASETREADERTYPE;
     dataSetReaderPublisherIdContext->elementClassiefier = UA_NS0ID_DATASETREADERTYPE_PUBLISHERID;
-    UA_ValueCallback valueCallback;
-    valueCallback.onRead = onRead;
-    valueCallback.onWrite = NULL;
-    retVal |= addVariableValueSource(server, valueCallback, publisherIdNode,
+    UA_CallbackValueSource valueCallback;
+    valueCallback.read = ReadCallback;
+    valueCallback.write = NULL;
+    retVal |= setVariableValueSource(server, valueCallback, publisherIdNode,
                                      dataSetReaderPublisherIdContext);
 
-    UA_NodePropertyContext *dataSetReaderStateContext =
-        (UA_NodePropertyContext *) UA_malloc(sizeof(UA_NodePropertyContext));
-    UA_CHECK_MEM(dataSetReaderStateContext, return UA_STATUSCODE_BADOUTOFMEMORY);
-    dataSetReaderStateContext->parentNodeId = dataSetReader->head.identifier;
-    dataSetReaderStateContext->parentClassifier = UA_NS0ID_DATASETREADERTYPE;
-    dataSetReaderStateContext->elementClassiefier = UA_NS0ID_DATASETREADERTYPE_STATUS_STATE;
-
-    retVal |= addVariableValueSource(server, valueCallback, stateIdNode,
-                                     dataSetReaderStateContext);
+    UA_NodeId stateNodeId = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                               UA_NS0ID(HASCOMPONENT), statusIdNode);
+    if(!UA_NodeId_isNull(&stateNodeId)) {
+        UA_DataSource stateDataSource;
+        stateDataSource.read = pubSubStateVariableDataSourceRead;
+        stateDataSource.write = NULL; 
+        retVal |= UA_Server_setVariableNode_dataSource(server, stateNodeId, stateDataSource);
+    }
 
     /* Update childNode with values from Publisher */
     UA_Variant value;
@@ -925,17 +1224,32 @@ addDataSetReaderRepresentation(UA_Server *server, UA_DataSetReader *dataSetReade
     UA_Variant_setScalar(&value, &dataSetReader->config.dataSetWriterId,
                          &UA_TYPES[UA_TYPES_UINT16]);
     writeValueAttribute(server, dataSetwriterIdNode, &value);
+
+    if(server->config.pubSubConfig.enableInformationModelMethods) {
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), true);
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), true);
+    }
+    
     return retVal;
 }
 
 static UA_StatusCode
-addDataSetReaderLocked(UA_Server *server,
+addDataSetReaderAction(UA_Server *server,
                        const UA_NodeId *sessionId, void *sessionContext,
                        const UA_NodeId *methodId, void *methodContext,
                        const UA_NodeId *objectId, void *objectContext,
                        size_t inputSize, const UA_Variant *input,
                        size_t outputSize, UA_Variant *output) {
     UA_LOCK_ASSERT(&server->serviceMutex);
+
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 1);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(
+           &input[0], &UA_TYPES[UA_TYPES_DATASETREADERDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
 
     UA_NodeId dataSetReaderId;
     UA_DataSetReaderDataType *dataSetReader= (UA_DataSetReaderDataType *) input[0].data;
@@ -952,27 +1266,17 @@ addDataSetReaderLocked(UA_Server *server,
 }
 
 static UA_StatusCode
-addDataSetReaderAction(UA_Server *server,
-                       const UA_NodeId *sessionId, void *sessionContext,
-                       const UA_NodeId *methodId, void *methodContext,
-                       const UA_NodeId *objectId, void *objectContext,
-                       size_t inputSize, const UA_Variant *input,
-                       size_t outputSize, UA_Variant *output){
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = addDataSetReaderLocked(server, sessionId, sessionContext,
-                                               methodId, methodContext, objectId, objectContext,
-                                               inputSize, input, outputSize, output);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-static UA_StatusCode
 removeDataSetReaderAction(UA_Server *server,
                           const UA_NodeId *sessionId, void *sessionContext,
                           const UA_NodeId *methodId, void *methodContext,
                           const UA_NodeId *objectId, void *objectContext,
                           size_t inputSize, const UA_Variant *input,
                           size_t outputSize, UA_Variant *output){
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 0);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_NODEID]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     UA_NodeId nodeToRemove = *((UA_NodeId *)input[0].data);
     return UA_Server_removeDataSetReader(server, nodeToRemove);
 }
@@ -980,6 +1284,7 @@ removeDataSetReaderAction(UA_Server *server,
 /*************************************************/
 /*                PublishedDataSet               */
 /*************************************************/
+
 static UA_StatusCode
 addDataSetFolderAction(UA_Server *server,
                        const UA_NodeId *sessionId, void *sessionContext,
@@ -987,19 +1292,47 @@ addDataSetFolderAction(UA_Server *server,
                        const UA_NodeId *objectId, void *objectContext,
                        size_t inputSize, const UA_Variant *input,
                        size_t outputSize, UA_Variant *output){
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 1);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+
     /* defined in R 1.04 9.1.4.5.7 */
     UA_StatusCode retVal = UA_STATUSCODE_GOOD;
-    UA_String newFolderName = *((UA_String *) input[0].data);
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_STRING]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+
+    UA_String newFolderName = *((UA_String *)input[0].data);
+    if(newFolderName.length == 0)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+
+    /* UA_String is length-delimited and is not required to be NUL-terminated.
+     * Construct the BrowseName directly instead of using UA_QUALIFIEDNAME,
+     * which calls strlen. */
+    UA_QualifiedName browseName = {0, newFolderName};
+    UA_NodeId existing = findSingleChildNode(server, browseName,
+                                             UA_NS0ID(ORGANIZES), *objectId);
+    if(!UA_NodeId_isNull(&existing)) {
+        UA_NodeId_clear(&existing);
+        return UA_STATUSCODE_BADBROWSENAMEDUPLICATED;
+    }
+
     UA_NodeId generatedId;
     UA_ObjectAttributes objectAttributes = UA_ObjectAttributes_default;
     UA_LocalizedText name = {UA_STRING(""), newFolderName};
     objectAttributes.displayName = name;
-    retVal |= UA_Server_addObjectNode(server, UA_NODEID_NULL, *objectId,
-                                      UA_NS0ID(ORGANIZES),
-                                      UA_QUALIFIEDNAME(0, "DataSetFolder"),
-                                      UA_NS0ID(DATASETFOLDERTYPE),
-                                      objectAttributes, NULL, &generatedId);
-    UA_Variant_setScalarCopy(output, &generatedId, &UA_TYPES[UA_TYPES_NODEID]);
+    retVal = UA_Server_addObjectNode(server, UA_NODEID_NULL, *objectId,
+                                     UA_NS0ID(ORGANIZES), browseName,
+                                     UA_NS0ID(DATASETFOLDERTYPE),
+                                     objectAttributes, NULL, &generatedId);
+    if(retVal != UA_STATUSCODE_GOOD)
+        return retVal;
+
+    retVal = UA_Variant_setScalarCopy(output, &generatedId,
+                                      &UA_TYPES[UA_TYPES_NODEID]);
+    if(retVal != UA_STATUSCODE_GOOD) {
+        UA_Server_deleteNode(server, generatedId, true);
+        return retVal;
+    }
 
     if(server->config.pubSubConfig.enableInformationModelMethods) {
         retVal |= UA_Server_addReference(server, generatedId, UA_NS0ID(HASCOMPONENT),
@@ -1015,13 +1348,76 @@ addDataSetFolderAction(UA_Server *server,
 }
 
 static UA_StatusCode
+disablePubSubComponent(UA_PubSubManager *psm, const UA_NodeId nodeId) {
+    UA_PubSubConnection *connection = UA_PubSubConnection_find(psm, nodeId);
+    if(connection)
+        return UA_PubSubConnection_setPubSubState(
+            psm, connection, UA_PUBSUBSTATE_DISABLED);
+    UA_WriterGroup *wg = UA_WriterGroup_find(psm, nodeId);
+    if(wg)
+        return UA_WriterGroup_setPubSubState(psm, wg, UA_PUBSUBSTATE_DISABLED);
+    UA_ReaderGroup *rg = UA_ReaderGroup_find(psm, nodeId);
+    if(rg)
+        return UA_ReaderGroup_setPubSubState(psm, rg, UA_PUBSUBSTATE_DISABLED);
+    UA_DataSetWriter *dsw = UA_DataSetWriter_find(psm, nodeId);
+    if(dsw)
+        return UA_DataSetWriter_setPubSubState(psm, dsw,
+                                               UA_PUBSUBSTATE_DISABLED);
+    UA_DataSetReader *dsr = UA_DataSetReader_find(psm, nodeId);
+    if(dsr)
+        return UA_DataSetReader_setPubSubState(
+            psm, dsr, UA_PUBSUBSTATE_DISABLED, UA_STATUSCODE_GOOD);
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+disablePubSubFolderChildren(UA_Server *server, const UA_NodeId nodeId) {
+    /* Collect object descendants through hierarchical references before
+     * disabling the PubSub components represented by the folder. */
+    UA_BrowseDescription bd;
+    UA_BrowseDescription_init(&bd);
+    bd.nodeId = nodeId;
+    bd.browseDirection = UA_BROWSEDIRECTION_FORWARD;
+    bd.referenceTypeId = UA_NS0ID(HIERARCHICALREFERENCES);
+    bd.includeSubtypes = true;
+    bd.nodeClassMask = UA_NODECLASS_OBJECT;
+
+    size_t childrenSize = 0;
+    UA_ExpandedNodeId *children = NULL;
+    UA_StatusCode res =
+        UA_Server_browseRecursive(server, &bd, &childrenSize, &children);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+
+    /* Disable the folder's own component and all local descendants before the
+     * caller removes their information-model nodes. */
+    UA_PubSubManager *psm = getPSM(server);
+    res = disablePubSubComponent(psm, nodeId);
+    for(size_t i = 0; i < childrenSize; i++) {
+        if(UA_ExpandedNodeId_isLocal(&children[i]))
+            res |= disablePubSubComponent(psm, children[i].nodeId);
+    }
+    UA_Array_delete(children, childrenSize,
+                    &UA_TYPES[UA_TYPES_EXPANDEDNODEID]);
+    return res;
+}
+
+static UA_StatusCode
 removeDataSetFolderAction(UA_Server *server,
                           const UA_NodeId *sessionId, void *sessionContext,
                           const UA_NodeId *methodId, void *methodContext,
                           const UA_NodeId *objectId, void *objectContext,
                           size_t inputSize, const UA_Variant *input,
                           size_t outputSize, UA_Variant *output) {
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 0);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_NODEID]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     UA_NodeId nodeToRemove = *((UA_NodeId *) input[0].data);
+    res = disablePubSubFolderChildren(server, nodeToRemove);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
     return UA_Server_deleteNode(server, nodeToRemove, true);
 }
 
@@ -1048,10 +1444,11 @@ addPublishedDataItemsRepresentation(UA_Server *server,
                      NULL, &publishedDataSet->head.identifier);
     UA_CHECK_STATUS(retVal, return retVal);
 
-    UA_ValueCallback valueCallback;
-    valueCallback.onRead = onRead;
-    valueCallback.onWrite = NULL;
-    //ToDo: Need to move the browse name from namespaceindex 0 to 1
+    UA_CallbackValueSource valueCallback;
+    valueCallback.read = ReadCallback;
+    valueCallback.write = NULL;
+
+    /* ToDo: Need to move the browse name from namespaceindex 0 to 1 */
     UA_NodeId configurationVersionNode =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "ConfigurationVersion"),
                             UA_NS0ID(HASPROPERTY), publishedDataSet->head.identifier);
@@ -1064,7 +1461,7 @@ addPublishedDataItemsRepresentation(UA_Server *server,
     configurationVersionContext->parentClassifier = UA_NS0ID_PUBLISHEDDATAITEMSTYPE;
     configurationVersionContext->elementClassiefier =
         UA_NS0ID_PUBLISHEDDATASETTYPE_CONFIGURATIONVERSION;
-    retVal |= addVariableValueSource(server, valueCallback, configurationVersionNode,
+    retVal |= setVariableValueSource(server, valueCallback, configurationVersionNode,
                                      configurationVersionContext);
 
     UA_NodeId publishedDataNode =
@@ -1078,7 +1475,7 @@ addPublishedDataItemsRepresentation(UA_Server *server,
     publishingIntervalContext->parentNodeId = publishedDataSet->head.identifier;
     publishingIntervalContext->parentClassifier = UA_NS0ID_PUBLISHEDDATAITEMSTYPE;
     publishingIntervalContext->elementClassiefier = UA_NS0ID_PUBLISHEDDATAITEMSTYPE_PUBLISHEDDATA;
-    retVal |= addVariableValueSource(server, valueCallback, publishedDataNode,
+    retVal |= setVariableValueSource(server, valueCallback, publishedDataNode,
                                      publishingIntervalContext);
 
     UA_NodeId dataSetMetaDataNode =
@@ -1092,7 +1489,7 @@ addPublishedDataItemsRepresentation(UA_Server *server,
     metaDataContext->parentNodeId = publishedDataSet->head.identifier;
     metaDataContext->parentClassifier = UA_NS0ID_PUBLISHEDDATAITEMSTYPE;
     metaDataContext->elementClassiefier = UA_NS0ID_PUBLISHEDDATASETTYPE_DATASETMETADATA;
-    retVal |= addVariableValueSource(server, valueCallback,
+    retVal |= setVariableValueSource(server, valueCallback,
                                      dataSetMetaDataNode, metaDataContext);
 
     if(server->config.pubSubConfig.enableInformationModelMethods) {
@@ -1111,6 +1508,16 @@ addPublishedDataItemsAction(UA_Server *server,
                             const UA_NodeId *objectId, void *objectContext,
                             size_t inputSize, const UA_Variant *input,
                             size_t outputSize, UA_Variant *output){
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 4, outputSize, 3);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_STRING]) ||
+       !UA_Variant_hasArrayType(&input[1], &UA_TYPES[UA_TYPES_STRING]) ||
+       !UA_Variant_hasArrayType(&input[2],
+                                &UA_TYPES[UA_TYPES_DATASETFIELDFLAGS]) ||
+       !UA_Variant_hasArrayType(&input[3],
+                                &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     UA_StatusCode retVal = UA_STATUSCODE_GOOD;
     size_t fieldNameAliasesSize = input[1].arrayLength;
     UA_String * fieldNameAliases = (UA_String *) input[1].data;
@@ -1130,14 +1537,23 @@ addPublishedDataItemsAction(UA_Server *server,
     publishedDataSetConfig.publishedDataSetType = UA_PUBSUB_DATASET_PUBLISHEDITEMS;
 
     UA_NodeId dataSetItemsNodeId;
-    retVal |= UA_Server_addPublishedDataSet(server, &publishedDataSetConfig,
-                                            &dataSetItemsNodeId).addResult;
+    UA_AddPublishedDataSetResult pdsResult =
+        UA_Server_addPublishedDataSet(server, &publishedDataSetConfig,
+                                      &dataSetItemsNodeId);
+    retVal = pdsResult.addResult;
     if(retVal != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
                      "addPublishedDataset failed");
         return retVal;
     }
 
+    UA_StatusCode *addResults = (UA_StatusCode*)
+        UA_calloc(variablesToAddSize, sizeof(UA_StatusCode));
+    if(variablesToAddSize > 0 && !addResults) {
+        UA_Server_removePublishedDataSet(server, dataSetItemsNodeId);
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    UA_ConfigurationVersionDataType version = pdsResult.configurationVersion;
     UA_DataSetFieldConfig dataSetFieldConfig;
     for(size_t j = 0; j < variablesToAddSize; ++j) {
         /* Prepare the config */
@@ -1147,17 +1563,28 @@ addPublishedDataItemsAction(UA_Server *server,
         dataSetFieldConfig.field.variable.publishParameters = eoAddVar[j];
         if(fieldFlags[j] == UA_DATASETFIELDFLAGS_PROMOTEDFIELD)
             dataSetFieldConfig.field.variable.promotedField = true;
-        retVal |= UA_Server_addDataSetField(server, dataSetItemsNodeId,
-                                            &dataSetFieldConfig, NULL).result;
-        if(retVal != UA_STATUSCODE_GOOD) {
-           UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
-                        "addDataSetField failed");
-           return retVal;
-        }
+        UA_DataSetFieldResult fieldResult =
+            UA_Server_addDataSetField(server, dataSetItemsNodeId,
+                                      &dataSetFieldConfig, NULL);
+        addResults[j] = fieldResult.result;
+        if(fieldResult.result == UA_STATUSCODE_GOOD)
+            version = fieldResult.configurationVersion;
     }
 
-    UA_Variant_setScalarCopy(output, &dataSetItemsNodeId, &UA_TYPES[UA_TYPES_NODEID]);
+    retVal = UA_Variant_setScalarCopy(&output[0], &dataSetItemsNodeId,
+                                      &UA_TYPES[UA_TYPES_NODEID]);
+    retVal |= UA_Variant_setScalarCopy(&output[1], &version,
+        &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]);
+    UA_Variant_setArray(&output[2], addResults, variablesToAddSize,
+                        &UA_TYPES[UA_TYPES_STATUSCODE]);
     return retVal;
+}
+
+static UA_Boolean
+configurationVersionEqual(const UA_ConfigurationVersionDataType *a,
+                          const UA_ConfigurationVersionDataType *b) {
+    return (a->majorVersion == b->majorVersion &&
+            a->minorVersion == b->minorVersion);
 }
 
 static UA_StatusCode
@@ -1167,6 +1594,72 @@ addVariablesAction(UA_Server *server,
                    const UA_NodeId *objectId, void *objectContext,
                    size_t inputSize, const UA_Variant *input,
                    size_t outputSize, UA_Variant *output){
+    /* Validate the method argument count and types before reading their
+     * values. */
+    if(inputSize != 4 || outputSize != 2)
+        return UA_STATUSCODE_BADARGUMENTSMISSING;
+    if(!UA_Variant_hasScalarType(&input[0],
+            &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]) ||
+       !UA_Variant_hasArrayType(&input[1], &UA_TYPES[UA_TYPES_STRING]) ||
+       !UA_Variant_hasArrayType(&input[2], &UA_TYPES[UA_TYPES_BOOLEAN]) ||
+       !UA_Variant_hasArrayType(&input[3],
+            &UA_TYPES[UA_TYPES_PUBLISHEDVARIABLEDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+
+    size_t count = input[1].arrayLength;
+    if(input[2].arrayLength != count || input[3].arrayLength != count)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+
+    /* Resolve the dataset and require the caller's configuration version to
+     * match before changing its fields. */
+    UA_PublishedDataSet *pds =
+        UA_PublishedDataSet_find(getPSM(server), *objectId);
+    if(!pds)
+        return UA_STATUSCODE_BADNODEIDUNKNOWN;
+    UA_ConfigurationVersionDataType *requested =
+        (UA_ConfigurationVersionDataType*)input[0].data;
+    if(!configurationVersionEqual(requested,
+                                  &pds->dataSetMetaData.configurationVersion))
+        return UA_STATUSCODE_BADINVALIDSTATE;
+
+    /* Keep one result per requested field so individual failures can be
+     * reported alongside the final configuration version. */
+    UA_StatusCode *results = (UA_StatusCode*)
+        UA_calloc(count, sizeof(UA_StatusCode));
+    if(count > 0 && !results)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    UA_String *aliases = (UA_String*)input[1].data;
+    UA_Boolean *promoted = (UA_Boolean*)input[2].data;
+    UA_PublishedVariableDataType *variables =
+        (UA_PublishedVariableDataType*)input[3].data;
+    UA_ConfigurationVersionDataType version = *requested;
+
+    /* Create fields in request order and retain the version from the last
+     * successful addition. */
+    for(size_t i = 0; i < count; i++) {
+        UA_DataSetFieldConfig config;
+        memset(&config, 0, sizeof(config));
+        config.dataSetFieldType = UA_PUBSUB_DATASETFIELD_VARIABLE;
+        config.field.variable.fieldNameAlias = aliases[i];
+        config.field.variable.promotedField = promoted[i];
+        config.field.variable.publishParameters = variables[i];
+        UA_DataSetFieldResult fieldResult =
+            UA_Server_addDataSetField(server, *objectId, &config, NULL);
+        results[i] = fieldResult.result;
+        if(fieldResult.result == UA_STATUSCODE_GOOD)
+            version = fieldResult.configurationVersion;
+    }
+
+    /* Return the resulting version and transfer the per-field results to the
+     * method output. */
+    UA_StatusCode res = UA_Variant_setScalarCopy(&output[0], &version,
+        &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]);
+    if(res != UA_STATUSCODE_GOOD) {
+        UA_free(results);
+        return res;
+    }
+    UA_Variant_setArray(&output[1], results, count,
+                        &UA_TYPES[UA_TYPES_STATUSCODE]);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -1177,6 +1670,65 @@ removeVariablesAction(UA_Server *server,
                       const UA_NodeId *objectId, void *objectContext,
                       size_t inputSize, const UA_Variant *input,
                       size_t outputSize, UA_Variant *output){
+    /* Validate the method argument count and types before reading their
+     * values. */
+    if(inputSize != 2 || outputSize != 2)
+        return UA_STATUSCODE_BADARGUMENTSMISSING;
+    if(!UA_Variant_hasScalarType(&input[0],
+            &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]) ||
+       !UA_Variant_hasArrayType(&input[1], &UA_TYPES[UA_TYPES_UINT32]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+
+    /* Resolve the dataset and require the caller's configuration version to
+     * match before changing its fields. */
+    UA_PublishedDataSet *pds =
+        UA_PublishedDataSet_find(getPSM(server), *objectId);
+    if(!pds)
+        return UA_STATUSCODE_BADNODEIDUNKNOWN;
+    UA_ConfigurationVersionDataType *requested =
+        (UA_ConfigurationVersionDataType*)input[0].data;
+    if(!configurationVersionEqual(requested,
+                                  &pds->dataSetMetaData.configurationVersion))
+        return UA_STATUSCODE_BADINVALIDSTATE;
+
+    size_t count = input[1].arrayLength;
+    UA_UInt32 *indices = (UA_UInt32*)input[1].data;
+
+    /* Keep one result per requested field so individual failures can be
+     * reported alongside the final configuration version. */
+    UA_StatusCode *results = (UA_StatusCode*)
+        UA_calloc(count, sizeof(UA_StatusCode));
+    if(count > 0 && !results)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    UA_ConfigurationVersionDataType version = *requested;
+
+    /* Resolve each requested index against the current field list, remove the
+     * field when present and record its result. */
+    for(size_t i = 0; i < count; i++) {
+        UA_DataSetField *field = TAILQ_FIRST(&pds->fields);
+        for(UA_UInt32 j = 0; field && j < indices[i]; j++)
+            field = TAILQ_NEXT(field, listEntry);
+        if(!field) {
+            results[i] = UA_STATUSCODE_BADINDEXRANGEINVALID;
+            continue;
+        }
+        UA_DataSetFieldResult fieldResult =
+            UA_Server_removeDataSetField(server, field->identifier);
+        results[i] = fieldResult.result;
+        if(fieldResult.result == UA_STATUSCODE_GOOD)
+            version = fieldResult.configurationVersion;
+    }
+
+    /* Return the resulting version and transfer the per-field results to the
+     * method output. */
+    UA_StatusCode res = UA_Variant_setScalarCopy(&output[0], &version,
+        &UA_TYPES[UA_TYPES_CONFIGURATIONVERSIONDATATYPE]);
+    if(res != UA_STATUSCODE_GOOD) {
+        UA_free(results);
+        return res;
+    }
+    UA_Variant_setArray(&output[1], results, count,
+                        &UA_TYPES[UA_TYPES_STATUSCODE]);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -1187,6 +1739,11 @@ removePublishedDataSetAction(UA_Server *server,
                              const UA_NodeId *objectId, void *objectContext,
                              size_t inputSize, const UA_Variant *input,
                              size_t outputSize, UA_Variant *output){
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 0);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_NODEID]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     UA_NodeId nodeToRemove = *((UA_NodeId *) input[0].data);
     return UA_Server_removePublishedDataSet(server, nodeToRemove);
 }
@@ -1240,8 +1797,7 @@ addSubscribedDataSetRepresentation(UA_Server *server,
         attr.valueRank = UA_VALUERANK_ONE_DIMENSION;
         attr.arrayDimensionsSize = 1;
         UA_UInt32 arrayDimensions[1];
-        arrayDimensions[0] = (UA_UInt32)
-            subscribedDataSet->config.subscribedDataSet.target.targetVariablesSize;
+        arrayDimensions[0] = 0; /* Target count may change through settings updates. */
         attr.arrayDimensions = arrayDimensions;
         attr.accessLevel = UA_ACCESSLEVELMASK_READ;
         UA_Variant_setArray(&attr.value,
@@ -1252,6 +1808,15 @@ addSubscribedDataSetRepresentation(UA_Server *server,
                        UA_NS0ID(HASPROPERTY), UA_QUALIFIEDNAME(0, "TargetVariables"),
                        UA_NS0ID(PROPERTYTYPE), &attr, &UA_TYPES[UA_TYPES_VARIABLEATTRIBUTES],
                        NULL, &targetVarsId);
+        UA_NodePropertyContext *context = (UA_NodePropertyContext*)UA_malloc(sizeof(UA_NodePropertyContext));
+        if(!context)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        context->parentNodeId = subscribedDataSet->head.identifier;
+        context->parentClassifier = UA_NS0ID_STANDALONESUBSCRIBEDDATASETREFDATATYPE;
+        context->elementClassiefier = UA_NS0ID_TARGETVARIABLESTYPE_TARGETVARIABLES;
+        UA_CallbackValueSource source = {0};
+        source.read = ReadCallback;
+        ret |= setVariableValueSource(server, source, targetVarsId, context);
     }
 
     UA_NodePropertyContext *isConnectedNodeContext = (UA_NodePropertyContext *)
@@ -1260,17 +1825,17 @@ addSubscribedDataSetRepresentation(UA_Server *server,
     isConnectedNodeContext->parentClassifier = UA_NS0ID_STANDALONESUBSCRIBEDDATASETREFDATATYPE;
     isConnectedNodeContext->elementClassiefier = UA_NS0ID_STANDALONESUBSCRIBEDDATASETTYPE_ISCONNECTED;
 
-    UA_ValueCallback valueCallback;
-    valueCallback.onRead = onRead;
-    valueCallback.onWrite = NULL;
-    ret |= addVariableValueSource(server, valueCallback, connectedId, isConnectedNodeContext);
+    UA_CallbackValueSource valueCallback;
+    valueCallback.read = ReadCallback;
+    valueCallback.write = NULL;
+    ret |= setVariableValueSource(server, valueCallback, connectedId, isConnectedNodeContext);
 
     UA_NodePropertyContext *metaDataContext = (UA_NodePropertyContext *)
         UA_malloc(sizeof(UA_NodePropertyContext));
     metaDataContext->parentNodeId = subscribedDataSet->head.identifier;
     metaDataContext->parentClassifier = UA_NS0ID_STANDALONESUBSCRIBEDDATASETREFDATATYPE;
     metaDataContext->elementClassiefier = UA_NS0ID_STANDALONESUBSCRIBEDDATASETTYPE_DATASETMETADATA;
-    ret |= addVariableValueSource(server, valueCallback, metaDataId, metaDataContext);
+    ret |= setVariableValueSource(server, valueCallback, metaDataId, metaDataContext);
 
     return ret;
 }
@@ -1323,6 +1888,26 @@ writeContentMask(UA_Server *server, const UA_NodeId *sessionId,
     return UA_STATUSCODE_GOOD;
 }
 
+static UA_StatusCode
+readGroupVersion(UA_Server *server, const UA_NodeId *sessionId,
+                void *sessionContext, const UA_NodeId *nodeId,
+                void *nodeContext, UA_Boolean includeSourceTimeStamp,
+                const UA_NumericRange *range, UA_DataValue *value) {
+    UA_WriterGroup *writerGroup = (UA_WriterGroup*)nodeContext;
+    if((writerGroup->config.messageSettings.encoding != UA_EXTENSIONOBJECT_DECODED &&
+        writerGroup->config.messageSettings.encoding != UA_EXTENSIONOBJECT_DECODED_NODELETE) ||
+       writerGroup->config.messageSettings.content.decoded.type !=
+       &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE])
+        return UA_STATUSCODE_BADINTERNALERROR;
+    UA_UadpWriterGroupMessageDataType *wgm = (UA_UadpWriterGroupMessageDataType*)
+        writerGroup->config.messageSettings.content.decoded.data;
+
+    UA_Variant_setScalarCopy(&value->value, &wgm->groupVersion,
+                             &UA_TYPES[UA_DATATYPEKIND_UINT32]);
+    value->hasValue = true;
+    return UA_STATUSCODE_GOOD;
+}
+
 UA_StatusCode
 addWriterGroupRepresentation(UA_Server *server, UA_WriterGroup *writerGroup) {
     UA_LOCK_ASSERT(&server->serviceMutex);
@@ -1369,26 +1954,22 @@ addWriterGroupRepresentation(UA_Server *server, UA_WriterGroup *writerGroup) {
     publishingIntervalContext->parentNodeId = writerGroup->head.identifier;
     publishingIntervalContext->parentClassifier = UA_NS0ID_WRITERGROUPTYPE;
     publishingIntervalContext->elementClassiefier = UA_NS0ID_WRITERGROUPTYPE_PUBLISHINGINTERVAL;
-    UA_ValueCallback valueCallback;
-    valueCallback.onRead = onRead;
-    valueCallback.onWrite = onWrite;
-    retVal |= addVariableValueSource(server, valueCallback,
+    UA_CallbackValueSource valueCallback;
+    valueCallback.read = ReadCallback;
+    valueCallback.write = WriteCallback;
+    retVal |= setVariableValueSource(server, valueCallback,
                                      publishingIntervalNode, publishingIntervalContext);
     writeAccessLevelAttribute(server, publishingIntervalNode,
                               UA_ACCESSLEVELMASK_READ ^ UA_ACCESSLEVELMASK_WRITE);
 
-    UA_NodePropertyContext * stateContext = (UA_NodePropertyContext *)
-        UA_malloc(sizeof(UA_NodePropertyContext));
-    UA_CHECK_MEM(stateContext, return UA_STATUSCODE_BADOUTOFMEMORY);
-    stateContext->parentNodeId = writerGroup->head.identifier;
-    stateContext->parentClassifier = UA_NS0ID_WRITERGROUPTYPE;
-    stateContext->elementClassiefier = UA_NS0ID_PUBSUBGROUPTYPE_STATUS_STATE;
-    UA_ValueCallback stateValueCallback;
-    stateValueCallback.onRead = onRead;
-    stateValueCallback.onWrite = NULL;
-    retVal |= addVariableValueSource(server, stateValueCallback,
-                                     stateIdNode, stateContext);
-
+    UA_NodeId stateNodeId = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                               UA_NS0ID(HASCOMPONENT), statusIdNode);
+    if(!UA_NodeId_isNull(&stateNodeId)) {
+        UA_DataSource stateDataSource;
+        stateDataSource.read = pubSubStateVariableDataSourceRead;
+        stateDataSource.write = NULL;
+        retVal |= UA_Server_setVariableNode_dataSource(server, stateNodeId, stateDataSource);
+    }
 
     UA_NodeId priorityNode =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Priority"),
@@ -1426,15 +2007,31 @@ addWriterGroupRepresentation(UA_Server *server, UA_WriterGroup *writerGroup) {
                             UA_NS0ID(HASPROPERTY), messageSettingsId);
     if(!UA_NodeId_isNull(&contentMaskId)) {
         /* Set the callback */
-        UA_DataSource ds;
+        UA_CallbackValueSource ds;
         ds.read = readContentMask;
         ds.write = writeContentMask;
-        setVariableNode_dataSource(server, contentMaskId, ds);
+        setVariableNode_callbackValueSource(server, contentMaskId, ds);
         setNodeContext(server, contentMaskId, writerGroup);
 
         /* Make writable */
         writeAccessLevelAttribute(server, contentMaskId,
                                   UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_READ);
+
+    }
+    UA_NodeId groupVersionId =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "GroupVersion"),
+                            UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY), messageSettingsId);
+    if(!UA_NodeId_isNull(&groupVersionId)) {
+        /* Set the callback */
+        UA_CallbackValueSource ds;
+        ds.read = readGroupVersion;
+        ds.write = NULL;
+        setVariableNode_callbackValueSource(server, groupVersionId, ds);
+        setNodeContext(server, groupVersionId, writerGroup);
+
+        /* Read only */
+        writeAccessLevelAttribute(server, groupVersionId,
+                                  UA_ACCESSLEVELMASK_READ);
 
     }
 
@@ -1446,32 +2043,42 @@ addWriterGroupRepresentation(UA_Server *server, UA_WriterGroup *writerGroup) {
         retVal |= addRef(server, writerGroup->head.identifier,
                          UA_NS0ID(HASCOMPONENT),
                          UA_NS0ID(WRITERGROUPTYPE_REMOVEDATASETWRITER), true);
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), true);
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), true);
     }
     return retVal;
 }
 
 static UA_StatusCode
 addWriterGroupAction(UA_Server *server,
-                             const UA_NodeId *sessionId, void *sessionContext,
-                             const UA_NodeId *methodId, void *methodContext,
-                             const UA_NodeId *objectId, void *objectContext,
-                             size_t inputSize, const UA_Variant *input,
-                             size_t outputSize, UA_Variant *output){
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
-    UA_WriterGroupDataType *writerGroup = ((UA_WriterGroupDataType *) input[0].data);
+                     const UA_NodeId *sessionId, void *sessionContext,
+                     const UA_NodeId *methodId, void *methodContext,
+                     const UA_NodeId *objectId, void *objectContext,
+                     size_t inputSize, const UA_Variant *input,
+                     size_t outputSize, UA_Variant *output) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 1);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(
+           &input[0], &UA_TYPES[UA_TYPES_WRITERGROUPDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+
     UA_NodeId writerGroupId;
-    retVal |= addWriterGroupConfig(server, *objectId, writerGroup, &writerGroupId);
+    UA_WriterGroupDataType *writerGroup = (UA_WriterGroupDataType *)input->data;
+    UA_StatusCode retVal = addWriterGroupConfig(server, *objectId, writerGroup, &writerGroupId);
     if(retVal != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER, "addWriterGroup failed");
-        UA_UNLOCK(&server->serviceMutex);
         return retVal;
     }
-    // TODO: Need to handle the UA_Server_setWriterGroupOperational based on the
-    // status variable in information model
+
+    /* TODO: Need to handle the UA_Server_setWriterGroupOperational based on
+     * the status variable in information model */
 
     UA_Variant_setScalarCopy(output, &writerGroupId, &UA_TYPES[UA_TYPES_NODEID]);
-    UA_UNLOCK(&server->serviceMutex);
     return retVal;
 }
 
@@ -1482,15 +2089,34 @@ removeGroupAction(UA_Server *server,
                   const UA_NodeId *objectId, void *objectContext,
                   size_t inputSize, const UA_Variant *input,
                   size_t outputSize, UA_Variant *output){
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 0);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_NODEID]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     UA_PubSubManager *psm = getPSM(server);
     if(!psm)
         return UA_STATUSCODE_BADINTERNALERROR;
 
     UA_NodeId nodeToRemove = *((UA_NodeId *)input->data);
-    if(UA_WriterGroup_find(psm, nodeToRemove)) {
+
+    /* Resolve the group within the invoking connection so the method can
+     * remove only one of that connection's children. */
+    UA_WriterGroup *wg = UA_WriterGroup_find(psm, nodeToRemove);
+    if(wg) {
+        if(!wg->linkedConnection ||
+           !UA_NodeId_equal(&wg->linkedConnection->head.identifier, objectId))
+            return UA_STATUSCODE_BADNODEIDUNKNOWN;
         return UA_Server_removeWriterGroup(server, nodeToRemove);
     } else {
-        return UA_Server_removeReaderGroup(server, nodeToRemove);
+        UA_ReaderGroup *rg = UA_ReaderGroup_find(psm, nodeToRemove);
+        if(rg) {
+            if(!rg->linkedConnection ||
+               !UA_NodeId_equal(&rg->linkedConnection->head.identifier, objectId))
+                return UA_STATUSCODE_BADNODEIDUNKNOWN;
+            return UA_Server_removeReaderGroup(server, nodeToRemove);
+        }
+        return UA_STATUSCODE_BADNODEIDUNKNOWN;
     }
 }
 
@@ -1499,13 +2125,21 @@ removeGroupAction(UA_Server *server,
 /**********************************************/
 
 static UA_StatusCode
-addReserveIdsLocked(UA_Server *server,
+addReserveIdsAction(UA_Server *server,
                     const UA_NodeId *sessionId, void *sessionContext,
                     const UA_NodeId *methodId, void *methodContext,
                     const UA_NodeId *objectId, void *objectContext,
                     size_t inputSize, const UA_Variant *input,
                     size_t outputSize, UA_Variant *output){
     UA_LOCK_ASSERT(&server->serviceMutex);
+
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 3, outputSize, 3);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_STRING]) ||
+       !UA_Variant_hasScalarType(&input[1], &UA_TYPES[UA_TYPES_UINT16]) ||
+       !UA_Variant_hasScalarType(&input[2], &UA_TYPES[UA_TYPES_UINT16]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
 
     UA_PubSubManager *psm = getPSM(server);
     if(!psm)
@@ -1551,21 +2185,6 @@ addReserveIdsLocked(UA_Server *server,
     return retVal;
 }
 
-static UA_StatusCode
-addReserveIdsAction(UA_Server *server,
-                    const UA_NodeId *sessionId, void *sessionContext,
-                    const UA_NodeId *methodId, void *methodContext,
-                    const UA_NodeId *objectId, void *objectContext,
-                    size_t inputSize, const UA_Variant *input,
-                    size_t outputSize, UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = addReserveIdsLocked(server, sessionId, sessionContext,
-                                            methodId, methodContext, objectId, objectContext,
-                                            inputSize, input, outputSize, output);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
 /**********************************************/
 /*               ReaderGroup                  */
 /**********************************************/
@@ -1603,23 +2222,20 @@ addReaderGroupRepresentation(UA_Server *server, UA_ReaderGroup *readerGroup) {
     if(UA_NodeId_isNull(&stateIdNode))
         return UA_STATUSCODE_BADNOTFOUND;
 
-    UA_NodePropertyContext * stateContext = (UA_NodePropertyContext *)
-        UA_malloc(sizeof(UA_NodePropertyContext));
-    UA_CHECK_MEM(stateContext, return UA_STATUSCODE_BADOUTOFMEMORY);
-    stateContext->parentNodeId = readerGroup->head.identifier;
-    stateContext->parentClassifier = UA_NS0ID_READERGROUPTYPE;
-    stateContext->elementClassiefier = UA_NS0ID_PUBSUBGROUPTYPE_STATUS_STATE;
-    UA_ValueCallback stateValueCallback;
-    stateValueCallback.onRead = onRead;
-    stateValueCallback.onWrite = NULL;
-    retVal |= addVariableValueSource(server, stateValueCallback,
-                                     stateIdNode, stateContext);
+    UA_DataSource stateDataSource;
+    stateDataSource.read = pubSubStateVariableDataSourceRead;
+    stateDataSource.write = NULL;
+    retVal |= UA_Server_setVariableNode_dataSource(server, stateIdNode, stateDataSource);
 
     if(server->config.pubSubConfig.enableInformationModelMethods) {
         retVal |= addRef(server, readerGroup->head.identifier, UA_NS0ID(HASCOMPONENT),
                          UA_NS0ID(READERGROUPTYPE_ADDDATASETREADER), true);
         retVal |= addRef(server, readerGroup->head.identifier, UA_NS0ID(HASCOMPONENT),
                          UA_NS0ID(READERGROUPTYPE_REMOVEDATASETREADER), true);
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), true);
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), true);
     }
     return retVal;
 }
@@ -1630,134 +2246,31 @@ addReaderGroupAction(UA_Server *server,
                      const UA_NodeId *methodId, void *methodContext,
                      const UA_NodeId *objectId, void *objectContext,
                      size_t inputSize, const UA_Variant *input,
-                     size_t outputSize, UA_Variant *output){
-    UA_LOCK(&server->serviceMutex);
+                     size_t outputSize, UA_Variant *output) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 1);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(
+           &input[0], &UA_TYPES[UA_TYPES_READERGROUPDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+
     UA_StatusCode retVal = UA_STATUSCODE_GOOD;
     UA_ReaderGroupDataType *readerGroup = ((UA_ReaderGroupDataType *) input->data);
     UA_NodeId readerGroupId;
     retVal |= addReaderGroupConfig(server, *objectId, readerGroup, &readerGroupId);
     if(retVal != UA_STATUSCODE_GOOD) {
         UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER, "addReaderGroup failed");
-        UA_UNLOCK(&server->serviceMutex);
         return retVal;
     }
-    // TODO: Need to handle the UA_Server_setReaderGroupOperational based on the
-    // status variable in information model
+
+    /* TODO: Need to handle the UA_Server_setReaderGroupOperational based on
+     * the status variable in information model */
 
     UA_Variant_setScalarCopy(output, &readerGroupId, &UA_TYPES[UA_TYPES_NODEID]);
-    UA_UNLOCK(&server->serviceMutex);
     return retVal;
 }
-
-#ifdef UA_ENABLE_PUBSUB_SKS
-#ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
-static UA_Boolean
-isValidParentNode(UA_Server *server, UA_NodeId parentId) {
-    UA_LOCK_ASSERT(&server->serviceMutex);
-    UA_Boolean retval = true;
-    const UA_Node *parentNodeType;
-    const UA_NodeId parentNodeTypeId = UA_NS0ID(SECURITYGROUPFOLDERTYPE);
-    const UA_Node *parentNode = UA_NODESTORE_GET(server, &parentId);
-
-    if(parentNode) {
-        parentNodeType = getNodeType(server, &parentNode->head);
-        if(parentNodeType) {
-            retval = UA_NodeId_equal(&parentNodeType->head.nodeId, &parentNodeTypeId);
-            UA_NODESTORE_RELEASE(server, parentNodeType);
-        }
-        UA_NODESTORE_RELEASE(server, parentNode);
-    }
-    return retval;
-}
-
-static UA_StatusCode
-updateSecurityGroupProperties(UA_Server *server, UA_NodeId *securityGroupNodeId,
-                              UA_SecurityGroupConfig *config) {
-    UA_LOCK_ASSERT(&server->serviceMutex);
-
-    UA_StatusCode retval = UA_STATUSCODE_BAD;
-    UA_Variant value;
-    UA_Variant_init(&value);
-    UA_Variant_setScalar(&value, &config->securityGroupName, &UA_TYPES[UA_TYPES_STRING]);
-    retval = writeObjectProperty(server, *securityGroupNodeId,
-                                 UA_QUALIFIEDNAME(0, "SecurityGroupId"), value);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    /*AddValueCallback*/
-    UA_Variant_setScalar(&value, &config->securityPolicyUri, &UA_TYPES[UA_TYPES_STRING]);
-    retval = writeObjectProperty(server, *securityGroupNodeId,
-                                 UA_QUALIFIEDNAME(0, "SecurityPolicyUri"), value);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    UA_Variant_setScalar(&value, &config->keyLifeTime, &UA_TYPES[UA_TYPES_DURATION]);
-    retval = writeObjectProperty(server, *securityGroupNodeId,
-                                 UA_QUALIFIEDNAME(0, "KeyLifetime"), value);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    UA_Variant_setScalar(&value, &config->maxFutureKeyCount, &UA_TYPES[UA_TYPES_UINT32]);
-    retval = writeObjectProperty(server, *securityGroupNodeId,
-                                 UA_QUALIFIEDNAME(0, "MaxFutureKeyCount"), value);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    UA_Variant_setScalar(&value, &config->maxPastKeyCount, &UA_TYPES[UA_TYPES_UINT32]);
-    retval = writeObjectProperty(server, *securityGroupNodeId,
-                                 UA_QUALIFIEDNAME(0, "MaxPastKeyCount"), value);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    return retval;
-}
-
-UA_StatusCode
-addSecurityGroupRepresentation(UA_Server *server, UA_SecurityGroup *securityGroup) {
-    UA_LOCK_ASSERT(&server->serviceMutex);
-    UA_StatusCode retval = UA_STATUSCODE_BAD;
-
-    UA_SecurityGroupConfig *securityGroupConfig = &securityGroup->config;
-    if(!isValidParentNode(server, securityGroup->securityGroupFolderId))
-        return UA_STATUSCODE_BADPARENTNODEIDINVALID;
-
-    if(securityGroupConfig->securityGroupName.length <= 0)
-        return UA_STATUSCODE_BADINVALIDARGUMENT;
-
-    UA_QualifiedName browseName;
-    UA_QualifiedName_init(&browseName);
-    browseName.name = securityGroupConfig->securityGroupName;
-
-    UA_ObjectAttributes object_attr = UA_ObjectAttributes_default;
-    object_attr.displayName.text = securityGroupConfig->securityGroupName;
-    UA_NodeId refType = UA_NS0ID(HASCOMPONENT);
-    UA_NodeId nodeType = UA_NS0ID(SECURITYGROUPTYPE);
-    retval = addNode(server, UA_NODECLASS_OBJECT, UA_NODEID_NULL,
-                     securityGroup->securityGroupFolderId, refType,
-                     browseName, nodeType, &object_attr,
-                     &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES], NULL,
-                     &securityGroup->securityGroupNodeId);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
-                     "Add SecurityGroup failed with error: %s.",
-                     UA_StatusCode_name(retval));
-        return retval;
-    }
-
-    retval = updateSecurityGroupProperties(server,
-                                           &securityGroup->securityGroupNodeId,
-                                           securityGroupConfig);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
-                     "Add SecurityGroup failed with error: %s.",
-                     UA_StatusCode_name(retval));
-        deleteNode(server, securityGroup->securityGroupNodeId, true);
-    }
-    return retval;
-}
-
-#endif /* UA_ENABLE_PUBSUB_INFORMATIONMODEL*/
-#endif /* UA_ENABLE_PUBSUB_SKS */
 
 /**********************************************/
 /*               DataSetWriter                */
@@ -1784,7 +2297,8 @@ addDataSetWriterRepresentation(UA_Server *server, UA_DataSetWriter *dataSetWrite
                 UA_QUALIFIEDNAME(0, dswName), UA_NS0ID(DATASETWRITERTYPE), &object_attr,
                 &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES],
                      NULL, &dataSetWriter->head.identifier);
-    //if connected dataset is null this means it's configured for heartbeats
+
+    /* A null connected dataset configures a heartbeat writer. */
     if(dataSetWriter->connectedDataSet) {
         retVal |= addRef(server, dataSetWriter->connectedDataSet->head.identifier,
                          UA_NS0ID(DATASETTOWRITER), dataSetWriter->head.identifier, true);
@@ -1804,48 +2318,43 @@ addDataSetWriterRepresentation(UA_Server *server, UA_DataSetWriter *dataSetWrite
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
                             UA_NS0ID(HASCOMPONENT), dataSetWriter->head.identifier);
     
-    if(UA_NodeId_isNull(&statusIdNode)) {
+    if(UA_NodeId_isNull(&statusIdNode))
         return UA_STATUSCODE_BADNOTFOUND;
-    }
 
     UA_NodeId stateIdNode = 
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
                             UA_NS0ID(HASCOMPONENT), statusIdNode);
 
-    // TODO: The keyFrameNode is NULL here, should be check
-    // does not depend on the pubsub changes
+    /* TODO: The keyFrameNode is NULL here, should be check does not depend on
+     * the pubsub changes */
     if(UA_NodeId_isNull(&dataSetWriterIdNode) ||
        UA_NodeId_isNull(&dataSetFieldContentMaskNode) ||
-       UA_NodeId_isNull(&stateIdNode)) {
+       UA_NodeId_isNull(&stateIdNode))
             return UA_STATUSCODE_BADNOTFOUND;
-    }
 
     UA_NodePropertyContext *dataSetWriterIdContext = (UA_NodePropertyContext *)
         UA_malloc(sizeof(UA_NodePropertyContext));
     dataSetWriterIdContext->parentNodeId = dataSetWriter->head.identifier;
     dataSetWriterIdContext->parentClassifier = UA_NS0ID_DATASETWRITERTYPE;
     dataSetWriterIdContext->elementClassiefier = UA_NS0ID_DATASETWRITERTYPE_DATASETWRITERID;
-    UA_ValueCallback valueCallback;
-    valueCallback.onRead = onRead;
-    valueCallback.onWrite = NULL;
-    retVal |= addVariableValueSource(server, valueCallback,
+    UA_CallbackValueSource valueCallback;
+    valueCallback.read = ReadCallback;
+    valueCallback.write = NULL;
+    retVal |= setVariableValueSource(server, valueCallback,
                                      dataSetWriterIdNode, dataSetWriterIdContext);
 
-    UA_NodePropertyContext *dataSetWriterStateContext =
-        (UA_NodePropertyContext *) UA_malloc(sizeof(UA_NodePropertyContext));
-    UA_CHECK_MEM(dataSetWriterStateContext, return UA_STATUSCODE_BADOUTOFMEMORY);
-    dataSetWriterStateContext->parentNodeId = dataSetWriter->head.identifier;
-    dataSetWriterStateContext->parentClassifier = UA_NS0ID_DATASETWRITERTYPE;
-    dataSetWriterStateContext->elementClassiefier = UA_NS0ID_DATASETWRITERTYPE_STATUS_STATE;
-    retVal |= addVariableValueSource(server, valueCallback,
-                                     stateIdNode, dataSetWriterStateContext);
+    UA_NodeId stateNodeId = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
+                                               UA_NS0ID(HASCOMPONENT), statusIdNode);
+    if(!UA_NodeId_isNull(&stateNodeId)) {
+        UA_DataSource stateDataSource;
+        stateDataSource.read = pubSubStateVariableDataSourceRead;
+        stateDataSource.write = NULL;
+        retVal |= UA_Server_setVariableNode_dataSource(server, stateNodeId, stateDataSource);
+    }
 
     UA_Variant value;
     UA_Variant_init(&value);
-    UA_Variant_setScalar(&value, &dataSetWriter->config.dataSetWriterId,
-                         &UA_TYPES[UA_TYPES_UINT16]);
-    writeValueAttribute(server, dataSetWriterIdNode, &value);
-
+    /* DataSetWriterId is provided by the read-only callback above. */
     UA_Variant_setScalar(&value, &dataSetWriter->config.keyFrameCount,
                          &UA_TYPES[UA_TYPES_UINT32]);
     writeValueAttribute(server, keyFrameNode, &value);
@@ -1861,18 +2370,31 @@ addDataSetWriterRepresentation(UA_Server *server, UA_DataSetWriter *dataSetWrite
                       UA_NS0ID(UADPDATASETWRITERMESSAGETYPE), &object_attr,
                       &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES],
                       NULL, NULL);
+    if(server->config.pubSubConfig.enableInformationModelMethods) {
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), true);
+        retVal |= addRef(server, statusIdNode, UA_NS0ID(HASCOMPONENT), 
+                        UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), true);
+    }
 
     return retVal;
 }
 
 static UA_StatusCode
-addDataSetWriterLocked(UA_Server *server,
+addDataSetWriterAction(UA_Server *server,
                        const UA_NodeId *sessionId, void *sessionContext,
                        const UA_NodeId *methodId, void *methodContext,
                        const UA_NodeId *objectId, void *objectContext,
                        size_t inputSize, const UA_Variant *input,
                        size_t outputSize, UA_Variant *output) {
     UA_LOCK_ASSERT(&server->serviceMutex);
+
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 1);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(
+           &input[0], &UA_TYPES[UA_TYPES_DATASETWRITERDATATYPE]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
 
     UA_NodeId dataSetWriterId;
     UA_DataSetWriterDataType *dataSetWriterData = (UA_DataSetWriterDataType *)input->data;
@@ -1889,298 +2411,48 @@ addDataSetWriterLocked(UA_Server *server,
 }
 
 static UA_StatusCode
-addDataSetWriterAction(UA_Server *server,
-                       const UA_NodeId *sessionId, void *sessionContext,
-                       const UA_NodeId *methodId, void *methodContext,
-                       const UA_NodeId *objectId, void *objectContext,
-                       size_t inputSize, const UA_Variant *input,
-                       size_t outputSize, UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = addDataSetWriterLocked(server, sessionId, sessionContext,
-                                               methodId, methodContext, objectId, objectContext,
-                                               inputSize, input, outputSize, output);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-static UA_StatusCode
 removeDataSetWriterAction(UA_Server *server,
                           const UA_NodeId *sessionId, void *sessionContext,
                           const UA_NodeId *methodId, void *methodContext,
                           const UA_NodeId *objectId, void *objectContext,
                           size_t inputSize, const UA_Variant *input,
                           size_t outputSize, UA_Variant *output){
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 0);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_NODEID]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
     UA_NodeId nodeToRemove = *((UA_NodeId *) input[0].data);
     return UA_Server_removeDataSetWriter(server, nodeToRemove);
 }
-
-#ifdef UA_ENABLE_PUBSUB_SKS
-/**
- * @note The user credentials and permissions are checked in the AccessControl plugin
- * before this callback is executed.
- */
-static UA_StatusCode
-setSecurityKeysLocked(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
-                      const UA_NodeId *methodId, void *methodContext,
-                      const UA_NodeId *objectId, void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize, UA_Variant *output) {
-    UA_LOCK_ASSERT(&server->serviceMutex);
-
-    /* Validate the arguments */
-    if(!server || !input)
-        return UA_STATUSCODE_BADINVALIDARGUMENT;
-    if(inputSize < 7)
-        return UA_STATUSCODE_BADARGUMENTSMISSING;
-    if(inputSize > 7 || outputSize > 0)
-        return UA_STATUSCODE_BADTOOMANYARGUMENTS;
-
-    /* Check whether the channel is encrypted according to specification */
-    UA_Session *session = getSessionById(server, sessionId);
-    if(!session || !session->channel)
-        return UA_STATUSCODE_BADINTERNALERROR;
-    if(session->channel->securityMode != UA_MESSAGESECURITYMODE_SIGNANDENCRYPT)
-        return UA_STATUSCODE_BADSECURITYMODEINSUFFICIENT;
-
-    /*check for types*/
-    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_STRING]) || /*SecurityGroupId*/
-        !UA_Variant_hasScalarType(&input[1], &UA_TYPES[UA_TYPES_STRING]) || /*SecurityPolicyUri*/
-        !UA_Variant_hasScalarType(&input[2], &UA_TYPES[UA_TYPES_INTEGERID]) || /*CurrentTokenId*/
-        !UA_Variant_hasScalarType(&input[3], &UA_TYPES[UA_TYPES_BYTESTRING]) || /*CurrentKey*/
-        !UA_Variant_hasArrayType(&input[4], &UA_TYPES[UA_TYPES_BYTESTRING]) || /*FutureKeys*/
-        (!UA_Variant_hasScalarType(&input[5], &UA_TYPES[UA_TYPES_DURATION]) &&
-        !UA_Variant_hasScalarType(&input[5], &UA_TYPES[UA_TYPES_DOUBLE])) || /*TimeToNextKey*/
-        (!UA_Variant_hasScalarType(&input[6], &UA_TYPES[UA_TYPES_DURATION]) &&
-        !UA_Variant_hasScalarType(&input[6], &UA_TYPES[UA_TYPES_DOUBLE]))) /*TimeToNextKey*/
-        return UA_STATUSCODE_BADTYPEMISMATCH;
-
-    UA_Duration callbackTime;
-    UA_String *securityGroupId = (UA_String *)input[0].data;
-    UA_String *securityPolicyUri = (UA_String *)input[1].data;
-    UA_UInt32 currentKeyId = *(UA_UInt32 *)input[2].data;
-    UA_ByteString *currentKey = (UA_ByteString *)input[3].data;
-    UA_ByteString *futureKeys = (UA_ByteString *)input[4].data;
-    size_t futureKeySize = input[4].arrayLength;
-    UA_Duration msTimeToNextKey = *(UA_Duration *)input[5].data;
-    UA_Duration msKeyLifeTime = *(UA_Duration *)input[6].data;
-
-    UA_PubSubManager *psm = getPSM(server);
-    UA_PubSubKeyStorage *ks =
-        UA_PubSubKeyStorage_find(psm, *securityGroupId);
-    if(!ks)
-        return UA_STATUSCODE_BADNOTFOUND;
-
-    if(!UA_String_equal(securityPolicyUri, &ks->policy->policyUri))
-        return UA_STATUSCODE_BADSECURITYPOLICYREJECTED;
-
-    UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    UA_PubSubKeyListItem *current = UA_PubSubKeyStorage_getKeyByKeyId(ks, currentKeyId);
-    if(!current) {
-        UA_PubSubKeyStorage_clearKeyList(ks);
-        retval |= (UA_PubSubKeyStorage_push(ks, currentKey, currentKeyId)) ?
-            UA_STATUSCODE_GOOD : UA_STATUSCODE_BADOUTOFMEMORY;
-    }
-    UA_PubSubKeyStorage_setCurrentKey(ks, currentKeyId);
-    retval |= UA_PubSubKeyStorage_addSecurityKeys(ks, futureKeySize,
-                                                  futureKeys, currentKeyId);
-    ks->keyLifeTime = msKeyLifeTime;
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    retval = UA_PubSubKeyStorage_activateKeyToChannelContext(psm, UA_NODEID_NULL,
-                                                             ks->securityGroupID);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_INFO(
-            server->config.logging, UA_LOGCATEGORY_SERVER,
-            "Failed to import Symmetric Keys into PubSub Channel Context with %s \n",
-            UA_StatusCode_name(retval));
-        return retval;
-    }
-
-    callbackTime = msKeyLifeTime;
-    if(msTimeToNextKey > 0)
-        callbackTime = msTimeToNextKey;
-
-    /*move to setSecurityKeysAction*/
-    return UA_PubSubKeyStorage_addKeyRolloverCallback(
-        psm, ks, (UA_Callback)UA_PubSubKeyStorage_keyRolloverCallback,
-        callbackTime, &ks->callBackId);
-}
-
-static UA_StatusCode
-setSecurityKeysAction(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
-                      const UA_NodeId *methodId, void *methodContext,
-                      const UA_NodeId *objectId, void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize, UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = setSecurityKeysLocked(server, sessionId, sessionContext,
-                                              methodId, methodContext,
-                                              objectId, objectContext, inputSize,
-                                              input, outputSize, output);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-static UA_StatusCode
-getSecurityKeysLocked(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
-                      const UA_NodeId *methodId, void *methodContext,
-                      const UA_NodeId *objectId, void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize, UA_Variant *output) {
-    UA_LOCK_ASSERT(&server->serviceMutex);
-
-    /* Validate the arguments */
-    if(!server || !input)
-        return UA_STATUSCODE_BADINVALIDARGUMENT;
-    if(inputSize < 3 || outputSize < 5)
-        return UA_STATUSCODE_BADARGUMENTSMISSING;
-    if(inputSize > 3 || outputSize > 5)
-        return UA_STATUSCODE_BADTOOMANYARGUMENTS;
-
-    /* Check whether the channel is encrypted according to specification */
-    UA_Session *session = getSessionById(server, sessionId);
-    if(!session || !session->channel)
-        return UA_STATUSCODE_BADINTERNALERROR;
-    if(session->channel->securityMode != UA_MESSAGESECURITYMODE_SIGNANDENCRYPT)
-        return UA_STATUSCODE_BADSECURITYMODEINSUFFICIENT;
-
-    /*check for types*/
-    if(!UA_Variant_hasScalarType(&input[0],
-                                 &UA_TYPES[UA_TYPES_STRING]) || /*SecurityGroupId*/
-       !UA_Variant_hasScalarType(&input[1],
-                                 &UA_TYPES[UA_TYPES_INTEGERID]) || /*StartingTokenId*/
-       !UA_Variant_hasScalarType(&input[2],
-                                 &UA_TYPES[UA_TYPES_UINT32])) /*RequestedKeyCount*/
-        return UA_STATUSCODE_BADTYPEMISMATCH;
-
-    UA_StatusCode retval = UA_STATUSCODE_BAD;
-    UA_UInt32 currentKeyCount = 1;
-    /* input */
-    UA_String *securityGroupId = (UA_String *)input[0].data;
-    UA_UInt32 startingTokenId = *(UA_UInt32 *)input[1].data;
-    UA_UInt32 requestedKeyCount = *(UA_UInt32 *)input[2].data;
-
-    UA_PubSubManager *psm = getPSM(server);
-    UA_PubSubKeyStorage *ks = UA_PubSubKeyStorage_find(psm, *securityGroupId);
-    if(!ks)
-        return UA_STATUSCODE_BADNOTFOUND;
-
-    UA_Boolean executable = false;
-    UA_SecurityGroup *sg = UA_SecurityGroup_findByName(psm, *securityGroupId);
-    void *sgNodeCtx;
-    getNodeContext(server, sg->securityGroupNodeId, (void **)&sgNodeCtx);
-    executable = server->config.accessControl.getUserExecutableOnObject(
-        server, &server->config.accessControl, sessionId, sessionContext, methodId,
-        methodContext, &sg->securityGroupNodeId, sgNodeCtx);
-
-    if(!executable)
-        return UA_STATUSCODE_BADUSERACCESSDENIED;
-
-    /* If the caller requests a number larger than the Security Key Service permits, then
-     * the SKS shall return the maximum it allows.*/
-    if(requestedKeyCount > sg->config.maxFutureKeyCount)
-        requestedKeyCount =(UA_UInt32) sg->keyStorage->keyListSize;
-    else
-        requestedKeyCount = requestedKeyCount + currentKeyCount; /* Add Current keyCount */
-
-    /*The current token is requested by passing 0.*/
-    UA_PubSubKeyListItem *startingItem = NULL;
-    if(startingTokenId == 0) {
-        /* currentItem is always set by the server when a security group is added */
-        UA_assert(sg->keyStorage->currentItem != NULL);
-        startingItem = sg->keyStorage->currentItem;
-    } else {
-        startingItem = UA_PubSubKeyStorage_getKeyByKeyId(sg->keyStorage, startingTokenId);
-        /*If the StartingTokenId is unknown, the oldest (firstItem) available tokens are
-         * returned. */
-        if(!startingItem)
-            startingItem = TAILQ_FIRST(&sg->keyStorage->keyList);
-    }
-
-    /*SecurityPolicyUri*/
-    retval = UA_Variant_setScalarCopy(&output[0], &(sg->keyStorage->policy->policyUri),
-                         &UA_TYPES[UA_TYPES_STRING]);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    /*FirstTokenId*/
-    retval = UA_Variant_setScalarCopy(&output[1], &startingItem->keyID,
-                                      &UA_TYPES[UA_TYPES_INTEGERID]);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    /*TimeToNextKey*/
-    UA_EventLoop *el = server->config.eventLoop;
-    UA_DateTime baseTime = sg->baseTime;
-    UA_DateTime currentTime = el->dateTime_nowMonotonic(el);
-    UA_Duration interval = sg->config.keyLifeTime;
-    UA_Duration timeToNextKey =
-        (UA_Duration)((currentTime - baseTime) / UA_DATETIME_MSEC);
-    timeToNextKey = interval - timeToNextKey;
-    retval = UA_Variant_setScalarCopy(&output[3], &timeToNextKey,
-                                      &UA_TYPES[UA_TYPES_DURATION]);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    /*KeyLifeTime*/
-    retval = UA_Variant_setScalarCopy(&output[4], &sg->config.keyLifeTime,
-                         &UA_TYPES[UA_TYPES_DURATION]);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    /*Keys*/
-    UA_PubSubKeyListItem *iterator = startingItem;
-    output[2].data = (UA_ByteString *)UA_calloc(requestedKeyCount, startingItem->key.length);
-    if(!output[2].data)
-        return UA_STATUSCODE_BADOUTOFMEMORY;
-
-    UA_ByteString *requestedKeys = (UA_ByteString *)output[2].data;
-    UA_UInt32 retkeyCount = 0;
-    for(size_t i = 0; i < requestedKeyCount; i++) {
-        UA_ByteString_copy(&iterator->key, &requestedKeys[i]);
-        ++retkeyCount;
-        iterator = TAILQ_NEXT(iterator, keyListEntry);
-        if(!iterator) {
-            requestedKeyCount = retkeyCount;
-            break;
-        }
-    }
-
-    UA_Variant_setArray(&output[2], requestedKeys, requestedKeyCount, &UA_TYPES[UA_TYPES_BYTESTRING]);
-    return retval;
-}
-
-static UA_StatusCode
-getSecurityKeysAction(UA_Server *server, const UA_NodeId *sessionId, void *sessionContext,
-                      const UA_NodeId *methodId, void *methodContext,
-                      const UA_NodeId *objectId, void *objectContext, size_t inputSize,
-                      const UA_Variant *input, size_t outputSize, UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
-    UA_StatusCode res = getSecurityKeysLocked(server, sessionId, sessionContext,
-                                              methodId, methodContext,
-                                              objectId, objectContext, inputSize,
-                                              input, outputSize, output);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-#endif
 
 /**********************************************/
 /*                Destructors                 */
 /**********************************************/
 
 static void
+freeNodeContext(UA_Server *server, const UA_NodeId *nodeId) {
+    if(UA_NodeId_isNull(nodeId))
+        return;
+
+    void *context = NULL;
+    UA_StatusCode res = getNodeContext(server, *nodeId, &context);
+    if(res == UA_STATUSCODE_GOOD)
+        UA_free(context);
+}
+
+static void
 connectionTypeDestructor(UA_Server *server,
                          const UA_NodeId *sessionId, void *sessionContext,
                          const UA_NodeId *typeId, void *typeContext,
                          const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOCK(&server->serviceMutex);
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_LOG_INFO(server->config.logging, UA_LOGCATEGORY_PUBSUB,
+                "Connection destructor called!");
     UA_NodeId publisherIdNode =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "PublisherId"),
                             UA_NS0ID(HASPROPERTY), *nodeId);
-    UA_NodePropertyContext *ctx;
-    getNodeContext(server, publisherIdNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&publisherIdNode))
-        UA_free(ctx);
-    UA_UNLOCK(&server->serviceMutex);
+    freeNodeContext(server, &publisherIdNode);
 }
 
 static void
@@ -2188,26 +2460,14 @@ writerGroupTypeDestructor(UA_Server *server,
                           const UA_NodeId *sessionId, void *sessionContext,
                           const UA_NodeId *typeId, void *typeContext,
                           const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOCK(&server->serviceMutex);
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_LOG_INFO(server->config.logging, UA_LOGCATEGORY_PUBSUB,
+                "WriterGroup destructor called!");
     UA_NodeId intervalNode =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "PublishingInterval"),
                             UA_NS0ID(HASPROPERTY), *nodeId);
 
-    UA_NodeId statusNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
-                            UA_NS0ID(HASCOMPONENT), *nodeId);
-    UA_NodeId stateNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
-                            UA_NS0ID(HASCOMPONENT), statusNode);
-    UA_NodePropertyContext *ctx;
-    getNodeContext(server, intervalNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&intervalNode))
-        UA_free(ctx);
-
-    getNodeContext(server, stateNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&stateNode))
-        UA_free(ctx);
-    UA_UNLOCK(&server->serviceMutex);
+    freeNodeContext(server, &intervalNode);
 }
 
 static void
@@ -2215,19 +2475,7 @@ readerGroupTypeDestructor(UA_Server *server,
                           const UA_NodeId *sessionId, void *sessionContext,
                           const UA_NodeId *typeId, void *typeContext,
                           const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOCK(&server->serviceMutex);
-    UA_NodeId statusNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
-                            UA_NS0ID(HASCOMPONENT), *nodeId);
-    UA_NodeId stateNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
-                            UA_NS0ID(HASCOMPONENT), statusNode);
-
-    UA_NodePropertyContext *ctx;
-    getNodeContext(server, stateNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&stateNode))
-        UA_free(ctx);
-    UA_UNLOCK(&server->serviceMutex);
+    UA_LOCK_ASSERT(&server->serviceMutex);
 }
 
 static void
@@ -2235,24 +2483,15 @@ dataSetWriterTypeDestructor(UA_Server *server,
                             const UA_NodeId *sessionId, void *sessionContext,
                             const UA_NodeId *typeId, void *typeContext,
                             const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOCK(&server->serviceMutex);
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_LOG_INFO(server->config.logging, UA_LOGCATEGORY_PUBSUB,
+                "DataSetWriter destructor called!");
+
     UA_NodeId dataSetWriterIdNode =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetWriterId"),
                             UA_NS0ID(HASPROPERTY), *nodeId);
-    UA_NodeId statusNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
-                            UA_NS0ID(HASCOMPONENT), *nodeId);
-    UA_NodeId stateNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
-                            UA_NS0ID(HASCOMPONENT), statusNode);
-    UA_NodePropertyContext *ctx;
-    getNodeContext(server, dataSetWriterIdNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&dataSetWriterIdNode))
-        UA_free(ctx);
-    getNodeContext(server, stateNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&stateNode))
-        UA_free(ctx);
-    UA_UNLOCK(&server->serviceMutex);
+
+    freeNodeContext(server, &dataSetWriterIdNode);
 }
 
 static void
@@ -2260,53 +2499,35 @@ dataSetReaderTypeDestructor(UA_Server *server,
                             const UA_NodeId *sessionId, void *sessionContext,
                             const UA_NodeId *typeId, void *typeContext,
                             const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOCK(&server->serviceMutex);
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_LOG_INFO(server->config.logging, UA_LOGCATEGORY_PUBSUB,
+                "DataSetReader destructor called!");
     UA_NodeId publisherIdNode =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "PublisherId"),
                             UA_NS0ID(HASPROPERTY), *nodeId);
-    UA_NodeId statusNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "Status"),
-                            UA_NS0ID(HASCOMPONENT), *nodeId);
-    UA_NodeId stateNode =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "State"),
-                            UA_NS0ID(HASCOMPONENT), statusNode);
 
-    UA_NodePropertyContext *ctx;
-    getNodeContext(server, publisherIdNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&publisherIdNode))
-        UA_free(ctx);
-
-    getNodeContext(server, stateNode, (void **)&ctx);
-    if(!UA_NodeId_isNull(&stateNode))
-        UA_free(ctx);
-    UA_UNLOCK(&server->serviceMutex);
+    freeNodeContext(server, &publisherIdNode);
 }
 
 static void
 publishedDataItemsTypeDestructor(UA_Server *server,
-                            const UA_NodeId *sessionId, void *sessionContext,
-                            const UA_NodeId *typeId, void *typeContext,
-                            const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOCK(&server->serviceMutex);
-    void *childContext;
+                                 const UA_NodeId *sessionId, void *sessionContext,
+                                 const UA_NodeId *typeId, void *typeContext,
+                                 const UA_NodeId *nodeId, void **nodeContext) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_LOG_INFO(server->config.logging, UA_LOGCATEGORY_PUBSUB,
+                "PublishedDataItems destructor called!");
     UA_NodeId node = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "PublishedData"),
                                          UA_NS0ID(HASPROPERTY), *nodeId);
-    getNodeContext(server, node, (void**)&childContext);
-    if(!UA_NodeId_isNull(&node))
-        UA_free(childContext);
+    freeNodeContext(server, &node);
 
     node = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "ConfigurationVersion"),
                                UA_NS0ID(HASPROPERTY), *nodeId);
-    getNodeContext(server, node, (void**)&childContext);
-    if(!UA_NodeId_isNull(&node))
-        UA_free(childContext);
+    freeNodeContext(server, &node);
 
     node = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetMetaData"),
                                UA_NS0ID(HASPROPERTY), *nodeId);
-    getNodeContext(server, node, (void**)&childContext);
-    if(!UA_NodeId_isNull(&node))
-        UA_free(childContext);
-    UA_UNLOCK(&server->serviceMutex);
+    freeNodeContext(server, &node);
 }
 
 static void
@@ -2314,20 +2535,24 @@ subscribedDataSetTypeDestructor(UA_Server *server,
                                 const UA_NodeId *sessionId, void *sessionContext,
                                 const UA_NodeId *typeId, void *typeContext,
                                 const UA_NodeId *nodeId, void **nodeContext) {
-    UA_LOCK(&server->serviceMutex);
-    void *childContext;
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_LOG_INFO(server->config.logging, UA_LOGCATEGORY_PUBSUB,
+                "Standalone SubscribedDataSet destructor called!");
     UA_NodeId node =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetMetaData"),
                             UA_NS0ID(HASPROPERTY), *nodeId);
-    getNodeContext(server, node, (void**)&childContext);
-    if(!UA_NodeId_equal(&UA_NODEID_NULL , &node))
-        UA_free(childContext);
+    freeNodeContext(server, &node);
     node = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "IsConnected"),
                                UA_NS0ID(HASPROPERTY), *nodeId);
-    getNodeContext(server, node, (void**)&childContext);
-    if(!UA_NodeId_equal(&UA_NODEID_NULL , &node))
-        UA_free(childContext);
-    UA_UNLOCK(&server->serviceMutex);
+    freeNodeContext(server, &node);
+    UA_NodeId subscribedDataSetNode =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "SubscribedDataSet"),
+                            UA_NS0ID(HASCOMPONENT), *nodeId);
+    if(!UA_NodeId_isNull(&subscribedDataSetNode)) {
+        node = findSingleChildNode(server, UA_QUALIFIEDNAME(0, "TargetVariables"),
+                                   UA_NS0ID(HASPROPERTY), subscribedDataSetNode);
+        freeNodeContext(server, &node);
+    }
 }
 
 /*************************************/
@@ -2345,14 +2570,38 @@ UA_loadPubSubConfigMethodCallback(UA_Server *server,
                                   const UA_NodeId *objectId, void *objectContext,
                                   size_t inputSize, const UA_Variant *input,
                                   size_t outputSize, UA_Variant *output) {
-    if(inputSize == 1) {
-        UA_ByteString *inputStr = (UA_ByteString*)input->data;
-        return UA_Server_loadPubSubConfigFromByteString(server, *inputStr);
-    } else if(inputSize > 1) {
-        return UA_STATUSCODE_BADTOOMANYARGUMENTS;
-    } else {
-        return UA_STATUSCODE_BADARGUMENTSMISSING;
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 1, outputSize, 0);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
+    if(!UA_Variant_hasScalarType(&input[0], &UA_TYPES[UA_TYPES_BYTESTRING]))
+        return UA_STATUSCODE_BADTYPEMISMATCH;
+    UA_ByteString *inputStr = (UA_ByteString*)input->data;
+    return UA_Server_loadPubSubConfigFromByteString(server, *inputStr);
+}
+
+static void
+deletePubSubConfigMethodFinalize(void *application, void *context) {
+    UA_PubSubManager *psm = (UA_PubSubManager *) application;
+    UA_Server *server = psm->drv.server;
+    lockServer(psm->drv.server);
+    UA_StatusCode res = UA_PubSubManager_clear(psm);
+    if(res == UA_STATUSCODE_BADWOULDBLOCK) {
+        /* An SKS client still owns a key storage while its asynchronous
+         * disconnect is completing. Retry the accepted delete operation after
+         * callbacks have made progress instead of reporting success and
+         * silently abandoning a partially cleared manager. */
+        server->config.eventLoop->addDelayedCallback(server->config.eventLoop,
+                                                     (UA_DelayedCallback*)context);
+        unlockServer(server);
+        return;
     }
+    if(res != UA_STATUSCODE_GOOD)
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_PUBSUB,
+                     "Asynchronous PubSub configuration deletion failed: %s",
+                     UA_StatusCode_name(res));
+    unlockServer(server);
+    UA_free(context);
 }
 
 /* Callback function that will be executed when the method "PubSub configurator
@@ -2364,11 +2613,22 @@ UA_deletePubSubConfigMethodCallback(UA_Server *server,
                                     const UA_NodeId *objectId, void *objectContext,
                                     size_t inputSize, const UA_Variant *input,
                                     size_t outputSize, UA_Variant *output) {
-    UA_LOCK(&server->serviceMutex);
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_StatusCode res = checkMethodArgumentCounts(inputSize, 0, outputSize, 0);
+    if(res != UA_STATUSCODE_GOOD)
+        return res;
     UA_PubSubManager *psm = getPSM(server);
-    if(psm)
-        UA_PubSubManager_clear(psm);
-    UA_UNLOCK(&server->serviceMutex);
+    if(psm) {
+        psm->drv.stop(&psm->drv);
+        UA_DelayedCallback *dc = (UA_DelayedCallback*)UA_calloc(1, sizeof(UA_DelayedCallback));
+        if(!dc)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        dc->callback = deletePubSubConfigMethodFinalize;
+        dc->application = psm;
+        dc->context = dc;
+        server->config.eventLoop->addDelayedCallback(psm->drv.server->config.eventLoop, dc);
+    }
+
     return UA_STATUSCODE_GOOD;
 }
 
@@ -2386,6 +2646,13 @@ initPubSubNS0(UA_Server *server) {
                                           UA_NS0ID(PUBLISHSUBSCRIBE_SUPPORTEDTRANSPORTPROFILES),
                                           profileArray, 1, &UA_TYPES[UA_TYPES_STRING]);
 
+    /* Set read callback for PublishSubscribeType Status State (mandatory) */
+    UA_CallbackValueSource statusCallback;
+    statusCallback.read = pubSubStateVariableDataSourceRead;
+    statusCallback.write = NULL;
+    retVal |= setVariableValueSource(server, statusCallback, 
+                                    UA_NS0ID(PUBLISHSUBSCRIBE_STATUS_STATE), NULL);
+
     if(server->config.pubSubConfig.enableInformationModelMethods) {
         /* Add missing references */
         retVal |= addRef(server, UA_NS0ID(PUBLISHSUBSCRIBE_PUBLISHEDDATASETS),
@@ -2396,7 +2663,14 @@ initPubSubNS0(UA_Server *server) {
                          UA_NS0ID(HASCOMPONENT), UA_NS0ID(DATASETFOLDERTYPE_REMOVEPUBLISHEDDATASET), true);
         retVal |= addRef(server, UA_NS0ID(PUBLISHSUBSCRIBE_PUBLISHEDDATASETS),
                          UA_NS0ID(HASCOMPONENT), UA_NS0ID(DATASETFOLDERTYPE_REMOVEDATASETFOLDER), true);
-
+        retVal |= addRef(server, UA_NS0ID(PUBLISHSUBSCRIBE_STATUS),
+                         UA_NS0ID(HASCOMPONENT), UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), true);
+        retVal |= addRef(server, UA_NS0ID(PUBLISHSUBSCRIBE_STATUS),
+                         UA_NS0ID(HASCOMPONENT), UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), true);
+        retVal |= addRef(server, UA_NS0ID(PUBLISHSUBSCRIBE),
+                         UA_NS0ID(HASCOMPONENT), UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), true);
+        retVal |= addRef(server, UA_NS0ID(PUBLISHSUBSCRIBE),
+                         UA_NS0ID(HASCOMPONENT), UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), true);
         /* Set method callbacks */
         retVal |= setMethodNode_callback(server, UA_NS0ID(PUBLISHSUBSCRIBE_ADDCONNECTION), addPubSubConnectionAction);
         retVal |= setMethodNode_callback(server, UA_NS0ID(PUBLISHSUBSCRIBE_REMOVECONNECTION), removeConnectionAction);
@@ -2414,10 +2688,8 @@ initPubSubNS0(UA_Server *server) {
         retVal |= setMethodNode_callback(server, UA_NS0ID(READERGROUPTYPE_ADDDATASETREADER), addDataSetReaderAction);
         retVal |= setMethodNode_callback(server, UA_NS0ID(READERGROUPTYPE_REMOVEDATASETREADER), removeDataSetReaderAction);
         retVal |= setMethodNode_callback(server, UA_NS0ID(PUBLISHSUBSCRIBE_PUBSUBCONFIGURATION_RESERVEIDS), addReserveIdsAction);
-#ifdef UA_ENABLE_PUBSUB_SKS
-        retVal |= setMethodNode_callback(server, UA_NS0ID(PUBLISHSUBSCRIBE_SETSECURITYKEYS), setSecurityKeysAction);
-        retVal |= setMethodNode_callback(server, UA_NS0ID(PUBLISHSUBSCRIBE_GETSECURITYKEYS), getSecurityKeysAction);
-#endif
+        retVal |= setMethodNode_callback(server, UA_NS0ID(PUBSUBSTATUSTYPE_ENABLE), enablePubSubObjectAction);
+        retVal |= setMethodNode_callback(server, UA_NS0ID(PUBSUBSTATUSTYPE_DISABLE), disablePubSubObjectAction);
 
 #ifdef UA_ENABLE_PUBSUB_FILE_CONFIG
         /* Adds method node to server. This method is used to load binary files for
@@ -2467,7 +2739,7 @@ initPubSubNS0(UA_Server *server) {
     }
 
     /* Set the object-type destructors */
-    UA_NodeTypeLifecycle lifeCycle;
+    UA_NodeTypeLifecycle lifeCycle = {0};
     lifeCycle.constructor = NULL;
 
     lifeCycle.destructor = connectionTypeDestructor;
@@ -2491,21 +2763,20 @@ initPubSubNS0(UA_Server *server) {
     lifeCycle.destructor = subscribedDataSetTypeDestructor;
     retVal |= setNodeTypeLifecycle(server, UA_NS0ID(STANDALONESUBSCRIBEDDATASETTYPE), lifeCycle);
 
+#ifdef UA_ENABLE_PUBSUB_SKS
+    /* Initialize SKS-specific functionality */
+    retVal |= initPubSubNS0_SKS(server);
+#endif
+
     return retVal;
 }
 
+/* Remove the Metadata nodes of the DSR and reference the Metadata nodes of the
+ * SDS instead */
 UA_StatusCode
 connectDataSetReaderToDataSet(UA_Server *server, UA_NodeId dsrId, UA_NodeId sdsId) {
     UA_LOCK_ASSERT(&server->serviceMutex);
 
-    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
-
-    UA_NodeId dataSetMetaDataOnDsrId =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetMetaData"),
-                            UA_NS0ID(HASPROPERTY), dsrId);
-    UA_NodeId subscribedDataSetOnDsrId =
-        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "SubscribedDataSet"),
-                            UA_NS0ID(HASCOMPONENT), dsrId);
     UA_NodeId dataSetMetaDataOnSdsId =
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetMetaData"),
                             UA_NS0ID(HASPROPERTY), sdsId);
@@ -2513,23 +2784,47 @@ connectDataSetReaderToDataSet(UA_Server *server, UA_NodeId dsrId, UA_NodeId sdsI
         findSingleChildNode(server, UA_QUALIFIEDNAME(0, "SubscribedDataSet"),
                             UA_NS0ID(HASCOMPONENT), sdsId);
 
-    if(UA_NodeId_isNull(&dataSetMetaDataOnDsrId) ||
-       UA_NodeId_isNull(&subscribedDataSetOnDsrId) ||
-       UA_NodeId_isNull(&dataSetMetaDataOnSdsId) ||
+    if(UA_NodeId_isNull(&dataSetMetaDataOnSdsId) ||
        UA_NodeId_isNull(&subscribedDataSetOnSdsId))
         return UA_STATUSCODE_BADNOTFOUND;
+
+    UA_NodeId dataSetMetaDataOnDsrId =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetMetaData"),
+                            UA_NS0ID(HASPROPERTY), dsrId);
+    UA_NodeId subscribedDataSetOnDsrId =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "SubscribedDataSet"),
+                            UA_NS0ID(HASCOMPONENT), dsrId);
 
     UA_NODESTORE_REMOVE(server, &dataSetMetaDataOnDsrId);
     UA_NODESTORE_REMOVE(server, &subscribedDataSetOnDsrId);
 
+    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
     retVal |= addRef(server, dsrId, UA_NS0ID(HASPROPERTY),
-                     UA_NODEID_NUMERIC(dataSetMetaDataOnSdsId.namespaceIndex,
-                                       dataSetMetaDataOnSdsId.identifier.numeric), true);
-    retVal |= addRef(server, dsrId, UA_NS0ID(HASPROPERTY),
-                     UA_NODEID_NUMERIC(subscribedDataSetOnSdsId.namespaceIndex,
-                                       subscribedDataSetOnSdsId.identifier.numeric), true);
-
+                     dataSetMetaDataOnSdsId, true);
+    /* Use HasComponent (not HasProperty) to reference the SDS Object.
+     * HasProperty targets Variables, not Objects. */
+    retVal |= addRef(server, dsrId, UA_NS0ID(HASCOMPONENT),
+                     subscribedDataSetOnSdsId, true);
     return retVal;
+}
+
+/* Remove the references to the SDS */
+void
+disconnectDataSetReaderToDataSet(UA_Server *server, UA_NodeId dsrId) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+
+    UA_NodeId dataSetMetaDataOnDsrId =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "DataSetMetaData"),
+                            UA_NS0ID(HASPROPERTY), dsrId);
+    UA_NodeId subscribedDataSetOnDsrId =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "SubscribedDataSet"),
+                            UA_NS0ID(HASCOMPONENT), dsrId);
+
+    deleteReference(server, dsrId, UA_NS0ID(HASPROPERTY), true,
+                    UA_NODEID2EXPANDEDNODEID(dataSetMetaDataOnDsrId), true);
+
+    deleteReference(server, dsrId, UA_NS0ID(HASCOMPONENT), true,
+                    UA_NODEID2EXPANDEDNODEID(subscribedDataSetOnDsrId), true);
 }
 
 #endif /* UA_ENABLE_PUBSUB_INFORMATIONMODEL */

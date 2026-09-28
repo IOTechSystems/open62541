@@ -1,0 +1,942 @@
+#!/bin/bash
+# Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
+
+# Exit immediately if a command exits with a non-zero status
+set -e
+
+# Use the error status of the first failure in a pipeline
+set -o pipefail
+
+# Exit if an uninitialized variable is accessed
+set -o nounset
+
+# Use all available cores
+if which nproc > /dev/null; then
+    MAKEOPTS="-j$(nproc)"
+else
+    MAKEOPTS="-j$(sysctl -n hw.ncpu)"
+fi
+
+# Allow to reuse TIME-WAIT sockets for new connections
+sudo sysctl -w net.ipv4.tcp_tw_reuse=1
+
+# CTest arguments for the memcheck jobs. Running the full unit test suite under
+# Valgrind takes hours, so the CI splits it round-robin over several runners
+# (ctest -I <start>,,<stride>). CTEST_SHARDS is the number of runners and
+# CTEST_SHARD the 1-based index of this one. Both default to running the
+# complete suite, so a local "source ci.sh && unit_tests_valgrind MBEDTLS"
+# behaves as before.
+#
+# Two things to keep in mind when reusing this helper:
+#
+#  - "-I" selects tests by their index in the *unfiltered* list. Sharding must
+#    therefore not be combined with a "-R" name filter, or the shards silently
+#    end up covering only part of the filtered set.
+#  - "--no-tests=error" catches a shard that ends up selecting no test at all.
+#    It requires CMake >= 3.18 and is therefore only passed when the installed
+#    ctest advertises it; ubuntu-20.04 still ships CMake 3.16.
+function ctest_args {
+    local args="--output-on-failure"
+    local shards="${CTEST_SHARDS:-1}"
+    local shard="${CTEST_SHARD:-1}"
+    if [ "${shards}" != "1" ]; then
+        # Fail loudly on a misconfigured matrix. Falling back to the full suite
+        # would run the complete multi-hour testsuite in every single shard.
+        case "${shards}:${shard}" in
+            *[!0-9:]*|:*|*:)
+                echo "ci.sh: CTEST_SHARDS/CTEST_SHARD must be positive integers," \
+                     "got '${shards}'/'${shard}'" >&2
+                return 1
+                ;;
+        esac
+        # Probed instead of piped into grep, so that neither "set -o pipefail"
+        # nor a SIGPIPE from an early-exiting reader can flip the result.
+        local help_output
+        help_output="$(ctest --help 2>/dev/null || true)"
+        case "${help_output}" in
+            *--no-tests=*) args="${args} --no-tests=error" ;;
+        esac
+        args="${args} -I ${shard},,${shards}"
+    fi
+    printf '%s' "${args}"
+}
+
+#####################################
+# Build Documentation including PDF #
+#####################################
+
+function build_docs_pdf {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make doc doc_pdf
+}
+
+#######################
+# Build TPM tool #
+#######################
+
+function build_tpm_tool {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DUA_BUILD_TOOLS=ON \
+          -DUA_ENABLE_ENCRYPTION=MBEDTLS \
+          -DUA_ENABLE_ENCRYPTION_TPM2=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+}
+
+#########################
+# Build Release Version #
+#########################
+
+function build_release {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DBUILD_SHARED_LIBS=ON \
+          -DUA_ENABLE_ENCRYPTION=MBEDTLS \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+}
+
+function build_release_amalgamation {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=None \
+          -DUA_ENABLE_AMALGAMATION=ON \
+          -DUA_NAMESPACE_ZERO=FULL \
+          -DUA_ENABLE_DATATYPES_ALL=ON \
+          -DUA_ENABLE_ENCRYPTION=MBEDTLS \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          ..
+    make open62541-amalgamation ${MAKEOPTS}
+    local mbedtls_include_flags=()
+    if [ -n "${MBEDTLS_FOLDER_INCLUDE:-}" ]; then
+        mbedtls_include_flags=(-I"${MBEDTLS_FOLDER_INCLUDE}")
+    fi
+    gcc -Wall -Werror "${mbedtls_include_flags[@]}" -c open62541.c
+}
+
+######################
+# Build Amalgamation #
+######################
+
+function build_amalgamation {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_ENABLE_AMALGAMATION=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_FILE_CONFIG=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          ..
+    make open62541-amalgamation ${MAKEOPTS}
+    gcc -Wall -Werror -c open62541.c
+}
+
+function build_amalgamation_mingw_cross {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_ENABLE_AMALGAMATION=ON \
+          -DUA_ARCHITECTURE=win32 \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          ..
+    make open62541-amalgamation ${MAKEOPTS}
+
+    cat > amalgamation_none_smoke.c <<EOF
+#include "open62541.h"
+
+int main(void) {
+    UA_Server *server = UA_Server_new();
+    if(!server)
+        return 1;
+
+    UA_Server_delete(server);
+    return 0;
+}
+EOF
+
+    x86_64-w64-mingw32-gcc -D_WIN32_WINNT=0x0600 \
+        -Wall -Werror amalgamation_none_smoke.c open62541.c \
+        -o amalgamation_none_smoke.exe -lws2_32 -liphlpapi
+}
+
+function build_amalgamation_mt {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_ENABLE_AMALGAMATION=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_MULTITHREADING=100 \
+          ..
+    make open62541-amalgamation ${MAKEOPTS}
+    gcc -Wall -Werror -c open62541.c
+}
+
+function build_amalgamation_none_arch {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_ENABLE_AMALGAMATION=ON \
+          -DUA_ARCHITECTURE=none \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          ..
+    make open62541-amalgamation ${MAKEOPTS}
+
+    # Smoke test: compile and link a small program against the amalgamation
+    # to catch any missing symbols that only show up at link time
+    cat > amalgamation_none_smoke.c <<EOF
+#include "open62541.h"
+
+int main(void) {
+    UA_Server *server = UA_Server_new();
+    if(!server)
+        return 1;
+
+    UA_Server_delete(server);
+
+    UA_Client *client = UA_Client_new();
+    if(!client)
+        return 2;
+    UA_Client_delete(client);
+
+    return 0;
+}
+EOF
+
+    gcc -Wall -Werror -I. amalgamation_none_smoke.c open62541.c \
+        -o amalgamation_none_smoke -lpthread
+}
+
+############################
+# Build and Run Unit Tests #
+############################
+
+function set_capabilities {
+    for filename in bin/tests/*; do
+        sudo setcap cap_sys_ptrace,cap_net_raw,cap_net_admin=eip $filename
+    done
+}
+
+function unit_tests {
+    if [ "${CC:-x}" = "tcc" ]; then
+        # tcc does not allow multi-threading up to version 0.9.27.
+        # because it supports atomic intrinsics only after.
+        MULTITHREADING=0
+        tcc_recent=$(tcc -v | awk 'match($0, /tcc version [0-9]+\.[0-9]+\.[0-9]+/) {split(substr($0, 13, RLENGTH-12), ver, "."); print(ver[1] > 0 || ver[2] > 9 || ver[3] > 27);}')
+        if [ $tcc_recent = 1 ]; then
+            MULTITHREADING=100
+        fi
+    else
+        MULTITHREADING=100
+    fi
+    # Only build coverage for gcc. Clang fails because coverage build passes
+    # invalid --coverage flag and clang complains because of
+    # -Werror,-Wunused-command-line-argument. tcc doesn't seem to support
+    # coverage at all.
+    if [[ "${CC:-gcc}" =~ gcc* ]]; then
+        COVERAGE=ON
+    else
+        COVERAGE=OFF
+    fi
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=${COVERAGE} \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_MQTT=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_ENABLE_PUBSUB_FILE_CONFIG=ON \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_MULTITHREADING=${MULTITHREADING} \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    if [ "$COVERAGE" = "ON" ]; then
+        make gcov
+    fi
+}
+
+function unit_tests_libwebsockets {
+    set -euo pipefail
+
+    # Start HTTP server
+    python3 tools/lws/httpServer.py  &
+    SERVER_PID=$!
+    echo "HTTP server PID: $SERVER_PID"
+
+    # Ensure we stop the server on any exit from this shell
+    trap 'echo "Stopping server $SERVER_PID"; kill $SERVER_PID 2>/dev/null || true' EXIT
+
+    # Wait until reachable (max 30s)
+    for i in {1..30}; do
+        if curl -fsS http://127.0.0.1:8000/ >/dev/null 2>&1; then
+            echo "Server is up."
+            break
+        fi
+        sleep 1
+    done
+    # Fail fast if still not up
+    curl -fsS http://127.0.0.1:8000/ >/dev/null
+
+    mkdir -p build; cd build; rm -rf *
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_LWS=ON \
+          -DUA_ENABLE_HTTP_COMPRESSION=ON \
+          -DUA_ENABLE_LWS_MQTT=${LWS_MQTT:-ON} \
+          -DUA_ENABLE_PUBSUB=OFF \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=OFF \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+
+    # Compile and run the HTTP transport without the optional JSON codec. This
+    # catches feature guards in tests as well as in the library itself.
+    cd ..
+    rm -rf build-lws-nojson
+    cmake -S . -B build-lws-nojson \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=OFF \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=OFF \
+          -DUA_ENABLE_LWS=ON \
+          -DUA_ENABLE_HTTP_COMPRESSION=ON \
+          -DUA_ENABLE_LWS_MQTT=OFF \
+          -DUA_ENABLE_PUBSUB=OFF \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=OFF \
+          -DUA_FORCE_WERROR=ON
+    cmake --build build-lws-nojson --parallel --target \
+          check_eventloop_http check_http_compression check_server_http \
+          check_client_http check_server_http_protocol
+    ctest --test-dir build-lws-nojson \
+          -R '^check_(eventloop_http|http_compression|server_http|client_http|server_http_protocol)$' \
+          --output-on-failure
+}
+
+function unit_tests_libwebsockets_tsan {
+    set -euo pipefail
+
+    rm -rf build-tsan
+    cmake -S . -B build-tsan \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+          -DUA_BUILD_EXAMPLES=OFF \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_DEBUG_SANITIZER=OFF \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_LWS=ON \
+          -DUA_ENABLE_HTTP_COMPRESSION=ON \
+          -DUA_ENABLE_LWS_MQTT=OFF \
+          -DUA_ENABLE_PUBSUB=OFF \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=OFF \
+          -DUA_FORCE_WERROR=ON
+    cmake --build build-tsan --parallel --target \
+          check_eventloop_http check_http_compression check_server_http \
+          check_client_http
+    # The EventLoop mutex is the common outer lock for the LWS lifecycle and
+    # server timer callbacks. TSan does not account for that outer
+    # serialization when checking the order of the recursive inner locks.
+    # Disable only its deadlock heuristic; data-race detection remains active.
+    TSAN_OPTIONS="detect_deadlocks=0" ctest --test-dir build-tsan \
+          -R '^check_(eventloop_http|http_compression|server_http|client_http)$' \
+          --output-on-failure
+}
+
+function unit_tests_tsan {
+    cmake -S . -B build-unit-tsan \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_DEBUG_SANITIZER=OFF \
+          -DUA_MULTITHREADING=100 \
+          -DUA_ENABLE_METHODCALLS=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_AUDITING=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_MQTT=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_ENABLE_PUBSUB_FILE_CONFIG=ON \
+          -DUA_FORCE_WERROR=ON
+    cmake --build build-unit-tsan --parallel
+    # Give the runner network privileges without changing the sanitizer
+    # executables' credentials. TSan reads its options from /proc/self/environ.
+    # Set them explicitly after sudo, and preserve the Ethernet test interface.
+    # As in the HTTP TSan job, the outer EventLoop lock serializes recursive
+    # inner locks. Keep race detection, but disable the lock-order heuristic.
+    # These suites share listener ports, so run them sequentially.
+    sudo -E env TSAN_OPTIONS="halt_on_error=1:detect_deadlocks=0" \
+        ctest --test-dir build-unit-tsan --parallel 1 --timeout 300 \
+          --output-on-failure --no-tests=error
+}
+
+function unit_tests_lwip {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DUA_ARCHITECTURE="posix-lwip" \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_PUBSUB=OFF \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=OFF \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+}
+
+function unit_tests_32 {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_FORCE_32BIT=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+}
+
+function unit_tests_nosub {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_HISTORIZING=OFF \
+          -DUA_ENABLE_SUBSCRIPTIONS=OFF \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_diag {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_DIAGNOSTICS=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_mdnsd {
+    rm -rf build; mkdir -p build; cd build
+    # The mDNS driver is enabled automatically when deps/mdnsd is present.
+    # This job intentionally exercises that multicast discovery driver path.
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_DISCOVERY=ON \
+          -DUA_ENABLE_DISCOVERY_SEMAPHORE=ON \
+          ..
+    make ${MAKEOPTS} check_discovery_mdnsd
+    set_capabilities
+    make test ARGS="-V -R ^check_discovery_mdnsd$"
+}
+
+function unit_tests_mt {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_MULTITHREADING=200 \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_glib {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_EVENTLOOP_GLIB=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_nomt {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_MULTITHREADING=0 \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_alarms {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_DA=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_NAMESPACE_ZERO=FULL \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_alarms_memcheck {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_DA=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_NAMESPACE_ZERO=FULL \
+          ..
+
+    make ${MAKEOPTS}
+    # set_capabilities not possible with valgrind
+    local args; args="$(ctest_args)"
+    sudo -E bash -c "make test ARGS=\"${args}\""
+}
+
+function unit_tests_encryption {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_ENABLE_DRIVER_GDS_RECEIVER=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_ENCRYPTION=$1 \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_NAMESPACE_ZERO=FULL \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_encryption_pubsub {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_ENCRYPTION=$1 \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    set_capabilities
+    make test ARGS="-V"
+    make gcov
+}
+
+function unit_tests_pubsub_sks {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_NAMESPACE_ZERO=FULL \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_COVERAGE=ON \
+          -DUA_ENABLE_ENCRYPTION=$1 \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_ENABLE_PUBSUB_SKS=ON \
+          -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    # Never sharded: "-I" would index into the unfiltered list, not into "-R sks"
+    local args; args="$(CTEST_SHARDS=1 ctest_args)"
+    sudo -E bash -c "make test ARGS=\"${args} -R sks\""
+    make gcov
+}
+
+##########################################
+# Build and Run Unit Tests with Valgrind #
+##########################################
+
+function unit_tests_valgrind {
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_ENCRYPTION=$1 \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_MQTT=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+    # set_capabilities not possible with valgrind
+    local args; args="$(ctest_args)"
+    sudo -E bash -c "make test ARGS=\"${args}\""
+}
+
+##########################
+# Build and Run Examples #
+##########################
+
+function run_examples {
+    local multicast_backend=${2:-mdnsd}
+    rm -rf build; mkdir -p build; cd build
+
+    # create certificates for the examples
+    python3 ../tools/certs/create_self-signed.py -c server
+    python3 ../tools/certs/create_self-signed.py -c client
+
+    # copy json configs for the examples
+    cp ../examples/json_config/*.json5 ./
+
+    # The old multicast selector is gone. Keep the CI parameter visible here:
+    # these examples still require multicast discovery.
+    echo "Running examples with multicast discovery backend: ${multicast_backend}"
+
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_ENABLE_ENCRYPTION=$1 \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
+          -DUA_ENABLE_MQTT=ON \
+          -DUA_ENABLE_PUBSUB_FILE_CONFIG=ON \
+          -DUA_NAMESPACE_ZERO=FULL \
+          -DUA_ENABLE_PUBSUB_SKS=ON \
+          -DUA_ENABLE_DISCOVERY=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+
+    # Run each example. Wait 10 seconds and send the SIGINT
+    # signal. Wait for the process to terminate and collect the exit status.
+    # Abort when the exit status is non-null.
+    sudo -E bash -c "python3 ../tools/ci/linux/examples_with_valgrind.py --no-valgrind"
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE -ne 0 ]]; then
+        echo "Processing failed with exit code $EXIT_CODE"
+        exit $EXIT_CODE
+    fi
+}
+
+########################################
+# Build and Run Examples with Valgrind #
+########################################
+
+function examples_valgrind {
+    local multicast_backend=${2:-mdnsd}
+    rm -rf build; mkdir -p build; cd build
+
+    # create certificates for the examples
+    python3 ../tools/certs/create_self-signed.py -c server
+    python3 ../tools/certs/create_self-signed.py -c client
+
+    # copy json server config
+    cp ../examples/json_config/server_json_config.json5 server_json_config.json5
+
+    # The old multicast selector is gone. Keep the CI parameter visible here:
+    # these examples still require multicast discovery.
+    echo "Running examples under valgrind with multicast discovery backend: ${multicast_backend}"
+
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_ENABLE_ENCRYPTION=$1 \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
+          -DUA_ENABLE_MQTT=ON \
+          -DUA_ENABLE_PUBSUB_FILE_CONFIG=ON \
+          -DUA_NAMESPACE_ZERO=FULL \
+          -DUA_ENABLE_PUBSUB_SKS=ON \
+          -DUA_ENABLE_DISCOVERY=ON \
+          -DUA_FORCE_WERROR=ON \
+          ..
+    make ${MAKEOPTS}
+
+    # Run each example with valgrind. Wait 10 seconds and send the SIGINT
+    # signal. Wait for the process to terminate and collect the exit status.
+    # Abort when the exit status is non-null.
+    # set_capabilities not possible with valgrind
+    sudo -E bash -c "python3 ../tools/ci/linux/examples_with_valgrind.py"
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE -ne 0 ]]; then
+        echo "Processing failed with exit code $EXIT_CODE"
+        exit $EXIT_CODE
+    fi
+}
+
+##############################
+# Clang Static Code Analysis #
+##############################
+
+function build_clang_analyzer {
+    local version=$1
+    rm -rf build; mkdir -p build; cd build
+    scan-build-$version cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_ENABLE_ENCRYPTION=MBEDTLS \
+          -DUA_ENABLE_DRIVER_GDS_RECEIVER=ON \
+          -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+          -DUA_ENABLE_JSON_ENCODING=ON \
+          -DUA_ENABLE_XML_ENCODING=ON \
+          -DUA_ENABLE_PUBSUB=ON \
+          -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_NAMESPACE_ZERO=FULL \
+          ..
+    # Disable checkers that produce false positives in the posix eventloop code
+    local checker_flags=""
+    if [ "$version" = "21" ]; then
+        checker_flags="-disable-checker unix.Errno -disable-checker unix.BlockInCriticalSection"
+    fi
+    scan-build-$version \
+          --status-bugs \
+          --exclude ../src/util \
+          --exclude ../tests \
+          --exclude ../examples \
+          --exclude ../deps \
+          $checker_flags \
+          make ${MAKEOPTS}
+}
+
+########################################
+# Compile all Companion Specifications #
+########################################
+
+function build_all_companion_specs {
+    # Split into 3 runs to avoid C type-name collisions between companion specs
+    # that define identically-named DataTypes in different OPC UA namespaces:
+    #   - Pumps  <->  PAEFS          (UA_ControlModeEnum)
+    #   - TMC    <->  PlasticsRubber  (UA_ControlModeEnumeration,
+    #                                  UA_ProductionStatusEnumeration)
+    #   - CommercialKitchenEquipment <-> PlasticsRubber-TCD
+    #                                  (UA_OperatingModeEnumeration)
+    #   - PlasticsRubber-LDS <-> PlasticsRubber-Extrusion-GeneralTypes
+    #                                  (UA_ComponentStatusEnumeration)
+    #   - Extrusion v1 <-> Extrusion v2 (multiple shared type names)
+
+    # --- Run 1: Core models + Mining + FDI + new standard specs ---
+    # Contains TMC, Pumps, CommercialKitchenEquipment (excludes PlasticsRubber, PAEFS)
+    rm -rf build; mkdir -p build; cd build
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_EXAMPLES=ON \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_INFORMATION_MODEL_AUTOLOAD=DI\;IA\;ISA95-JOBCONTROL\;OpenSCS\;CNC\;\
+AMB\;AutoID\;POWERLINK\;Machinery-Result\;PackML\;PROFINET\;Scheduler\;\
+WoT\;IOLinkIODD\;WireHarness-VEC\;PNGSDGM\;PLCopen\;\
+FDT\;ADI\;Sercos\;CommercialKitchenEquipment\;ECM\;\
+Machinery\;Machinery-Energy\;Machinery-Jobs\;LADS\;Woodworking\;Pumps\;\
+Scales\;Weihenstephan\;MDIS\;TMC\;CAS\;\
+Eumabois\;MachineTool\;SurfaceTechnology\;STGeneralTypes\;\
+IJT\;LaserSystems\;GMS\;TTD\;WireHarness\;CuttingTool\;\
+UAFX-Data\;FDI5\;FDI7\;\
+PADIM\;Machinery-ProcessValues\;AdditiveManufacturing\;MetalForming\;WMTP\;\
+Mining-General\;\
+Mining-Extraction-General\;Mining-Extraction-ShearerLoader\;\
+Mining-Loading-General\;Mining-Loading-HydraulicExcavator\;\
+Mining-DevelopmentSupport-General\;Mining-DevelopmentSupport-RoofSupportSystem\;\
+Mining-DevelopmentSupport-Dozer\;\
+Mining-TransportDumping-General\;Mining-TransportDumping-RearDumpTruck\;\
+Mining-TransportDumping-ArmouredFaceConveyor\;\
+Mining-MineralProcessing-General\;Mining-MineralProcessing-RockCrusher\;\
+Mining-PELOServices-General\;Mining-PELOServices-FaceAlignmentSystem\;\
+Mining-MonitoringSupervisionServices-General\;\
+Shotblasting \
+          -DUA_NAMESPACE_ZERO=FULL \
+          ..
+    make ${MAKEOPTS}
+
+    # --- Run 2: PlasticsRubber Extrusion v1 + PAEFS ---
+    # Excludes TMC, CommercialKitchenEquipment, Pumps, LDS (type conflicts)
+    rm -rf *
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_INFORMATION_MODEL_AUTOLOAD=DI\;IA\;Machinery\;\
+PADIM\;Machinery-ProcessValues\;\
+PlasticsRubber-GeneralTypes\;PlasticsRubber-TCD\;PlasticsRubber-IMM2MES\;\
+PlasticsRubber-HotRunner\;\
+PlasticsRubber-Extrusion-GeneralTypes\;PlasticsRubber-Extrusion-ExtrusionLine\;\
+PlasticsRubber-Extrusion-Extruder\;PlasticsRubber-Extrusion-Die\;\
+PlasticsRubber-Extrusion-Filter\;PlasticsRubber-Extrusion-MeltPump\;\
+PlasticsRubber-Extrusion-HaulOff\;PlasticsRubber-Extrusion-Pelletizer\;\
+PlasticsRubber-Extrusion-Calender\;PlasticsRubber-Extrusion-Calibrator\;\
+PlasticsRubber-Extrusion-Corrugator\;PlasticsRubber-Extrusion-Cutter\;\
+PAEFS \
+          -DUA_NAMESPACE_ZERO=FULL \
+          ..
+    make ${MAKEOPTS}
+
+    # --- Run 3: PlasticsRubber LDS + Extrusion v2 + UAFX-AC/CM + Robotics ---
+    # Excludes Extrusion v1 (type conflicts with v2),
+    # Extrusion-GeneralTypes v1 (ComponentStatusEnumeration conflicts with LDS)
+    rm -rf *
+    cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DUA_BUILD_UNIT_TESTS=ON \
+          -DUA_FORCE_WERROR=ON \
+          -DUA_INFORMATION_MODEL_AUTOLOAD=DI\;IA\;Machinery\;\
+PlasticsRubber-GeneralTypes\;PlasticsRubber-LDS\;\
+PlasticsRubber-Extrusion_v2-GeneralTypes\;PlasticsRubber-Extrusion_v2-ExtrusionLine\;\
+PlasticsRubber-Extrusion_v2-Extruder\;PlasticsRubber-Extrusion_v2-Die\;\
+PlasticsRubber-Extrusion_v2-Filter\;PlasticsRubber-Extrusion_v2-MeltPump\;\
+PlasticsRubber-Extrusion_v2-HaulOff\;PlasticsRubber-Extrusion_v2-Pelletizer\;\
+PlasticsRubber-Extrusion_v2-Calender\;PlasticsRubber-Extrusion_v2-Calibrator\;\
+PlasticsRubber-Extrusion_v2-Corrugator\;PlasticsRubber-Extrusion_v2-Cutter\;\
+UAFX-Data\;UAFX-AC\;UAFX-CM\;Robotics \
+          -DUA_NAMESPACE_ZERO=FULL \
+          ..
+    make ${MAKEOPTS}
+}
+
+#########################
+# Build option coverage #
+#########################
+
+# Compile the library once per build option that no other job configures:
+# options that are off by default, and default-on features in their off state.
+# Only the library is built, so a configuration costs about a minute.
+#
+# Failures are collected instead of aborting, so one run reports every broken
+# configuration. "set -e" does not apply here: the CI step runs
+# "source ci.sh && <action>", and errexit is suspended inside an && list.
+
+function build_option_coverage {
+    local failed=()
+
+    # Usage: build_option_cfg <name> <cmake options...>
+    build_option_cfg() {
+        local name=$1; shift
+        echo "::group::${name}"
+        rm -rf build; mkdir -p build; cd build
+        if cmake -DCMAKE_BUILD_TYPE=Debug \
+                 -DUA_BUILD_EXAMPLES=OFF \
+                 -DUA_FORCE_WERROR=ON \
+                 "$@" \
+                 .. && make ${MAKEOPTS}; then
+            echo "::endgroup::"
+        else
+            echo "::endgroup::"
+            echo "::error::build_option_coverage: ${name} failed"
+            failed+=("${name}")
+        fi
+        cd ..
+    }
+
+    # Debug instrumentation
+    build_option_cfg "UA_DEBUG"                -DUA_DEBUG=ON -DUA_DEBUG_FILE_LINE_INFO=ON
+    build_option_cfg "UA_DEBUG_DUMP_PKGS"      -DUA_DEBUG_DUMP_PKGS=ON
+    # Defines UA_DEBUG_DUMP_PKGS_FILE and builds the corpus generator
+    build_option_cfg "UA_BUILD_FUZZING_CORPUS"  -DUA_BUILD_FUZZING_CORPUS=ON
+
+    # Off by default
+    build_option_cfg "UA_ENABLE_QUERY"             -DUA_ENABLE_QUERY=ON
+    build_option_cfg "UA_ENABLE_DETERMINISTIC_RNG" -DUA_ENABLE_DETERMINISTIC_RNG=ON
+    build_option_cfg "UA_ENABLE_RBAC"              -DUA_ENABLE_RBAC=ON -DUA_NAMESPACE_ZERO=FULL
+
+    # On by default, so only ever compiled in the enabled state
+    # The PubSub information model twin exposes methods, so it has to go as well
+    build_option_cfg "no UA_ENABLE_METHODCALLS"    -DUA_ENABLE_METHODCALLS=OFF \
+                     -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=OFF
+    build_option_cfg "no UA_ENABLE_NODEMANAGEMENT" -DUA_ENABLE_NODEMANAGEMENT=OFF
+    build_option_cfg "no UA_ENABLE_AUDITING"       -DUA_ENABLE_AUDITING=OFF
+    build_option_cfg "no UA_ENABLE_STATUSCODE_DESCRIPTIONS" -DUA_ENABLE_STATUSCODE_DESCRIPTIONS=OFF
+    build_option_cfg "no UA_ENABLE_NODESET_COMPILER_DESCRIPTIONS" -DUA_ENABLE_NODESET_COMPILER_DESCRIPTIONS=OFF
+    # Type descriptions are required by the diagnostics, the JSON encoding and
+    # the event filter parser
+    build_option_cfg "no UA_ENABLE_TYPEDESCRIPTION" -DUA_ENABLE_TYPEDESCRIPTION=OFF \
+                     -DUA_ENABLE_DIAGNOSTICS=OFF -DUA_ENABLE_JSON_ENCODING=OFF \
+                     -DUA_ENABLE_XML_ENCODING=OFF -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=OFF
+
+    if [ ${#failed[@]} -ne 0 ]; then
+        echo "Failed configurations: ${failed[*]}"
+        return 1
+    fi
+    echo "All build option configurations compiled"
+}

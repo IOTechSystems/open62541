@@ -78,7 +78,7 @@
 #define CA_FILE_PATH                    "/path/to/server.cert"
 #endif
 
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && !defined(UA_ENABLE_JSON_ENCODING)
+#if defined(UA_ENABLE_ENCRYPTION)
 #define UA_AES128CTR_SIGNING_KEY_LENGTH 32
 #define UA_AES128CTR_KEY_LENGTH 16
 #define UA_AES128CTR_KEYNONCE_LENGTH 4
@@ -101,7 +101,7 @@ addPubSubConnection(UA_Server *server, char *addressUrl) {
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(connectionConfig));
     connectionConfig.name = UA_STRING(CONNECTION_NAME);
-    if (useJson) {
+    if(useJson) {
         connectionConfig.transportProfileUri = UA_STRING(TRANSPORT_PROFILE_URI_JSON);
     } else {
         connectionConfig.transportProfileUri = UA_STRING(TRANSPORT_PROFILE_URI_UADP);
@@ -258,11 +258,13 @@ addWriterGroup(UA_Server *server, char *topic, int interval) {
         writerGroupConfig.messageSettings.content.decoded.data = writerGroupMessage;
     }
 
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && !defined(UA_ENABLE_JSON_ENCODING)
-    /* Encryption settings */
-    UA_ServerConfig *config = UA_Server_getConfig(server);
-    writerGroupConfig.securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
-    writerGroupConfig.securityPolicy = &config->pubSubConfig.securityPolicies[0];
+#if defined(UA_ENABLE_ENCRYPTION)
+    /* Message security is only defined for the UADP encoding */
+    if(!useJson) {
+        UA_ServerConfig *config = UA_Server_getConfig(server);
+        writerGroupConfig.securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+        writerGroupConfig.securityPolicy = &config->pubSubConfig.securityPolicies[0];
+    }
 #endif
 
     /* configure the mqtt publish topic */
@@ -298,12 +300,14 @@ addWriterGroup(UA_Server *server, char *topic, int interval) {
         UA_UadpWriterGroupMessageDataType_delete(writerGroupMessage);
     }
 
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && !defined(UA_ENABLE_JSON_ENCODING)
+#if defined(UA_ENABLE_ENCRYPTION)
     /* Add the encryption key informaton */
-    UA_ByteString sk = {UA_AES128CTR_SIGNING_KEY_LENGTH, signingKey};
-    UA_ByteString ek = {UA_AES128CTR_KEY_LENGTH, encryptingKey};
-    UA_ByteString kn = {UA_AES128CTR_KEYNONCE_LENGTH, keyNonce};
-    UA_Server_setWriterGroupEncryptionKeys(server, writerGroupIdent, 1, sk, ek, kn);
+    if(!useJson) {
+        UA_ByteString sk = {UA_AES128CTR_SIGNING_KEY_LENGTH, signingKey};
+        UA_ByteString ek = {UA_AES128CTR_KEY_LENGTH, encryptingKey};
+        UA_ByteString kn = {UA_AES128CTR_KEYNONCE_LENGTH, keyNonce};
+        UA_Server_setWriterGroupEncryptionKeys(server, writerGroupIdent, 1, sk, ek, kn);
+    }
 #endif
 }
 
@@ -386,7 +390,7 @@ addDataSetWriter(UA_Server *server, char *topic) {
  *     :alt: OPC UA PubSub communication in wireshark
  *
  * The open62541 subscriber API will be released later. If you want to process
- * the the datagrams, take a look on the ua_network_pubsub_networkmessage.c
+ * the datagrams, take a look on the ``ua_pubsub_networkmessage_binary.c``
  * which already contains the decoding code for UADP messages.
  *
  * It follows the main server code, making use of the above definitions. */
@@ -457,7 +461,7 @@ int main(int argc, char **argv) {
                 return -1;
             }
             if(interval <= 10) {
-                UA_LOG_WARNING(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                UA_LOG_WARNING(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                                "Publication interval too small");
                 return -1;
             }
@@ -470,7 +474,7 @@ int main(int argc, char **argv) {
 
     UA_Server *server = UA_Server_new();
 
-#if defined(UA_ENABLE_ENCRYPTION_MBEDTLS)
+#if defined(UA_ENABLE_ENCRYPTION)
     /* Instantiate the PubSub SecurityPolicy */
     UA_ServerConfig *config = UA_Server_getConfig(server);
     config->pubSubConfig.securityPolicies = (UA_PubSubSecurityPolicy*)

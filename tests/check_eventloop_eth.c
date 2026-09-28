@@ -31,14 +31,14 @@ connectionCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
                    UA_ByteString msg) {
     TestContext *ctx = (TestContext*) *connectionContext;
     if(status == UA_CONNECTIONSTATE_CLOSING) {
-        UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+        UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                      "Closing connection %u", (unsigned)connectionId);
     } else {
         if(msg.length == 0) {
-            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Opening connection %u", (unsigned)connectionId);
         } else {
-            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+            UA_LOG_DEBUG(UA_Log_Stdout, UA_LOGCATEGORY_APPLICATION,
                          "Received a message of length %u", (unsigned)msg.length);
         }
     }
@@ -88,6 +88,15 @@ START_TEST(listenETH) {
 
     UA_KeyValueMap kvm = {3, params};
     UA_StatusCode res = cm->openConnection(cm, &kvm, NULL, &testContext, connectionCallback);
+    if(res == UA_STATUSCODE_BADINTERNALERROR) {
+        /* Raw Ethernet sockets are not available in all CI environments. */
+        el->stop(el);
+        while(el->state != UA_EVENTLOOPSTATE_STOPPED)
+            el->run(el, 100);
+        el->free(el);
+        el = NULL;
+        return;
+    }
     ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
 
     ck_assert(testContext.connCount == 1);
@@ -141,6 +150,15 @@ START_TEST(connectETH) {
     UA_KeyValueMap kvm = {3, &params[1]};
     UA_StatusCode retval =
         cm->openConnection(cm, &kvm, NULL, &testContext, connectionCallback);
+    if(retval == UA_STATUSCODE_BADINTERNALERROR) {
+        /* Raw Ethernet sockets are not available in all CI environments. */
+        el->stop(el);
+        while(el->state != UA_EVENTLOOPSTATE_STOPPED)
+            el->run(el, 100);
+        el->free(el);
+        el = NULL;
+        return;
+    }
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     size_t listenSockets = testContext.connCount;
@@ -172,6 +190,22 @@ START_TEST(connectETH) {
     }
     ck_assert(received);
 
+    UA_ByteString oversized = UA_BYTESTRING_NULL;
+    retval = cm->allocNetworkBuffer(cm, clientId, &oversized, 1523);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADENCODINGERROR);
+    ck_assert_ptr_eq(oversized.data, NULL);
+
+    retval = cm->allocNetworkBuffer(cm, clientId, &oversized, (size_t)-1);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADENCODINGERROR);
+    ck_assert_ptr_eq(oversized.data, NULL);
+
+    /* Keep an allocated application buffer while the connection is removed.
+     * sendWithConnection still owns and must free it on the rejection path. */
+    UA_ByteString stale;
+    retval = cm->allocNetworkBuffer(cm, clientId, &stale, 16);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_ptr_ne(stale.data, NULL);
+
     /* Close the connection */
     retval = cm->closeConnection(cm, clientId);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
@@ -181,6 +215,10 @@ START_TEST(connectETH) {
         UA_fakeSleep((UA_UInt32)((next - UA_DateTime_now()) / UA_DATETIME_MSEC));
     }
     ck_assert_uint_eq(testContext.connCount, listenSockets);
+
+    retval = cm->sendWithConnection(cm, clientId, NULL, &stale);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADCONNECTIONREJECTED);
+    ck_assert_ptr_eq(stale.data, NULL);
 
     /* Stop the EventLoop */
     int max_stop_iteration_count = 10;

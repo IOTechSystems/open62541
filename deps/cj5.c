@@ -2,6 +2,7 @@
 //
 // Copyright (c) 2020 Sepehr Taghdisian
 // Copyright (c) 2022, 2024 Julius Pfrommer
+// Copyright 2026 (c) o6 Automation GmbH (Author: Julius Pfrommer)
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,6 +24,7 @@
 
 #include "cj5.h"
 #include "parse_num.h"
+#include "utf8.h"
 
 #include <math.h>
 #include <float.h>
@@ -48,7 +50,7 @@
 #endif
 
 /* Max nesting depth of objects and arrays */
-#define CJ5_MAX_NESTING 32
+#define CJ5_MAX_NESTING 256
 
 #define CJ5__FOURCC(_a, _b, _c, _d)                         \
     (((uint32_t)(_a) | ((uint32_t)(_b) << 8) |              \
@@ -60,8 +62,6 @@ static const uint32_t CJ5__FALSE_FOURCC = CJ5__FOURCC('f', 'a', 'l', 's');
 
 typedef struct {
     unsigned int pos;
-    unsigned int line_start;
-    unsigned int line;
     cj5_error_code error;
 
     const char *json5;
@@ -131,50 +131,13 @@ cj5__parse_string(cj5__parser *parser) {
             return;
         }
 
-        // Escape char
+        // Skip escape character
         if(c == '\\') {
             if(parser->pos + 1 >= len) {
                 parser->error = CJ5_ERROR_INCOMPLETE;
                 return;
             }
             parser->pos++;
-            switch(json5[parser->pos]) {
-            case '\"':
-            case '/':
-            case '\\':
-            case 'b':
-            case 'f':
-            case 'r':
-            case 'n':
-            case 't':
-                break;
-            case 'u': // The next four characters are an utf8 code
-                parser->pos++;
-                if(parser->pos + 4 >= len) {
-                    parser->error = CJ5_ERROR_INVALID;
-                    return;
-                }
-                for(unsigned int i = 0; i < 4; i++) {
-                    // If it isn't a hex character we have an error
-                    if(!(json5[parser->pos] >= 48 && json5[parser->pos] <= 57) && /* 0-9 */
-                       !(json5[parser->pos] >= 65 && json5[parser->pos] <= 70) && /* A-F */
-                       !(json5[parser->pos] >= 97 && json5[parser->pos] <= 102))  /* a-f */
-                        {
-                            parser->error = CJ5_ERROR_INVALID;
-                            return;
-                        }
-                    parser->pos++;
-                }
-                parser->pos--;
-                break;
-            case '\n': // Escape break line
-                parser->line++;
-                parser->line_start = parser->pos;
-                break;
-            default:
-                parser->error = CJ5_ERROR_INVALID;
-                return;
-            }
         }
     }
 
@@ -203,10 +166,10 @@ cj5__parse_primitive(cj5__parser* parser) {
     // Make the comparison case-insensitive.
     uint32_t fourcc = 0;
     if(start + 3 < len) {
-        fourcc += json5[start] | 32;
-        fourcc += (json5[start+1] | 32) << 8;
-        fourcc += (json5[start+2] | 32) << 16;
-        fourcc += (json5[start+3] | 32) << 24;
+        fourcc += (unsigned char)json5[start] | 32U;
+        fourcc += ((unsigned char)json5[start+1] | 32U) << 8;
+        fourcc += ((unsigned char)json5[start+2] | 32U) << 16;
+        fourcc += ((unsigned char)json5[start+3] | 32U) << 24;
     }
     
     cj5_token_type type;
@@ -330,11 +293,6 @@ cj5__skip_comment(cj5__parser* parser) {
                 parser->pos++;
                 return;
             }
-            // Remember we passed a newline
-            if(json5[parser->pos] == '\n') {
-                parser->line++;
-                parser->line_start = parser->pos;
-            }
         }
     }
 
@@ -376,12 +334,8 @@ cj5_parse(const char *json5, unsigned int len,
     for(; parser.pos < len; parser.pos++) {
         char c = json5[parser.pos];
         switch(c) {
-        case '\n': // Skip newline
-            parser.line++;
-            parser.line_start = parser.pos;
-            break;
-
-        case '\r': // Skip whitespace
+        case '\n': // Skip newline and whitespace
+        case '\r':
         case '\t':
         case ' ':
             break;
@@ -559,8 +513,7 @@ cj5_parse(const char *json5, unsigned int len,
 
     memset(&r, 0x0, sizeof(r));
     r.error = parser.error;
-    r.error_line = parser.line;
-    r.error_col = parser.pos - parser.line_start;
+    r.error_pos = parser.pos;
     r.num_tokens = parser.token_count; // How many tokens (would) have been
                                        // consumed by the parser?
 
@@ -675,104 +628,103 @@ cj5_error_code
 cj5_get_str(const cj5_result *r, unsigned int tok_index,
             char *buf, unsigned int *buflen) {
     const cj5_token *token = &r->tokens[tok_index];
-    if(token->type != CJ5_TOKEN_STRING)
+    if(token->type != CJ5_TOKEN_STRING) {
+        buf[0] = 0;
+        if(buflen)
+            *buflen = 0;
         return CJ5_ERROR_INVALID;
+    }
 
     const char *pos = &r->json5[token->start];
     const char *end = &r->json5[token->end + 1];
     unsigned int outpos = 0;
+    cj5_error_code error = CJ5_ERROR_NONE;
     for(; pos < end; pos++) {
         uint8_t c = (uint8_t)*pos;
+        // Unprintable ascii characters must be escaped
+        if(c < ' ' || c == 127) {
+            error = CJ5_ERROR_INVALID;
+            goto done;
+        }
 
-        // Process an escape character
-        if(c == '\\') {
-            if(pos + 1 >= end)
-                return CJ5_ERROR_INCOMPLETE;
-            pos++;
-            c = (uint8_t)*pos;
-            switch(c) {
-            case '\"': buf[outpos++] = '\"'; break;
-            case '\\': buf[outpos++] = '\\'; break;
-            case '\n': buf[outpos++] = '\n'; break; // escape newline
-            case '/':  buf[outpos++] = '/';  break;
-            case 'b':  buf[outpos++] = '\b'; break;
-            case 'f':  buf[outpos++] = '\f'; break;
-            case 'r':  buf[outpos++] = '\r'; break;
-            case 'n':  buf[outpos++] = '\n'; break;
-            case 't':  buf[outpos++] = '\t'; break;
-            case 'u': {
-                // Parse the unicode code point
-                if(pos + 4 >= end)
-                    return CJ5_ERROR_INCOMPLETE;
-                pos++;
-                uint32_t utf;
-                cj5_error_code err = parse_codepoint(pos, &utf);
-                if(err != CJ5_ERROR_NONE)
-                    return err;
-                pos += 3;
-
-                if(0xD800 <= utf && utf <= 0xDBFF) {
-                    // Parse a surrogate pair
-                    if(pos + 6 >= end)
-                        return CJ5_ERROR_INVALID;
-                    if(pos[1] != '\\' && pos[3] != 'u')
-                        return CJ5_ERROR_INVALID;
-                    pos += 3;
-                    uint32_t trail;
-                    err = parse_codepoint(pos, &trail);
-                    if(err != CJ5_ERROR_NONE)
-                        return err;
-                    pos += 3;
-                    utf = (utf << 10) + trail + SURROGATE_OFFSET;
-                } else if(0xDC00 <= utf && utf <= 0xDFFF) {
-                    // Invalid Unicode '\\u%04X'
-                    return CJ5_ERROR_INVALID;
-                }
-                
-                // Write the utf8 bytes of the code point
-                if(utf <= 0x7F) { // Plain ASCII
-                    buf[outpos++] = (char)utf;
-                } else if(utf <= 0x07FF) { // 2-byte unicode
-                    buf[outpos++] = (char)(((utf >> 6) & 0x1F) | 0xC0);
-                    buf[outpos++] = (char)(((utf >> 0) & 0x3F) | 0x80);
-                } else if(utf <= 0xFFFF) { // 3-byte unicode
-                    buf[outpos++] = (char)(((utf >> 12) & 0x0F) | 0xE0);
-                    buf[outpos++] = (char)(((utf >>  6) & 0x3F) | 0x80);
-                    buf[outpos++] = (char)(((utf >>  0) & 0x3F) | 0x80);
-                } else if(utf <= 0x10FFFF) { // 4-byte unicode
-                    buf[outpos++] = (char)(((utf >> 18) & 0x07) | 0xF0);
-                    buf[outpos++] = (char)(((utf >> 12) & 0x3F) | 0x80);
-                    buf[outpos++] = (char)(((utf >>  6) & 0x3F) | 0x80);
-                    buf[outpos++] = (char)(((utf >>  0) & 0x3F) | 0x80);
-                } else {
-                    return CJ5_ERROR_INVALID; // Not a utf8 string
-                }
-                break;
-            }
-            default:
-                return CJ5_ERROR_INVALID;
-            }
+        // Unescaped Ascii character or utf8 byte
+        if(c != '\\') {
+            buf[outpos++] = (char)c;
             continue;
         }
 
-        // Unprintable ascii characters must be escaped. JSON5 allows nested
-        // quotes if the quote character is not the same as the surrounding
-        // quote character, e.g. 'this is my "quote"'. This logic is in the
-        // token parsing code and not in this "string extraction" method.
-        if(c < ' '   || c == 127)
-            return CJ5_ERROR_INVALID;
+        // End of input before the escaped character
+        if(pos + 1 >= end) {
+            error = CJ5_ERROR_INCOMPLETE;
+            goto done;
+        }
 
-        // Ascii character or utf8 byte
-        buf[outpos++] = (char)c;
+        // Process escaped character
+        pos++;
+        c = (uint8_t)*pos;
+        switch(c) {
+        case 'b': buf[outpos++] = '\b'; break;
+        case 'f': buf[outpos++] = '\f'; break;
+        case 'r': buf[outpos++] = '\r'; break;
+        case 'n': buf[outpos++] = '\n'; break;
+        case 't': buf[outpos++] = '\t'; break;
+        default:  buf[outpos++] = (char)c; break;
+        case 'u': {
+            // Parse a unicode code point
+            if(pos + 4 >= end) {
+                error = CJ5_ERROR_INCOMPLETE;
+                goto done;
+            }
+            pos++;
+            uint32_t utf;
+            error = parse_codepoint(pos, &utf);
+            if(error != CJ5_ERROR_NONE)
+                goto done;
+            pos += 3;
+
+            // Parse a surrogate pair
+            if(0xd800 <= utf && utf <= 0xdfff) {
+                if(pos + 6 >= end) {
+                    error = CJ5_ERROR_INVALID;
+                    goto done;
+                }
+                if(pos[1] != '\\' && pos[2] != 'u') {
+                    error = CJ5_ERROR_INVALID;
+                    goto done;
+                }
+                pos += 3;
+                uint32_t utf2;
+                error = parse_codepoint(pos, &utf2);
+                if(error != CJ5_ERROR_NONE)
+                    goto done;
+                pos += 3;
+                // High or low surrogate pair
+                utf = (utf <= 0xdbff) ?
+                    (utf << 10) + utf2 + SURROGATE_OFFSET :
+                    (utf2 << 10) + utf + SURROGATE_OFFSET;
+            }
+
+            // Write the utf8 bytes of the code point
+            unsigned len = utf8_from_codepoint((unsigned char*)buf + outpos, utf);
+            if(len == 0) {
+                error = CJ5_ERROR_INVALID; // Not a utf8 string
+                goto done;
+            }
+            outpos += len;
+            break;
+        }
+        }
     }
 
-    // Terminate with \0
+ done:
+    // Always leave buf as a valid, NUL-terminated string, even when decoding
+    // fails midway. Callers still must check the returned error code.
     buf[outpos] = 0;
 
     // Set the output length
     if(buflen)
         *buflen = outpos;
-    return CJ5_ERROR_NONE;
+    return error;
 }
 
 void
