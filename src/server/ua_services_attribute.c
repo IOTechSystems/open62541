@@ -34,7 +34,9 @@
 #include <open62541/plugin/historydatabase.h>
 #endif
 
+/* Indexed by the AttributeId, which starts at 1 */
 static const UA_NodeAttributesMask attr2mask[28] = {
+    UA_NODEATTRIBUTESMASK_NONE,
     UA_NODEATTRIBUTESMASK_NODEID,
     UA_NODEATTRIBUTESMASK_NODECLASS,
     UA_NODEATTRIBUTESMASK_BROWSENAME,
@@ -66,7 +68,9 @@ static const UA_NodeAttributesMask attr2mask[28] = {
 
 static UA_UInt32
 attributeId2AttributeMask(UA_AttributeId id) {
-    if(UA_UNLIKELY(id > UA_ATTRIBUTEID_ACCESSLEVELEX))
+    /* The enum may be signed. The unsigned cast also rejects values that
+     * became negative when converting the wire-level UInt32. */
+    if(UA_UNLIKELY((UA_UInt32)id > UA_ATTRIBUTEID_ACCESSLEVELEX))
         return UA_NODEATTRIBUTESMASK_NONE;
     return attr2mask[id];
 }
@@ -262,8 +266,8 @@ readExternalValueAttribute(UA_Server *server, UA_Session *session,
     UA_LOCK_ASSERT(&server->serviceMutex);
 
     /* Update the value by the user callback */
-    if(vn->valueSource.internal.notifications.onRead)
-        vn->valueSource.internal.notifications.
+    if(vn->valueSource.external.notifications.onRead)
+        vn->valueSource.external.notifications.
             onRead(server, session ? &session->sessionId : NULL,
                    session ? session->context : NULL, &vn->head.nodeId,
                    vn->head.context, rangeptr, *vn->valueSource.external.value);
@@ -338,7 +342,7 @@ readValueAttributeComplete(UA_Server *server, UA_Session *session,
         rangeptr = &range;
     }
 
-    /* Read from the value souce */
+    /* Read from the value source */
     switch(vn->valueSourceType) {
     case UA_VALUESOURCETYPE_INTERNAL:
         retval = readInternalValueAttribute(server, session, vn, v, rangeptr);
@@ -540,6 +544,21 @@ Operation_ReadWithNode(UA_Server *server, UA_Session *session,
     if(id->indexRange.length > 0 && id->attributeId != UA_ATTRIBUTEID_VALUE) {
         v->hasStatus = true;
         v->status = UA_STATUSCODE_BADINDEXRANGENODATA;
+        addMissingTimestamps(server, v, timestampsToReturn, id);
+        return true;
+    }
+
+    /* Browse permits reading every attribute except Value and
+     * RolePermissions, which have dedicated permission bits. */
+    if(session != &server->adminSession &&
+       id->attributeId != UA_ATTRIBUTEID_VALUE &&
+       id->attributeId != UA_ATTRIBUTEID_ROLEPERMISSIONS &&
+       (!session || !server->config.accessControl.allowBrowseNode(
+            server, &server->config.accessControl,
+            &session->sessionId, session->context,
+            &node->head.nodeId, node->head.context))) {
+        v->hasStatus = true;
+        v->status = UA_STATUSCODE_BADUSERACCESSDENIED;
         addMissingTimestamps(server, v, timestampsToReturn, id);
         return true;
     }
@@ -1727,14 +1746,18 @@ writeNodeValueAttribute(UA_Server *server, UA_Session *session,
     switch(node->valueSourceType) {
     case UA_VALUESOURCETYPE_EXTERNAL:
     case UA_VALUESOURCETYPE_INTERNAL: {
-        UA_DataValue *oldValue = (node->valueSourceType == UA_VALUESOURCETYPE_INTERNAL) ?
-            &node->valueSource.internal.value : UA_atomic_load(node->valueSource.external.value);
+        UA_Boolean internal = (node->valueSourceType == UA_VALUESOURCETYPE_INTERNAL);
+        UA_DataValue *oldValue = (internal) ?
+            &node->valueSource.internal.value :
+            UA_atomic_load(node->valueSource.external.value);
+        const UA_ValueSourceNotifications *notifications = (internal) ?
+            &node->valueSource.internal.notifications :
+            &node->valueSource.external.notifications;
         retval = writeInternalValueAttribute(oldValue, &adjustedValue, rangeptr);
-        if(retval == UA_STATUSCODE_GOOD &&
-           node->valueSource.internal.notifications.onWrite)
-            node->valueSource.internal.notifications.
-                onWrite(server, &session->sessionId, session->context,
-                        &node->head.nodeId, node->head.context, rangeptr, &adjustedValue);
+        if(retval == UA_STATUSCODE_GOOD && notifications->onWrite)
+            notifications->onWrite(server, &session->sessionId, session->context,
+                                   &node->head.nodeId, node->head.context,
+                                   rangeptr, &adjustedValue);
         break;
     }
     case UA_VALUESOURCETYPE_CALLBACK: {
@@ -1763,7 +1786,7 @@ writeNodeValueAttribute(UA_Server *server, UA_Session *session,
        node->head.nodeClass == UA_NODECLASS_VARIABLE &&
        server->config.historyDatabase.setValue) {
 
-        /* Some famous clients require the source timestap to properly receive
+        /* Some famous clients require the source timestamp to properly receive
          * historical data. If missing we insert the source timestamp here. */
         if(!adjustedValue.hasSourceTimestamp) {
             adjustedValue.hasSourceTimestamp = true;
@@ -1800,7 +1823,8 @@ writeIsAbstract(UA_Node *node, UA_Boolean value) {
         node->dataTypeNode.isAbstract = value;
         break;
     default:
-        return UA_STATUSCODE_BADNODECLASSINVALID;
+        /* The NodeClass does not have the attribute (as for Read) */
+        return UA_STATUSCODE_BADATTRIBUTEIDINVALID;
     }
     return UA_STATUSCODE_GOOD;
 }
@@ -1825,17 +1849,41 @@ writeIsAbstract(UA_Node *node, UA_Boolean value) {
         break;                                                          \
     }
 
+/* The NodeClass does not have the attribute (as for Read) */
 #define CHECK_NODECLASS_WRITE(CLASS)                                    \
     if((node->head.nodeClass & (CLASS)) == 0) {                         \
-        retval = UA_STATUSCODE_BADNODECLASSINVALID;                     \
+        retval = UA_STATUSCODE_BADATTRIBUTEIDINVALID;                   \
         break;                                                          \
     }
 
-#define CHECK_USERWRITEMASK(mask)                           \
-    if(!(userWriteMask & (mask))) {                         \
-        retval = UA_STATUSCODE_BADUSERACCESSDENIED;         \
-        break;                                              \
+/* The WriteMask defines whether an attribute is writable at all
+ * (Bad_NotWritable), the UserWriteMask whether the current user may write it
+ * (Bad_UserAccessDenied). The local admin session (UA_Server_write) is not
+ * restricted by the WriteMask. */
+#define CHECK_USERWRITEMASK(mask)                                       \
+    if(session != &server->adminSession &&                              \
+       !(node->head.writeMask & (mask))) {                              \
+        retval = UA_STATUSCODE_BADNOTWRITABLE;                          \
+        break;                                                          \
+    }                                                                   \
+    if(!(userWriteMask & (mask))) {                                     \
+        retval = UA_STATUSCODE_BADUSERACCESSDENIED;                     \
+        break;                                                          \
     }
+
+/* WriteMask bit of the attributes that cannot be written in open62541 */
+static UA_UInt32
+unsupportedAttributeWriteMask(UA_UInt32 attributeId) {
+    switch(attributeId) {
+    case UA_ATTRIBUTEID_NODEID: return UA_WRITEMASK_NODEID;
+    case UA_ATTRIBUTEID_NODECLASS: return UA_WRITEMASK_NODECLASS;
+    case UA_ATTRIBUTEID_BROWSENAME: return UA_WRITEMASK_BROWSENAME;
+    case UA_ATTRIBUTEID_USERWRITEMASK: return UA_WRITEMASK_USERWRITEMASK;
+    case UA_ATTRIBUTEID_USERACCESSLEVEL: return UA_WRITEMASK_USERACCESSLEVEL;
+    case UA_ATTRIBUTEID_USEREXECUTABLE: return UA_WRITEMASK_USEREXECUTABLE;
+    default: return 0;
+    }
+}
 
 #define GET_NODETYPE                                    \
     type = (const UA_VariableTypeNode*)                 \
@@ -1934,7 +1982,11 @@ copyAttributeIntoNode(UA_Server *server, UA_Session *session,
     case UA_ATTRIBUTEID_USEREXECUTABLE:
     case UA_ATTRIBUTEID_BROWSENAME: /* BrowseName is tracked in a binary tree
                                        for fast lookup */
-        retval = UA_STATUSCODE_BADWRITENOTSUPPORTED;
+        /* Bad_NotWritable if the WriteMask does not allow writing. Otherwise
+         * the attribute is writable in principle, but not supported. */
+        retval = (session != &server->adminSession &&
+                  !(node->head.writeMask & unsupportedAttributeWriteMask(wvalue->attributeId))) ?
+            UA_STATUSCODE_BADNOTWRITABLE : UA_STATUSCODE_BADWRITENOTSUPPORTED;
         break;
     case UA_ATTRIBUTEID_DISPLAYNAME:
         CHECK_USERWRITEMASK(UA_WRITEMASK_DISPLAYNAME);
@@ -1992,7 +2044,13 @@ copyAttributeIntoNode(UA_Server *server, UA_Session *session,
         UA_Boolean semanticChange = false;
         if(node->head.nodeClass == UA_NODECLASS_VARIABLE) {
             /* The access to a value variable is granted via the UserAccessLevel
-             * attribute (masked with the AccessLevel attribute) */
+             * attribute (masked with the AccessLevel attribute). Bad_NotWritable
+             * if the AccessLevel itself does not allow writing. */
+            if(session != &server->adminSession &&
+               !(node->variableNode.accessLevel & UA_ACCESSLEVELMASK_WRITE)) {
+                retval = UA_STATUSCODE_BADNOTWRITABLE;
+                break;
+            }
             UA_Byte accessLevel = getUserAccessLevel(server, session, &node->variableNode);
             if(!(accessLevel & (UA_ACCESSLEVELMASK_WRITE))) {
                 retval = UA_STATUSCODE_BADUSERACCESSDENIED;

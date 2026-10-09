@@ -12,6 +12,7 @@
 #include "ua_securechannel.h"
 #include "ua_types_encoding_binary.h"
 #include "util/ua_util_internal.h"
+#include "ua_services.h"
 
 #include "testing_networklayers.h"
 #include "testing_policy.h"
@@ -94,6 +95,62 @@ teardown_key_sizes(void) {
     memset(&keySizes, 0, sizeof(struct key_sizes));
 }
 
+/* OPC UA Part 6, 6.8.1: for ECC policies without AuthenticatedEncryption in
+ * the SecurityMode Sign, the encrypting key and IV are not part of L (the
+ * length of the derived key material, also part of the HKDF salt). The
+ * generateKey call of the SecurityPolicy gets L as the output length. */
+static size_t derivedLength;
+static UA_StatusCode
+(*testingGenerateKey)(const UA_SecurityPolicy *policy, void *channelContext,
+                      const UA_ByteString *secret, const UA_ByteString *seed,
+                      UA_ByteString *out);
+
+static UA_StatusCode
+recordGenerateKey(const UA_SecurityPolicy *policy, void *channelContext,
+                  const UA_ByteString *secret, const UA_ByteString *seed,
+                  UA_ByteString *out) {
+    derivedLength = out->length;
+    return testingGenerateKey(policy, channelContext, secret, seed, out);
+}
+
+static const struct {
+    UA_SecurityPolicyType policyType;
+    UA_MessageSecurityMode securityMode;
+    size_t derivedLength;
+} keyLengthCases[] = {
+    /* Only the signing key */
+    {UA_SECURITYPOLICYTYPE_ECC, UA_MESSAGESECURITYMODE_SIGN,
+     DEFAULT_SYM_SIGNING_KEY_LENGTH},
+    /* Signing key, encrypting key and IV (the block size) */
+    {UA_SECURITYPOLICYTYPE_ECC, UA_MESSAGESECURITYMODE_SIGNANDENCRYPT,
+     DEFAULT_SYM_SIGNING_KEY_LENGTH + DEFAULT_SYM_ENCRYPTION_KEY_LENGTH +
+     DEFAULT_SYM_ENCRYPTION_BLOCK_SIZE},
+    {UA_SECURITYPOLICYTYPE_ECC_AEAD, UA_MESSAGESECURITYMODE_SIGN,
+     DEFAULT_SYM_SIGNING_KEY_LENGTH + DEFAULT_SYM_ENCRYPTION_KEY_LENGTH +
+     DEFAULT_SYM_ENCRYPTION_BLOCK_SIZE},
+    {UA_SECURITYPOLICYTYPE_RSA, UA_MESSAGESECURITYMODE_SIGN,
+     DEFAULT_SYM_SIGNING_KEY_LENGTH + DEFAULT_SYM_ENCRYPTION_KEY_LENGTH +
+     DEFAULT_SYM_ENCRYPTION_BLOCK_SIZE}
+};
+
+START_TEST(SecureChannel_derivedKeyLength) {
+    dummyPolicy.policyType = keyLengthCases[_i].policyType;
+    testChannel.securityMode = keyLengthCases[_i].securityMode;
+    testingGenerateKey = dummyPolicy.generateKey;
+    dummyPolicy.generateKey = recordGenerateKey;
+
+    derivedLength = 0;
+    ck_assert_uint_eq(UA_SecureChannel_generateLocalKeys(&testChannel),
+                      UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(derivedLength, keyLengthCases[_i].derivedLength);
+
+    derivedLength = 0;
+    ck_assert_uint_eq(generateRemoteKeys(&testChannel), UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(derivedLength, keyLengthCases[_i].derivedLength);
+
+    dummyPolicy.generateKey = testingGenerateKey;
+} END_TEST
+
 START_TEST(SecureChannel_initAndDelete) {
     TestingPolicy(&dummyPolicy, dummyCertificate, &fCalled, &keySizes);
     UA_StatusCode retval;
@@ -118,6 +175,64 @@ START_TEST(SecureChannel_initAndDelete) {
 
     dummyPolicy.clear(&dummyPolicy);
 }END_TEST
+
+START_TEST(SecureChannel_open_invalidSecurityMode) {
+    static const UA_Int32 modes[] = {0, -1, UA_INT32_MIN, 4, UA_INT32_MAX};
+    UA_Server *server = UA_Server_new();
+    ck_assert_ptr_ne(server, NULL);
+
+    /* Check both None and non-None policies so policy matching cannot mask
+     * a missing range check. */
+    dummyPolicy.policyType = (_i % 2 == 0) ?
+        UA_SECURITYPOLICYTYPE_NONE : UA_SECURITYPOLICYTYPE_RSA;
+    testChannel.state = UA_SECURECHANNELSTATE_ACK_SENT;
+    testChannel.securityMode = UA_MESSAGESECURITYMODE_NONE;
+
+    UA_OpenSecureChannelRequest request;
+    UA_OpenSecureChannelRequest_init(&request);
+    request.requestType = UA_SECURITYTOKENREQUESTTYPE_ISSUE;
+    request.securityMode = (UA_MessageSecurityMode)modes[_i / 2];
+    ck_assert_uint_eq(UA_SecureChannel_setSecurityMode(&testChannel, request.securityMode),
+                      UA_STATUSCODE_BADSECURITYMODEREJECTED);
+    ck_assert_int_eq(testChannel.securityMode, UA_MESSAGESECURITYMODE_NONE);
+    UA_OpenSecureChannelResponse response;
+    UA_OpenSecureChannelResponse_init(&response);
+
+    Service_OpenSecureChannel(server, &testChannel, &request, &response);
+    ck_assert_uint_eq(response.responseHeader.serviceResult,
+                      UA_STATUSCODE_BADSECURITYMODEREJECTED);
+    ck_assert_int_eq(testChannel.state, UA_SECURECHANNELSTATE_ACK_SENT);
+    ck_assert_int_eq(testChannel.securityMode, UA_MESSAGESECURITYMODE_NONE);
+    ck_assert(!fCalled.generateNonce);
+
+    UA_OpenSecureChannelResponse_clear(&response);
+    UA_OpenSecureChannelRequest_clear(&request);
+    UA_Server_delete(server);
+} END_TEST
+
+START_TEST(SecureChannel_open_validSecurityMode) {
+    UA_Server *server = UA_Server_new();
+    ck_assert_ptr_ne(server, NULL);
+    dummyPolicy.policyType = (_i == UA_MESSAGESECURITYMODE_NONE) ?
+        UA_SECURITYPOLICYTYPE_NONE : UA_SECURITYPOLICYTYPE_RSA;
+    testChannel.state = UA_SECURECHANNELSTATE_ACK_SENT;
+
+    UA_OpenSecureChannelRequest request;
+    UA_OpenSecureChannelRequest_init(&request);
+    request.requestType = UA_SECURITYTOKENREQUESTTYPE_ISSUE;
+    request.securityMode = (UA_MessageSecurityMode)_i;
+    UA_OpenSecureChannelResponse response;
+    UA_OpenSecureChannelResponse_init(&response);
+
+    Service_OpenSecureChannel(server, &testChannel, &request, &response);
+    ck_assert_uint_eq(response.responseHeader.serviceResult, UA_STATUSCODE_GOOD);
+    ck_assert_int_eq(testChannel.state, UA_SECURECHANNELSTATE_OPEN);
+    ck_assert_int_eq(testChannel.securityMode, request.securityMode);
+
+    UA_OpenSecureChannelResponse_clear(&response);
+    UA_OpenSecureChannelRequest_clear(&request);
+    UA_Server_delete(server);
+} END_TEST
 
 static void
 createDummyResponse(UA_OpenSecureChannelResponse *response) {
@@ -615,6 +730,44 @@ START_TEST(SecureChannel_renewalFreshTokenAfterOldExpiry) {
     ck_assert_int_eq(testChannel.renewState, UA_SECURECHANNELRENEWSTATE_NORMAL);
 } END_TEST
 
+/* Model both ends after the first OPN of a new channel. There is no old token
+ * yet, only the placeholder with TokenId zero for which no keys exist. */
+static void
+setupFirstToken(UA_Boolean clientSide) {
+    UA_ChannelSecurityToken_init(&testChannel.securityToken);
+    UA_ChannelSecurityToken_init(&testChannel.altSecurityToken);
+    testChannel.securityToken.channelId = 1;
+    testChannel.altSecurityToken.channelId = 1;
+    if(clientSide) {
+        testChannel.securityToken.tokenId = 1;
+        testChannel.securityToken.revisedLifetime = 1000;
+        testChannel.renewState = UA_SECURECHANNELRENEWSTATE_NEWTOKEN_CLIENT;
+    } else {
+        testChannel.securityToken.revisedLifetime = 10000;
+        testChannel.altSecurityToken.tokenId = 1;
+        testChannel.altSecurityToken.revisedLifetime = 1000;
+        testChannel.renewState = UA_SECURECHANNELRENEWSTATE_NEWTOKEN_SERVER;
+    }
+    memset(&fCalled, 0, sizeof(fCalled));
+}
+
+START_TEST(SecureChannel_firstTokenRejectsPlaceholder) {
+    setupFirstToken(_i != 0);
+    UA_SecureChannelRenewState before = testChannel.renewState;
+    UA_DateTime now = 100 * UA_DATETIME_MSEC;
+
+    /* The placeholder is not a token */
+    ck_assert_uint_eq(checkSymHeader(&testChannel, 0, now),
+                      UA_STATUSCODE_BADSECURECHANNELTOKENUNKNOWN);
+    ck_assert_int_eq(testChannel.renewState, before);
+    ck_assert(!fCalled.generateKey);
+
+    /* The issued token is accepted */
+    ck_assert_uint_eq(checkSymHeader(&testChannel, 1, now), UA_STATUSCODE_GOOD);
+    ck_assert_int_eq(testChannel.renewState, UA_SECURECHANNELRENEWSTATE_NORMAL);
+    ck_assert_uint_eq(testChannel.securityToken.tokenId, 1);
+} END_TEST
+
 START_TEST(SecureChannel_serverTimeoutRotatesToken) {
     setupRenewedTokens(false);
     ck_assert(!UA_SecureChannel_checkTimeout(&testChannel, 1001 * UA_DATETIME_MSEC));
@@ -1003,6 +1156,22 @@ testSuite_SecureChannel(void) {
     tcase_add_test(tc_initAndDelete, SecureChannel_initAndDelete);
     suite_add_tcase(s, tc_initAndDelete);
 
+    TCase *tc_keys = tcase_create("Derived key length");
+    tcase_add_checked_fixture(tc_keys, setup_funcs_called, teardown_funcs_called);
+    tcase_add_checked_fixture(tc_keys, setup_key_sizes, teardown_key_sizes);
+    tcase_add_checked_fixture(tc_keys, setup_secureChannel, teardown_secureChannel);
+    tcase_add_loop_test(tc_keys, SecureChannel_derivedKeyLength, 0,
+                        sizeof(keyLengthCases) / sizeof(keyLengthCases[0]));
+    suite_add_tcase(s, tc_keys);
+
+    TCase *tc_open = tcase_create("OpenSecureChannel security modes");
+    tcase_add_checked_fixture(tc_open, setup_funcs_called, teardown_funcs_called);
+    tcase_add_checked_fixture(tc_open, setup_key_sizes, teardown_key_sizes);
+    tcase_add_checked_fixture(tc_open, setup_secureChannel, teardown_secureChannel);
+    tcase_add_loop_test(tc_open, SecureChannel_open_invalidSecurityMode, 0, 10);
+    tcase_add_loop_test(tc_open, SecureChannel_open_validSecurityMode, 1, 4);
+    suite_add_tcase(s, tc_open);
+
     TCase *tc_sendAsymmetricOPNMessage = tcase_create("Test sendAsymmetricOPNMessage function");
     tcase_add_checked_fixture(tc_sendAsymmetricOPNMessage, setup_funcs_called, teardown_funcs_called);
     tcase_add_checked_fixture(tc_sendAsymmetricOPNMessage, setup_key_sizes, teardown_key_sizes);
@@ -1043,6 +1212,7 @@ testSuite_SecureChannel(void) {
     tcase_add_loop_test(tc_processBuffer, SecureChannel_renewalTokenTransition, 0, 2);
     tcase_add_loop_test(tc_processBuffer, SecureChannel_renewalExpiredOldToken, 0, 2);
     tcase_add_loop_test(tc_processBuffer, SecureChannel_renewalFreshTokenAfterOldExpiry, 0, 2);
+    tcase_add_loop_test(tc_processBuffer, SecureChannel_firstTokenRejectsPlaceholder, 0, 2);
     tcase_add_test(tc_processBuffer, SecureChannel_serverTimeoutRotatesToken);
     tcase_add_test(tc_processBuffer, SecureChannel_maxMessageSizeOverride_tightensBelowStaticLimit);
     tcase_add_test(tc_processBuffer, SecureChannel_maxMessageSizeOverride_zeroMeansUnset);

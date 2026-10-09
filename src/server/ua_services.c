@@ -370,8 +370,7 @@ processRequest(UA_Server *server, UA_SecureChannel *channel,
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     UA_NodeId *authenticationToken = (UA_NodeId *)(uintptr_t)
         &request->requestHeader.authenticationToken;
-    if(!UA_NodeId_isNull(authenticationToken) &&
-       !UA_NodeId_isNull(&unsafe_fuzz_authenticationToken)) {
+    if(!UA_NodeId_isNull(&unsafe_fuzz_authenticationToken)) {
         UA_NodeId_clear(authenticationToken);
         UA_NodeId_copy(&unsafe_fuzz_authenticationToken, authenticationToken);
     }
@@ -381,8 +380,23 @@ processRequest(UA_Server *server, UA_SecureChannel *channel,
     UA_Session *session = NULL;
     response->responseHeader.serviceResult =
         getBoundSession(server, channel, &request->requestHeader.authenticationToken, &session);
-    if(!session && sd->sessionRequired)
+    if(!session && sd->sessionRequired) {
+        /* Part 4, 5.7.4.3 lists only Bad_SessionIdInvalid for CloseSession.
+         * Rewrite every other StatusCode except for the listed exceptions.
+         * E.g. a Session bound to another SecureChannel is invalid from the
+         * view of this (still valid) SecureChannel. */
+        if(sd->requestType == &UA_TYPES[UA_TYPES_CLOSESESSIONREQUEST]) {
+            switch(response->responseHeader.serviceResult) {
+            case UA_STATUSCODE_BADSESSIONCLOSED:
+                break;
+            default:
+                response->responseHeader.serviceResult =
+                    UA_STATUSCODE_BADSESSIONIDINVALID;
+                break;
+            }
+        }
         return true;
+    }
 
     /* The session can be NULL if not required */
     response->responseHeader.serviceResult = UA_STATUSCODE_GOOD;
@@ -409,12 +423,19 @@ processRequest(UA_Server *server, UA_SecureChannel *channel,
     UA_ApplicationNotificationType nt = UA_APPLICATIONNOTIFICATIONTYPE_SERVICE_BEGIN;
     notifyApplication(server, nt, notifyPayloadMap);
 
-    /* Process the service */
+    /* Prepare audit events handling */
     beginModelChange(server);
+    server->currentRequest = &request->requestHeader;
+
+    /* Process the service */
     UA_Boolean done = processServiceInternal(server, channel, session,
                                              responseToken, sd, request,
                                              response);
+
+    /* Unwind audit events handling */
     endModelChange(server);
+    server->currentRequest = NULL;
+
 #ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
     UA_assert(server->modelChangeDepth == 0);
 #endif

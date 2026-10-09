@@ -35,13 +35,22 @@ auditEvent(UA_Server *server, UA_ApplicationNotificationType type,
 
     UA_UInt32 channelId = (channel) ? channel->securityToken.channelId : 0;
     UA_NodeId sessionId = (session) ? session->sessionId : UA_NODEID_NULL;
-    UA_Byte entryIdBuf[521];
-    UA_String auditEntryId = {512, entryIdBuf};
-    UA_String_format(&auditEntryId, "%u:%N:%s", channelId, sessionId, serviceName);
     UA_String clientUserId = (session) ?
         session->clientUserIdOfSession : UA_STRING_NULL;
     UA_DateTime actionTimestamp =
         config->eventLoop->dateTime_now(config->eventLoop);
+
+    /* Create an internal audit entry id if none is defined. The server-global
+     * pointer to the current RequestHeader is set in processRequest. */
+    UA_Byte entryIdBuf[521];
+    UA_String auditEntryId;
+    if(server->currentRequest && server->currentRequest->auditEntryId.length > 0) {
+        auditEntryId = server->currentRequest->auditEntryId;
+    } else {
+        auditEntryId.length = 512;
+        auditEntryId.data = entryIdBuf;
+        UA_String_format(&auditEntryId, "%u:%N:%s", channelId, sessionId, serviceName);
+    }
 
     UA_Variant_setScalar(&payload.map[0].value, &actionTimestamp,
                          &UA_TYPES[UA_TYPES_DATETIME]);
@@ -344,11 +353,29 @@ auditActivateSessionEvent(UA_Server *server,
                         req->clientSoftwareCertificatesSize,
                         &UA_TYPES[UA_TYPES_SIGNEDSOFTWARECERTIFICATE]);
 
-    /* /UserIdentityToken */
+    /* /UserIdentityToken
+     * ActivateSession has decrypted the token in place, so it holds the
+     * plaintext password (UserName) or tokenData (Issued). The payload goes to
+     * the notification callbacks and becomes the fields of the
+     * AuditActivateSessionEventType event. Record which token was used, not its
+     * secret: use a shallow copy without password / tokenData. The copies
+     * outlive the auditSessionEvent call below. */
+    UA_UserNameIdentityToken unToken;
+    UA_IssuedIdentityToken issuedToken;
     if(req->userIdentityToken.encoding == UA_EXTENSIONOBJECT_DECODED ||
        req->userIdentityToken.encoding == UA_EXTENSIONOBJECT_DECODED_NODELETE) {
         const UA_ExtensionObject *uit = &req->userIdentityToken;
-        UA_Variant_setScalar(&sessionActivateAuditPayload[9].value, uit->content.decoded.data,
+        void *tokenData = uit->content.decoded.data;
+        if(uit->content.decoded.type == &UA_TYPES[UA_TYPES_USERNAMEIDENTITYTOKEN]) {
+            unToken = *(const UA_UserNameIdentityToken*)tokenData;
+            unToken.password = UA_BYTESTRING_NULL;
+            tokenData = &unToken;
+        } else if(uit->content.decoded.type == &UA_TYPES[UA_TYPES_ISSUEDIDENTITYTOKEN]) {
+            issuedToken = *(const UA_IssuedIdentityToken*)tokenData;
+            issuedToken.tokenData = UA_BYTESTRING_NULL;
+            tokenData = &issuedToken;
+        }
+        UA_Variant_setScalar(&sessionActivateAuditPayload[9].value, tokenData,
                              uit->content.decoded.type);
     } else {
         UA_Variant_init(&sessionActivateAuditPayload[9].value);

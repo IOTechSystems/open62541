@@ -44,7 +44,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # overwritten with more detailed information if git is available.
 set(OPEN62541_VER_MAJOR 1)
 set(OPEN62541_VER_MINOR 5)
-set(OPEN62541_VER_PATCH 8)
+set(OPEN62541_VER_PATCH 9)
 set(OPEN62541_VER_LABEL "") # like "-rc1" or "-g4538abcd" or "-g4538abcd-dirty"
 set(OPEN62541_VER_COMMIT "unknown-commit")
 
@@ -2054,7 +2054,7 @@ set(BASE_PATH_ARCH "${PROJECT_SOURCE_DIR}/arch")
 set(BASE_PATH_GENERATED "${PROJECT_BINARY_DIR}/src_generated/open62541")
 
 foreach ( file ${FILES_TO_INSTALL} )
-    # Construct a relative path by replacing any occurence of the absolute path
+    # Construct a relative path by replacing any occurrence of the absolute path
     set(full_path ${file})
     string(REPLACE ${BASE_PATH_MAIN} "" file ${file})
     string(REPLACE ${BASE_PATH_PLUGINS} "" file ${file})

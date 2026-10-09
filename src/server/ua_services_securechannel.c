@@ -100,7 +100,7 @@ Service_OpenSecureChannel_inner(UA_Server *server, UA_SecureChannel *channel,
 
         /* Ensure the SecurityMode does not cause a wrong array access during
          * logging */
-        if(request->securityMode > UA_MESSAGESECURITYMODE_SIGNANDENCRYPT)
+        if((UA_UInt32)request->securityMode > UA_MESSAGESECURITYMODE_SIGNANDENCRYPT)
             request->securityMode = UA_MESSAGESECURITYMODE_INVALID;
 
         /* Set the SecurityMode. This overwrites the "temporary SecurityMode"
@@ -153,6 +153,8 @@ Service_OpenSecureChannel_inner(UA_Server *server, UA_SecureChannel *channel,
     /* Create a new SecurityToken. It will be switched over when the first
      * message is received. The ChannelId is left unchanged. */
     channel->altSecurityToken.channelId = channel->securityToken.channelId;
+    if(server->lastTokenId == 0)
+        server->lastTokenId++; /* TokenId zero is the placeholder */
     channel->altSecurityToken.tokenId = server->lastTokenId++;
     channel->altSecurityToken.createdAt = el->dateTime_nowMonotonic(el);
     channel->altSecurityToken.revisedLifetime =

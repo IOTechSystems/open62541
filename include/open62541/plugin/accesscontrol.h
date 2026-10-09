@@ -26,7 +26,12 @@ typedef struct UA_AccessControl UA_AccessControl;
  *
  * The ``sessionId`` and ``sessionContext`` can be both NULL. This is the case
  * when, for example, a MonitoredItem (the underlying Subscription) is detached
- * from its Session but continues to run. */
+ * from its Session but continues to run.
+ *
+ * The callbacks ``activateSession``, ``getUserRightsMask``,
+ * ``getUserAccessLevel``, ``getUserExecutable``, ``getUserExecutableOnObject``
+ * and ``allowBrowseNode`` are mandatory. The server does not start without
+ * them. The other callbacks can be NULL. */
 
 struct UA_AccessControl {
     void *context;
@@ -51,7 +56,7 @@ struct UA_AccessControl {
      * - Select matching Endpoint/UserTokenPolicy (compare token type,
      *   SecureChannel and PolicyId from the UserIdentityToken)
      * - Cryptographic checks:
-     *   - Check the encryption algortihm from the UserIdentityToken
+     *   - Check the encryption algorithm from the UserIdentityToken
      *   - UsernamePassword/IssuedToken: Decrypt the secret
      *   - Check the x509 auth certificate signature and validate the
      *     certificate against the server's sessionPKI */
@@ -120,7 +125,11 @@ struct UA_AccessControl {
 
     /* Allow transfer of a subscription to another session. The Server shall
      * validate that the Client of that Session is operating on behalf of the
-     * same user */
+     * same user. The oldSessionId is NULL for a Subscription that is detached
+     * from its Session. The server only calls this after it has verified that
+     * the new Session has the identity (user, and for anonymous users the
+     * client ApplicationUri over a secure SecureChannel) of the Session the
+     * Subscription was detached from. */
     UA_Boolean (*allowTransferSubscription)(UA_Server *server, UA_AccessControl *ac,
                                             const UA_NodeId *oldSessionId, void *oldSessionContext,
                                             const UA_NodeId *newSessionId, void *newSessionContext);

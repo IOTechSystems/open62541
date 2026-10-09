@@ -3,6 +3,14 @@ refactorings and bug fixes are not reported here.
 
 # Development
 
+### Removing a PublishedDataSet removes the connected DataSetWriters
+
+`UA_Server_removePublishedDataSet` removes the connected DataSetWriters together
+with the PublishedDataSet. If a connected writer has frozen the configuration,
+it returns `Bad_ConfigurationError`. Otherwise, while the WriterGroup of a
+connected writer is enabled, it returns `Bad_InvalidState` and changes nothing.
+Before, the PublishedDataSet was freed even when removing a connected writer failed.
+
 ### PubSub message security with OpenSSL and LibreSSL
 
 The PubSub SecurityPolicies `PubSub-Aes128-CTR` and `PubSub-Aes256-CTR`
@@ -89,6 +97,14 @@ Support for DataSetOrdering mechanism as defined in OPC UA Part 14, section
 within NetworkMessages can be controlled via the `dataSetOrdering` field in the
 `UA_UadpWriterGroupMessageDataType` configuration.
 
+### The AccessControl plugin needs its mandatory callbacks
+
+`UA_Server_run_startup` returns `Bad_ConfigurationError` if one of the
+AccessControl callbacks `activateSession`, `getUserRightsMask`,
+`getUserAccessLevel`, `getUserExecutable`, `getUserExecutableOnObject` or
+`allowBrowseNode` is NULL. Before, the server started and crashed on the first
+request that used it.
+
 ### PubSub AddConnection rolls back incomplete configurations
 
 The `PublishSubscribe.AddConnection` information model method now removes the
@@ -139,8 +155,8 @@ PubSub NetworkMessages. The approach is described in
 
 The JSON encoding was reworked for the v1.05 version of the OPC UA
 specification. The change breaks backwards compatibility. The legacy JSON
-encoding is still available throught the UA_ENABLE_JSON_ENCODING_LEGACY build
-option. This legacy feature wil get removed at some point in the future.
+encoding is still available through the UA_ENABLE_JSON_ENCODING_LEGACY build
+option. This legacy feature will get removed at some point in the future.
 
 ### PubSub NetworkMessage structure has an explicit DataSetMessageSize
 
