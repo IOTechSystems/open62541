@@ -75,6 +75,25 @@ getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
     return UA_STATUSCODE_GOOD;
 }
 
+UA_StatusCode
+UA_Server_getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
+                                  UA_QualifiedName browseName,
+                                  UA_NodeId *outNodeId) {
+    lockServer(server);
+    UA_StatusCode retval = getNodeIdWithBrowseName(server, origin, browseName, outNodeId);
+    unlockServer(server);
+    return retval;
+}
+
+UA_StatusCode
+UA_Server_writeTwoStateVariable(UA_Server *server, const UA_NodeId twoStateVariableId,
+                                UA_LocalizedText value, UA_Boolean idValue) {
+    lockServer(server);
+    UA_StatusCode retval = writeTwoStateVariable(server, twoStateVariableId, value, idValue);
+    unlockServer(server);
+    return retval;
+}
+
 static UA_StatusCode UA_ConditionEventInfo_copy (const UA_ConditionEventInfo *src, UA_ConditionEventInfo *dest)
 {
     *dest = *src;

@@ -1715,6 +1715,31 @@ UA_Server_setServerOnNetworkCallback(UA_Server *server,
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
 
+/* Get the nodeId of the direct child of origin with the given browse name.
+ * The returned nodeId must be cleared by the caller.
+ *
+ * @param server The server object
+ * @param origin The origin node
+ * @param browseName The browse name of the child node
+ * @param outNodeId Contains the resulting nodeId
+ * @return The StatusCode for the operation */
+UA_StatusCode UA_EXPORT UA_THREADSAFE
+UA_Server_getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
+                                  UA_QualifiedName browseName,
+                                  UA_NodeId *outNodeId);
+
+/* Write the value and the Id property of a TwoStateVariable node.
+ *
+ * @param server The server object
+ * @param twoStateVariableId The TwoStateVariable node
+ * @param value The text of the state
+ * @param idValue The value of the Id property
+ * @return The StatusCode for the operation */
+UA_StatusCode UA_EXPORT UA_THREADSAFE
+UA_Server_writeTwoStateVariable(UA_Server *server,
+                                const UA_NodeId twoStateVariableId,
+                                UA_LocalizedText value, UA_Boolean idValue);
+
 typedef UA_StatusCode (*UA_ConditionCallbackFn)(
     UA_Server *server,
     const UA_NodeId *conditionId,
