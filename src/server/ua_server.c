@@ -927,8 +927,10 @@ secureChannel_delayedClose(void *application, void *context) {
 
     UA_SecureChannel *channel;
     TAILQ_FOREACH(channel, &info->server->channels, serverEntry) {
+        /* The SecurityPolicy is only set once the OPN handshake is done.
+         * Channels still in the HEL/ACK phase have no policy yet. */
         const UA_SecurityPolicy *policy = channel->securityPolicy;
-        if(UA_NodeId_equal(&policy->certificateTypeId, &(info->certificateTypeId)))
+        if(policy && UA_NodeId_equal(&policy->certificateTypeId, &(info->certificateTypeId)))
             UA_SecureChannel_shutdown(channel, UA_SHUTDOWNREASON_CLOSE);
     }
     UA_NodeId_clear(&(info->certificateTypeId));
