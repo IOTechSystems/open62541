@@ -1342,6 +1342,81 @@ START_TEST(nonExclusiveLimitEvaluateFn) {
 
 } END_TEST
 
+/* OPC UA Part 9, 5.8.17: the ShelvedStateMachine Methods of the ShelvingState
+ * child can be called with the ConditionId as the ObjectId */
+START_TEST(shelveMethodCalledOnCondition) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+    alarmProperties.isShelvable = true;
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode status = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_NodeId shelvingState;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &conditionInstance, UA_QUALIFIEDNAME(0, "ShelvingState"), &shelvingState);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_NodeId timedShelve;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &shelvingState, UA_QUALIFIEDNAME(0, "TimedShelve"), &timedShelve);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_Duration shelvingTime = 10000.0;
+    UA_Variant input;
+    UA_Variant_setScalar(&input, &shelvingTime, &UA_TYPES[UA_TYPES_DURATION]);
+
+    UA_CallMethodRequest request;
+    UA_CallMethodRequest_init(&request);
+    request.objectId = conditionInstance;
+    request.methodId = timedShelve;
+    request.inputArgumentsSize = 1;
+    request.inputArguments = &input;
+
+    UA_CallMethodResult result = UA_Server_call(acserver, &request);
+    ck_assert_uint_eq(result.statusCode, UA_STATUSCODE_GOOD);
+    UA_CallMethodResult_clear(&result);
+
+    /* The Condition is now TimedShelved */
+    UA_NodeId currentState;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &shelvingState, UA_QUALIFIEDNAME(0, "CurrentState"), &currentState);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_NodeId currentStateId;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &currentState, UA_QUALIFIEDNAME(0, "Id"), &currentStateId);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_Variant value;
+    status = UA_Server_readValue(acserver, currentStateId, &value);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert(UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_NODEID]));
+    UA_NodeId timedShelved = UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVED);
+    ck_assert(UA_NodeId_equal((UA_NodeId *) value.data, &timedShelved));
+    UA_Variant_clear(&value);
+
+    /* An object that is not a Condition still cannot call the Method */
+    request.objectId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+    result = UA_Server_call(acserver, &request);
+    ck_assert_uint_eq(result.statusCode, UA_STATUSCODE_BADMETHODINVALID);
+    UA_CallMethodResult_clear(&result);
+
+    UA_NodeId_clear(&currentStateId);
+    UA_NodeId_clear(&currentState);
+    UA_NodeId_clear(&timedShelve);
+    UA_NodeId_clear(&shelvingState);
+} END_TEST
+
 #endif
 
 int main(void) {
@@ -1356,6 +1431,7 @@ int main(void) {
     tcase_add_test(tc, enableDisable);
     tcase_add_test(tc, exclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
+    tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);
 

@@ -3440,13 +3440,40 @@ UA_Server_setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId
 static UA_StatusCode
 setupAlarmConditionShelvingState(UA_Server *server, const UA_NodeId *condition)
 {
-    UA_NodeId alarmConditionTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE);
     UA_NodeId shelvingStateId;
     UA_NodeId_init (&shelvingStateId);
-    UA_StatusCode retval = addOptionalField(server, *condition, alarmConditionTypeId,
-                              fieldShelvingStateQN, &shelvingStateId);
+
+    /* The Method callbacks are registered on the Methods of the AlarmConditionType
+     * ShelvingState. Reference those before addNode_finish so the Methods of the
+     * ShelvedStateMachineType (without callbacks) are not instantiated instead. */
+    UA_ObjectAttributes oAttr = UA_ObjectAttributes_default;
+    oAttr.displayName = UA_LOCALIZEDTEXT("", CONDITION_FIELD_SHELVINGSTATE);
+    UA_StatusCode retval = addNode_begin(server, UA_NODECLASS_OBJECT,
+                                         UA_NODEID_NUMERIC(condition->namespaceIndex, 0),
+                                         *condition, UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                                         fieldShelvingStateQN,
+                                         UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE),
+                                         &oAttr, &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES],
+                                         NULL, &shelvingStateId);
     CONDITION_ASSERT_GOTOLABEL(retval, "Adding ShelvingState optional Field failed",done);
 
+    const UA_UInt32 shelvingMethods[] = {
+        UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_UNSHELVE,
+        UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_ONESHOTSHELVE,
+        UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_TIMEDSHELVE
+    };
+    for (size_t i = 0; i < sizeof(shelvingMethods)/sizeof(shelvingMethods[0]); i++)
+    {
+        retval = addRef(server, shelvingStateId, UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT),
+                        UA_NODEID_NUMERIC(0, shelvingMethods[i]), true);
+        CONDITION_ASSERT_GOTOLABEL(retval, "Adding HasComponent Reference to ShelvingState Method failed",done);
+    }
+
+    retval = addNode_finish(server, &server->adminSession, &shelvingStateId);
+    CONDITION_ASSERT_GOTOLABEL(retval, "Finishing ShelvingState optional Field failed",done);
+
+    /* The AlarmConditionType ShelvingState has no TimedShelve2, OneShotShelve2
+     * and Unshelve2 Methods in namespace zero. Add them from the ShelvedStateMachineType. */
     UA_NodeId shelvedStateType = UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE);
     retval = addOptionalField(server, shelvingStateId, shelvedStateType, UA_QUALIFIEDNAME(0, SHELVEDSTATE_METHOD_TIMEDSHELVE2), NULL);
     CONDITION_ASSERT_GOTOLABEL(retval, "Adding ShelvingState optional TimedShelve2 Method failed",done);

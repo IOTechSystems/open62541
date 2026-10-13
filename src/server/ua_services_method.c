@@ -253,6 +253,22 @@ callWithResolvedMethodAndObject(UA_Server *server, UA_Session *session,
     /* TODO: Verify Output matches the argument definition */
 }
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+/* Get the ShelvingState child of a Condition. Returns BadNotFound if the object
+ * is not a Condition or has no ShelvingState. */
+static UA_StatusCode
+getConditionShelvingState(UA_Server *server, UA_Session *session,
+                          const UA_NodeId *objectId, UA_NodeId *outShelvingStateId) {
+    if(!isCondition(server, objectId))
+        return UA_STATUSCODE_BADNOTFOUND;
+    UA_QualifiedName shelvingState = UA_QUALIFIEDNAME(0, "ShelvingState");
+    return findChildByBrowsename(server, session, *objectId, UA_NODECLASS_OBJECT,
+                                 UA_REFERENCETYPEINDEX_HASCOMPONENT,
+                                 UA_NS0ID(HASCOMPONENT), &shelvingState,
+                                 outShelvingStateId);
+}
+#endif
+
 static UA_StatusCode
 callWithMethodAndObject(UA_Server *server, UA_Session *session,
                         const UA_CallMethodRequest *request,
@@ -279,24 +295,45 @@ callWithMethodAndObject(UA_Server *server, UA_Session *session,
 
     /* Find the matching Method of the same BrowseName referenced directly by
      * the calling object */
-    UA_NodeId resolvedMethodId;
+    const UA_NodeId *methodContextId = &callObject->head.nodeId;
+    UA_NodeId resolvedMethodId = UA_NODEID_NULL;
     UA_StatusCode res =
-        findChildByBrowsename(server, session, callObject->head.nodeId,
+        findChildByBrowsename(server, session, *methodContextId,
                               UA_NODECLASS_METHOD, UA_REFERENCETYPEINDEX_HASCOMPONENT,
                               UA_NS0ID(HASCOMPONENT), &callMethod->head.browseName,
                               &resolvedMethodId);
-    if(res != UA_STATUSCODE_GOOD)
-        return (res == UA_STATUSCODE_BADNOTFOUND) ?
-            UA_STATUSCODE_BADMETHODINVALID : res;
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+    /* OPC UA Part 9, 5.8.17: "Servers shall allow Clients to call the
+     * ShelvedStateMachine Methods of its Shelving child by specifying
+     * ConditionId as the ObjectId". Resolve the Method against the ShelvingState
+     * child instead. The Condition stays the object passed to the callback. */
+    UA_NodeId shelvingStateId = UA_NODEID_NULL;
+    if(res == UA_STATUSCODE_BADNOTFOUND &&
+       getConditionShelvingState(server, session, &callObject->head.nodeId,
+                                 &shelvingStateId) == UA_STATUSCODE_GOOD) {
+        methodContextId = &shelvingStateId;
+        res = findChildByBrowsename(server, session, *methodContextId,
+                                    UA_NODECLASS_METHOD, UA_REFERENCETYPEINDEX_HASCOMPONENT,
+                                    UA_NS0ID(HASCOMPONENT), &callMethod->head.browseName,
+                                    &resolvedMethodId);
+    }
+#endif
 
     /* The resolved methodId is different */
     const UA_MethodNode *resolvedMethod = (const UA_MethodNode*)callMethod;
+    if(res != UA_STATUSCODE_GOOD) {
+        if(res == UA_STATUSCODE_BADNOTFOUND)
+            res = UA_STATUSCODE_BADMETHODINVALID;
+        goto errout;
+    }
+
     if(!UA_NodeId_equal(&resolvedMethodId, &callMethod->head.nodeId)) {
         /* Check whether the original MethodId comes from an ObjectType that is
          * upwards in the type hierarchy. Downwards in the type hierarchy (or
          * even completely unrelated) is not allowed. */
         res = checkMethodInTypeHierarchy(server, session,
-                                         &callObject->head.nodeId,
+                                         methodContextId,
                                          &callMethod->head.nodeId,
                                          &callMethod->head.browseName);
         if(res != UA_STATUSCODE_GOOD) {
@@ -327,6 +364,9 @@ callWithMethodAndObject(UA_Server *server, UA_Session *session,
     if(resolvedMethod && (const UA_Node*)resolvedMethod != callMethod)
         UA_NODESTORE_RELEASE(server, (const UA_Node*)resolvedMethod);
     UA_NodeId_clear(&resolvedMethodId);
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+    UA_NodeId_clear(&shelvingStateId);
+#endif
     return res;
 }
 
