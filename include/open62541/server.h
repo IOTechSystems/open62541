@@ -2021,11 +2021,11 @@ typedef struct UA_OffNormalAlarmProperties
     UA_NodeId normalState;
 } UA_OffNormalAlarmProperties;
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_setupOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                                     const UA_OffNormalAlarmProperties *properties);
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_initOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition,
                                     const UA_OffNormalAlarmProperties *properties);
 
@@ -2129,11 +2129,11 @@ UA_Server_createInstrumentDiagnosticalAlarmType(
 
 typedef UA_Byte UA_LimitState;
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_ExclusiveLimitAlarmEvaluateLimitState (UA_Server *server, const UA_NodeId *conditionId, UA_Double input,
                                                  UA_LimitState *stateOut, UA_Boolean *stateChanged);
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (UA_Server *server, const UA_NodeId *conditionId, UA_Double input,
                                                     UA_LimitState *stateOut, UA_Boolean *stateChanged);
 
@@ -2178,16 +2178,16 @@ typedef struct UA_LimitAlarmProperties
     UA_UInt16 severityLowLow;
 } UA_LimitAlarmProperties;
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_setupExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_initExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
 
-UA_StatusCode
+UA_StatusCode UA_EXPORT
 UA_Server_initNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
 
 UA_StatusCode UA_EXPORT

@@ -1541,6 +1541,12 @@ else()
 endif()
 add_library(open62541 $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
 
+# Only export the public API (marked with UA_EXPORT). Internal functions and
+# bundled dependencies (yxml, ziptree, ...) otherwise clash with identically
+# named symbols in other libraries loaded into the same process.
+set_target_properties(open62541-object open62541-plugins open62541 PROPERTIES
+                      C_VISIBILITY_PRESET hidden)
+
 add_dependencies(open62541-object open62541-code-generation)
 add_dependencies(open62541-plugins open62541-code-generation)
 
