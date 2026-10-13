@@ -464,6 +464,13 @@ UA_StatusCode
 getAllInterfaces(UA_Server *server, const UA_NodeId *objectNode,
                  UA_NodeId **interfaceNodes, size_t *interfaceNodesSize);
 
+/* Recursively copy the aggregated children of source to destination. If
+ * copyOptional is set, optional children are always copied. */
+UA_StatusCode
+copyAllChildren(UA_Server *server, UA_Session *session,
+                const UA_NodeId *source, const UA_NodeId *destination,
+                UA_Boolean copyOptional);
+
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH

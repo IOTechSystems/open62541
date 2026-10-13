@@ -75,12 +75,6 @@ getNodeIdWithBrowseName(UA_Server *server, const UA_NodeId *origin,
     return UA_STATUSCODE_GOOD;
 }
 
-/* Declared in ua_services_nodemanagement.c; the v1.5 header doesn't export it. */
-UA_StatusCode
-copyAllChildren(UA_Server *server, UA_Session *session,
-                const UA_NodeId *source, const UA_NodeId *destination,
-                UA_Boolean copyOptional);
-
 static UA_StatusCode UA_ConditionEventInfo_copy (const UA_ConditionEventInfo *src, UA_ConditionEventInfo *dest)
 {
     *dest = *src;
