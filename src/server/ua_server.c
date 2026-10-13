@@ -641,6 +641,10 @@ UA_Server_init(UA_Server *server) {
     }
 #endif
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+    initNs0ConditionAndAlarms(server);
+#endif
+
     unlockServer(server);
     return server;
 

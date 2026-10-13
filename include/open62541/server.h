@@ -1712,6 +1712,641 @@ UA_Server_setServerOnNetworkCallback(UA_Server *server,
  * ---------------------------------- */
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+
+typedef UA_StatusCode (*UA_ConditionCallbackFn)(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    void *context
+);
+
+typedef struct UA_ConditionCallbacks {
+    UA_ConditionCallbackFn onAcked;
+    UA_ConditionCallbackFn onConfirmed;
+    UA_ConditionCallbackFn onActive;
+    UA_ConditionCallbackFn onInactive;
+} UA_ConditionCallbacks;
+
+typedef struct UA_ConditionEventInfo {
+    UA_LocalizedText message;
+    UA_UInt16 severity;
+    UA_Boolean hasSeverity;
+    UA_StatusCode quality;
+    UA_Boolean hasQuality;
+    UA_Boolean noEvent;
+} UA_ConditionEventInfo;
+
+typedef UA_StatusCode (*UA_ConditionEvaluateFn)(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    void *conditionCtx,
+    const void *input
+);
+
+typedef struct UA_ConditionEvaluateFns
+{
+    /* Get the input value for the condition. The pointer returned from this function
+     * will be passed to 'evaluate' and 'inputFree`. */
+    void *(*getInput)(UA_Server *server, const UA_NodeId *conditionId, void *conditionCtx);
+    void (*inputFree)(void *sourceInput, void *conditionCtx);
+    UA_ConditionEvaluateFn evaluate;
+} UA_ConditionEvaluateFns;
+
+typedef struct UA_CreateConditionProperties
+{
+    UA_NodeId sourceNode;
+    UA_LocalizedText displayName;
+    UA_LocalizedText description;
+    UA_NodeId parentNodeId;
+    UA_NodeId hierarchialReferenceType;
+    UA_QualifiedName browseName;
+    UA_Boolean canBranch;
+} UA_CreateConditionProperties;
+
+typedef UA_StatusCode (*UA_ConditionTypeSetupFn)(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    const void *userdata
+);
+
+/* Create condition instance. The function checks first whether the passed
+ * conditionType is a subType of ConditionType. Then checks whether the
+ * condition source has HasEventSource reference to its parent. If not, a
+ * HasEventSource reference will be created between condition source and server
+ * object. To expose the condition in address space, a hierarchical
+ * ReferenceType should be passed to create the reference to condition source.
+ * Otherwise, UA_NODEID_NULL should be passed to make the condition not exposed.
+ *
+ * @param server The server object
+ * @param conditionId The NodeId of the requested Condition Object. When passing
+ *        UA_NODEID_NUMERIC(X,0) an unused nodeid in namespace X will be used.
+ *        E.g. passing UA_NODEID_NULL will result in a NodeId in namespace 0.
+ * @param conditionType The NodeId of the node representation of the ConditionType
+ * @param conditionName The name of the condition to be created
+ * @param conditionSource The NodeId of the Condition Source (Parent of the Condition)
+ * @param hierarchialReferenceType The NodeId of Hierarchical ReferenceType
+ *                                 between Condition and its source
+ * @param outConditionId The NodeId of the created Condition
+ * @return The StatusCode of the UA_Server_createCondition method */
+UA_StatusCode UA_EXPORT
+__UA_Server_createCondition(
+    UA_Server *server,
+    const UA_NodeId conditionId,
+    const UA_NodeId conditionType,
+    const UA_CreateConditionProperties *conditionProperties,
+    UA_ConditionTypeSetupFn setupNodesFn,
+    UA_ConditionTypeSetupFn initNodesFn,
+    const void *setupData,
+    UA_NodeId *outConditionId
+);
+
+UA_StatusCode UA_EXPORT
+__UA_Server_addCondition_begin(
+    UA_Server *server,
+    const UA_NodeId conditionId,
+    const UA_NodeId conditionType,
+    const UA_CreateConditionProperties *properties,
+    UA_NodeId *outNodeId
+);
+
+UA_StatusCode UA_EXPORT
+__UA_Server_addCondition_finish(
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    const UA_NodeId *conditionType,
+    const UA_CreateConditionProperties *conditionProperties,
+    UA_ConditionTypeSetupFn setupNodesFn,
+    UA_ConditionTypeSetupFn initNodesFn,
+    const void *setupNodesUserData
+);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setEvaluateFns(UA_Server *server, UA_NodeId conditionId, UA_ConditionEvaluateFns fns);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setCallbacks(UA_Server *server, UA_NodeId conditionId, const UA_ConditionCallbacks *callback);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setContext(UA_Server *server, UA_NodeId conditionId, void *conditionContext);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_getContext(UA_Server *server, UA_NodeId conditionId, void **conditionContext);
+
+/*
+    Condition Methods
+*/
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_enable(UA_Server *server, UA_NodeId conditionId, UA_Boolean enable, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_acknowledge(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_confirm(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_suppress(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_unsuppress(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_reset (UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_removeFromService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_placeInService(UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_unshelve (UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_oneShotShelve (UA_Server *server, UA_NodeId conditionId, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_timedShelve (UA_Server *server, UA_NodeId conditionId, UA_Duration shelvingTime, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo);
+
+/*
+ * Condition State manipulation util functions
+*/
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setAckedState (UA_Server *server, UA_NodeId conditionId, UA_Boolean acked);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_setConfirmedState (UA_Server *server, UA_NodeId conditionId, UA_Boolean confirmed);
+
+/*
+    Condition Evaluation and Event Generation
+*/
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_evaluateRetainState (UA_Server *server, UA_NodeId conditionId);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_notifyStateChange(UA_Server *server, UA_NodeId condition, const UA_ConditionEventInfo *info);
+
+UA_StatusCode UA_EXPORT
+UA_Server_Condition_updateActive(UA_Server *server, UA_NodeId conditionId,
+                                 const UA_ConditionEventInfo *info, UA_Boolean isActive);
+
+
+typedef UA_StatusCode (*UA_ConditionBranchIterCb)(
+    UA_Server *server,
+    const UA_NodeId *conditionBranchId,
+    void *conditionContext,
+    void *iterCtx
+);
+
+void UA_EXPORT
+UA_Server_Condition_iterBranches (UA_Server *server, UA_NodeId conditionId,
+                                  UA_ConditionBranchIterCb iterFn, void *iterCtx);
+
+/* Delete a condition from the address space and the internal structures.
+ *
+ * @param server The server object
+ * @param condition The NodeId of the node representation of the Condition Instance
+ * @return ``UA_STATUSCODE_GOOD`` on success */
+UA_StatusCode UA_EXPORT
+UA_Server_deleteCondition(UA_Server *server, UA_NodeId condition);
+
+typedef struct UA_AcknowledgeableConditionProperties
+{
+    UA_Boolean confirmable;
+} UA_AcknowledgeableConditionProperties;
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                         const UA_AcknowledgeableConditionProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                         const UA_AcknowledgeableConditionProperties *properties);
+
+typedef struct UA_AlarmConditionProperties
+{
+    UA_AcknowledgeableConditionProperties acknowledgeableConditionProperties;
+    UA_NodeId inputNode;
+    UA_Boolean isLatching;
+    UA_Boolean isSuppressible;
+    UA_Boolean isServiceable;
+    UA_Boolean isShelvable;
+    UA_Boolean hasMaxTimeShelved;
+    UA_Duration maxTimeShelved;
+    UA_Boolean hasOnDelay;
+    UA_Duration onDelay;
+    UA_Boolean hasOffDelay;
+    UA_Duration offDelay;
+    UA_Boolean hasReAlarmTime;
+    UA_Duration reAlarmTime;
+} UA_AlarmConditionProperties;
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupAlarmConditionNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                              const UA_AlarmConditionProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initAlarmConditionNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                              const UA_AlarmConditionProperties *properties);
+
+typedef struct UA_DiscrepancyAlarmProperties
+{
+    UA_AlarmConditionProperties alarmConditionProperties;
+    UA_Variant targetValue;
+    UA_Duration expectedTime;
+    UA_Boolean hasTolerance;
+    UA_Double tolerance;
+} UA_DiscrepancyAlarmProperties;
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                    const UA_DiscrepancyAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                    const UA_DiscrepancyAlarmProperties *properties);
+
+static inline UA_StatusCode
+UA_Server_createDiscrepancyAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_AlarmConditionProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server,
+        conditionId,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_DISCREPANCYALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupDiscrepancyAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initDiscrepancyAlarmNodes,
+        properties,
+        outConditionId
+    );
+}
+
+typedef struct UA_OffNormalAlarmProperties
+{
+    UA_AlarmConditionProperties alarmConditionProperties;
+    UA_NodeId normalState;
+} UA_OffNormalAlarmProperties;
+
+UA_StatusCode
+UA_Server_setupOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_OffNormalAlarmProperties *properties);
+
+UA_StatusCode
+UA_Server_initOffNormalAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_OffNormalAlarmProperties *properties);
+
+static inline UA_StatusCode
+UA_Server_createOffNormalAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_OffNormalAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition (
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_OFFNORMALALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupOffNormalAlarmNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initOffNormalAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+static inline UA_StatusCode
+UA_Server_createInstrumentDiagnosticAlarmType(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_OffNormalAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition (
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_INSTRUMENTDIAGNOSTICALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupOffNormalAlarmNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initOffNormalAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+static inline UA_StatusCode
+UA_Server_createSystemOffNormalAlarmType(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_OffNormalAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition (
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_SYSTEMOFFNORMALALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupOffNormalAlarmNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initOffNormalAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+static inline UA_StatusCode
+UA_Server_createTripAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_OffNormalAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition (
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_TRIPALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupOffNormalAlarmNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initOffNormalAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+static inline UA_StatusCode
+UA_Server_createInstrumentDiagnosticalAlarmType(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_OffNormalAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition (
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_INSTRUMENTDIAGNOSTICALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupOffNormalAlarmNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initOffNormalAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+#define UA_LIMITSTATE_LOWLOWSTATEBIT 1
+#define UA_LIMITSTATE_LOWSTATEBIT 2
+#define UA_LIMITSTATE_HIGHSTATEBIT 3
+#define UA_LIMITSTATE_HIGHHIGHSTATEBIT 4
+
+#define UA_LIMITSTATE_CHECK(state, bit) (((state) >> (bit)) & 1)
+#define UA_LIMITSTATE_SET(state, bit) ((state) |= 1 << (bit))
+
+typedef UA_Byte UA_LimitState;
+
+UA_StatusCode
+UA_Server_ExclusiveLimitAlarmEvaluateLimitState (UA_Server *server, const UA_NodeId *conditionId, UA_Double input,
+                                                 UA_LimitState *stateOut, UA_Boolean *stateChanged);
+
+UA_StatusCode
+UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (UA_Server *server, const UA_NodeId *conditionId, UA_Double input,
+                                                    UA_LimitState *stateOut, UA_Boolean *stateChanged);
+
+typedef struct UA_LimitAlarmProperties
+{
+    UA_AlarmConditionProperties alarmConditionProperties;
+
+    UA_Boolean hasHighHighLimit;
+    UA_Double highHighLimit;
+    UA_Boolean hasHighLimit;
+    UA_Double highLimit;
+    UA_Boolean hasLowLimit;
+    UA_Double lowLimit;
+    UA_Boolean hasLowLowLimit;
+    UA_Double lowLowLimit;
+
+    UA_Boolean hasBaseHighHighLimit;
+    UA_Double baseHighHighLimit;
+    UA_Boolean hasBaseHighLimit;
+    UA_Double baseHighLimit;
+    UA_Boolean hasBaseLowLimit;
+    UA_Double baseLowLimit;
+    UA_Boolean hasBaseLowLowLimit;
+    UA_Double baseLowLowLimit;
+
+    UA_Boolean hasHighHighDeadband;
+    UA_Double highHighDeadband;
+    UA_Boolean hasHighDeadband;
+    UA_Double highDeadband;
+    UA_Boolean hasLowDeadband;
+    UA_Double lowDeadband;
+    UA_Boolean hasLowLowDeadband;
+    UA_Double lowLowDeadband;
+
+    UA_Boolean hasSeverityHighHigh;
+    UA_UInt16 severityHighHigh;
+    UA_Boolean hasSeverityHigh;
+    UA_UInt16 severityHigh;
+    UA_Boolean hasSeverityLow;
+    UA_UInt16 severityLow;
+    UA_Boolean hasSeverityLowLow;
+    UA_UInt16 severityLowLow;
+} UA_LimitAlarmProperties;
+
+UA_StatusCode
+UA_Server_setupExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
+
+UA_StatusCode
+UA_Server_initExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
+
+UA_StatusCode
+UA_Server_setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
+
+UA_StatusCode
+UA_Server_initNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_exclusiveLimitAlarmEvaluate_default (
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    void *context,
+    const UA_Double *input
+);
+
+UA_StatusCode UA_EXPORT
+UA_Server_nonExclusiveLimitAlarmEvaluate_default (
+    UA_Server *server,
+    const UA_NodeId *conditionId,
+    void *context,
+    const UA_Double *input
+);
+
+typedef UA_LimitAlarmProperties UA_LevelAlarmProperties;
+
+static inline UA_StatusCode
+UA_Server_createNonExclusiveLevelAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_LevelAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELEVELALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupNonExclusiveLimitAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initNonExclusiveLimitAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+static inline UA_StatusCode
+UA_Server_createExclusiveLevelAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_LevelAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVELEVELALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupExclusiveLimitAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initExclusiveLimitAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+typedef struct UA_DeviationAlarmProperties
+{
+    UA_LimitAlarmProperties limitAlarmProperties;
+    UA_NodeId setpointNode;
+    UA_Boolean hasBaseSetpointNode;
+    UA_NodeId baseSetpointNode;
+} UA_DeviationAlarmProperties;
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+
+static inline UA_StatusCode
+UA_Server_createExclusiveDeviationAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_DeviationAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVEDEVIATIONALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupExclusiveDeviationAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initExclusiveDeviationAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initNonExclusiveDeviationAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                    const UA_DeviationAlarmProperties *properties);
+
+static inline UA_StatusCode
+UA_Server_createNonExclusiveDeviationAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_DeviationAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVEDEVIATIONALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupNonExclusiveDeviationAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initNonExclusiveDeviationAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+typedef struct UA_RateOfChangeAlarmProperties
+{
+    UA_LimitAlarmProperties limitAlarmProperties;
+    UA_Boolean hasEngineeringUnits;
+    UA_EUInformation engineeringUnits;
+} UA_RateOfChangeAlarmProperties;
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                       const UA_RateOfChangeAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                       const UA_RateOfChangeAlarmProperties *properties);
+
+static inline UA_StatusCode
+UA_Server_createExclusiveRateOfChangeAlarm (
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_RateOfChangeAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_EXCLUSIVERATEOFCHANGEALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupExclusiveRateOfChangeAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initExclusiveRateOfChangeAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+UA_StatusCode UA_EXPORT
+UA_Server_setupNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                       const UA_RateOfChangeAlarmProperties *properties);
+
+UA_StatusCode UA_EXPORT
+UA_Server_initNonExclusiveRateOfChangeAlarmNodes (UA_Server *server, const UA_NodeId *condition,
+                                       const UA_RateOfChangeAlarmProperties *properties);
+
+static inline UA_StatusCode
+UA_Server_createNonExclusiveRateOfChangeAlarm(
+    UA_Server *server,
+    UA_NodeId conditionId,
+    const UA_CreateConditionProperties *conditionProperties,
+    const UA_RateOfChangeAlarmProperties *properties,
+    UA_NodeId* outConditionId
+)
+{
+    return __UA_Server_createCondition(
+        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVERATEOFCHANGEALARMTYPE),
+        conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupNonExclusiveRateOfChangeAlarmNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initNonExclusiveRateOfChangeAlarmNodes,
+        properties, outConditionId
+    );
+}
+
+
+
+
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+
+
+
+#else
+
 typedef enum UA_TwoStateVariableCallbackType {
   UA_ENTERING_ENABLEDSTATE,
   UA_ENTERING_ACKEDSTATE,
@@ -1909,6 +2544,7 @@ UA_StatusCode UA_EXPORT
 UA_Server_setExpirationDate(UA_Server *server, const UA_NodeId conditionId,
                             UA_ByteString  cert);
 
+#endif
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 /**
@@ -2294,6 +2930,9 @@ struct UA_ServerConfig {
     UA_UInt32 maxRetransmissionQueueSize; /* 0 -> unlimited size */
 # ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
     UA_UInt32 maxEventsPerNode; /* 0 -> unlimited size */
+# endif
+# ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+    UA_Boolean supportsFilteredRetain;
 # endif
 
     /* Limits for MonitoredItems */

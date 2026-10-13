@@ -52,6 +52,14 @@ typedef struct {
 
 #endif /* !UA_ENABLE_SUBSCRIPTIONS */
 
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+/* Forward Declarations */
+typedef ZIP_HEAD(UA_ConditionTree, UA_Condition) UA_ConditionTree;
+typedef ZIP_HEAD(UA_ConditionBranchTree, UA_ConditionBranch) UA_ConditionBranchTree;
+#endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH */
+
+
 /********************/
 /* GDS Transaction  */
 /********************/
@@ -255,7 +263,13 @@ struct UA_Server {
     UA_UInt32 lastSubscriptionId; /* To generate unique SubscriptionIds */
 
 # ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+
+# ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+    UA_ConditionTree conditions;
+    UA_ConditionBranchTree conditionBranches;
+# else
     LIST_HEAD(, UA_ConditionSource) conditionSources;
+# endif
 # endif
 #endif
 
@@ -452,6 +466,40 @@ getAllInterfaces(UA_Server *server, const UA_NodeId *objectNode,
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+
+/*Forward Declaration */
+struct UA_ConditionBranch;
+typedef struct UA_ConditionBranch UA_ConditionBranch;
+
+UA_Boolean isCondition (UA_Server *server, const UA_NodeId *id);
+
+UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId);
+
+UA_StatusCode
+UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
+                  UA_NodeId *outConditionId);
+
+UA_StatusCode
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut);
+
+void
+UA_ConditionList_delete(UA_Server *server);
+
+UA_Boolean
+isConditionOrBranch(UA_Server *server,
+                    const UA_NodeId *condition,
+                    const UA_NodeId *conditionSource,
+                    UA_Boolean *isCallerAC);
+
+void
+initNs0ConditionAndAlarms(UA_Server *server);
+
+#else
+
+
+
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId);
@@ -464,6 +512,7 @@ isConditionOrBranch(UA_Server *server,
                     const UA_NodeId *condition,
                     const UA_NodeId *conditionSource,
                     UA_Boolean *isCallerAC);
+#endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
