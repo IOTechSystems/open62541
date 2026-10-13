@@ -641,7 +641,7 @@ UA_Server_init(UA_Server *server) {
     }
 #endif
 
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
     initNs0ConditionAndAlarms(server);
 #endif
 
@@ -931,10 +931,14 @@ secureChannel_delayedClose(void *application, void *context) {
 
     UA_SecureChannel *channel;
     TAILQ_FOREACH(channel, &info->server->channels, serverEntry) {
+        const UA_SecurityPolicy *policy = channel->securityPolicy;
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
         /* The SecurityPolicy is only set once the OPN handshake is done.
          * Channels still in the HEL/ACK phase have no policy yet. */
-        const UA_SecurityPolicy *policy = channel->securityPolicy;
-        if(policy && UA_NodeId_equal(&policy->certificateTypeId, &(info->certificateTypeId)))
+        if(!policy)
+            continue;
+#endif
+        if(UA_NodeId_equal(&policy->certificateTypeId, &(info->certificateTypeId)))
             UA_SecureChannel_shutdown(channel, UA_SHUTDOWNREASON_CLOSE);
     }
     UA_NodeId_clear(&(info->certificateTypeId));

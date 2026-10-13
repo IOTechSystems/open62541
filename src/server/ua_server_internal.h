@@ -52,13 +52,11 @@ typedef struct {
 
 #endif /* !UA_ENABLE_SUBSCRIPTIONS */
 
-
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
 /* Forward Declarations */
 typedef ZIP_HEAD(UA_ConditionTree, UA_Condition) UA_ConditionTree;
 typedef ZIP_HEAD(UA_ConditionBranchTree, UA_ConditionBranch) UA_ConditionBranchTree;
-#endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH */
-
+#endif
 
 /********************/
 /* GDS Transaction  */
@@ -264,7 +262,7 @@ struct UA_Server {
 
 # ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
-# ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+# ifdef UA_ENABLE_IOTECH_MODIFICATIONS
     UA_ConditionTree conditions;
     UA_ConditionBranchTree conditionBranches;
 # else
@@ -464,16 +462,18 @@ UA_StatusCode
 getAllInterfaces(UA_Server *server, const UA_NodeId *objectNode,
                  UA_NodeId **interfaceNodes, size_t *interfaceNodesSize);
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
 /* Recursively copy the aggregated children of source to destination. If
  * copyOptional is set, optional children are always copied. */
 UA_StatusCode
 copyAllChildren(UA_Server *server, UA_Session *session,
                 const UA_NodeId *source, const UA_NodeId *destination,
                 UA_Boolean copyOptional);
+#endif
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
 
 /*Forward Declaration */
 struct UA_ConditionBranch;
@@ -505,8 +505,6 @@ initNs0ConditionAndAlarms(UA_Server *server);
 
 #else
 
-
-
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
                   UA_NodeId *outConditionId);
@@ -519,7 +517,7 @@ isConditionOrBranch(UA_Server *server,
                     const UA_NodeId *condition,
                     const UA_NodeId *conditionSource,
                     UA_Boolean *isCallerAC);
-#endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
+#endif /* UA_ENABLE_IOTECH_MODIFICATIONS */
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 

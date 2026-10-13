@@ -431,7 +431,7 @@ if(UA_ENABLE_SUBSCRIPTIONS)
 endif()
 
 if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
-    if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH)
+    if(UA_ENABLE_IOTECH_MODIFICATIONS)
       ua_add_test(server/check_server_alarmsconditions_iotech.c)
     else()
       ua_add_test(server/check_server_alarmsconditions.c)

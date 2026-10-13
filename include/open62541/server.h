@@ -1713,7 +1713,7 @@ UA_Server_setServerOnNetworkCallback(UA_Server *server,
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
 
 /* Get the nodeId of the direct child of origin with the given browse name.
  * The returned nodeId must be cleared by the caller.
@@ -2955,7 +2955,7 @@ struct UA_ServerConfig {
 # ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
     UA_UInt32 maxEventsPerNode; /* 0 -> unlimited size */
 # endif
-# ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+# ifdef UA_ENABLE_IOTECH_MODIFICATIONS
     UA_Boolean supportsFilteredRetain;
 # endif
 

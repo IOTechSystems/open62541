@@ -10,7 +10,7 @@
 #include "ua_server_internal.h"
 #include "ua_subscription.h"
 
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
 
 /* ----------------------------------------------------------------------------
  * v1.4 → v1.5 port: helpers that were part of ua_services_attribute.c /
@@ -4950,4 +4950,4 @@ UA_Server_nonExclusiveLimitAlarmEvaluate_default (
     return retval;
 }
 
-#endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH */
+#endif /* UA_ENABLE_IOTECH_MODIFICATIONS && UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */

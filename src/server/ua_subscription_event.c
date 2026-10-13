@@ -1446,7 +1446,7 @@ static UA_StatusCode
 UA_MonitoredItem_addEvent(UA_MonitoredItem *mon, UA_FilterEvalContext *ctx) {
     /* Evaluate the where clause */
     UA_StatusCode res = evaluateWhereClause(ctx);
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
     /* Condition events are filtered per MonitoredItem by the A&C logic. That
      * also handles where-clause misses (SupportsFilteredRetain, Part 9 5.5.2). */
     UA_Boolean overwriteRetain = false;
@@ -1482,7 +1482,7 @@ UA_MonitoredItem_addEvent(UA_MonitoredItem *mon, UA_FilterEvalContext *ctx) {
         return res;
     }
 
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
     /* The event is sent because the Condition no longer passes the where
      * clause. Report Retain as false to this MonitoredItem. */
     if(overwriteRetain) {

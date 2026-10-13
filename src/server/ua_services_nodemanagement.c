@@ -662,6 +662,12 @@ endChildInstantiation(UA_Server *server) {
     server->nodeInstantiationDepth--;
 }
 
+#ifndef UA_ENABLE_IOTECH_MODIFICATIONS
+static UA_StatusCode
+copyAllChildren(UA_Server *server, UA_Session *session,
+                const UA_NodeId *source, const UA_NodeId *destination);
+#endif
+
 static void
 Operation_addReference(UA_Server *server, UA_Session *session, void *context,
                        const UA_AddReferencesItem *item, UA_StatusCode *retval);
@@ -702,7 +708,11 @@ addInterfaceChildren(UA_Server *server, UA_Session *session,
 
     /* Copy members of the type and supertypes (and instantiate them) */
     for(size_t i = 0; i < hierarchySize; ++i) {
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
         retval = copyAllChildren(server, session, &hierarchy[i], nodeId, false);
+#else
+        retval = copyAllChildren(server, session, &hierarchy[i], nodeId);
+#endif
         if(retval != UA_STATUSCODE_GOOD) {
             UA_Array_delete(hierarchy, hierarchySize, &UA_TYPES[UA_TYPES_NODEID]);
             return retval;
@@ -728,8 +738,12 @@ addInterfaceChildren(UA_Server *server, UA_Session *session,
 static UA_StatusCode
 copyObjectVariableChild(UA_Server *server, UA_Session *session,
                         const UA_NodeId *destinationNodeId,
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
                         const UA_ReferenceDescription *rd,
                         UA_Boolean copyOptional) {
+#else
+                        const UA_ReferenceDescription *rd) {
+#endif
     /* This creates a new logical node from an instance declaration. It is not
      * an editable replacement of the source node, so runtime associations such
      * as attached MonitoredItems must not be copied. */
@@ -830,8 +844,12 @@ copyObjectVariableChild(UA_Server *server, UA_Session *session,
     /* For the new child, recursively copy the members of the original. No
      * typechecking is performed here. Assuming that the original is
      * consistent. */
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
     res = copyAllChildren(server, session, &rd->nodeId.nodeId, &newNodeId,
                           copyOptional);
+#else
+    res = copyAllChildren(server, session, &rd->nodeId.nodeId, &newNodeId);
+#endif
     if(res != UA_STATUSCODE_GOOD)
         goto errout;
 
@@ -852,8 +870,12 @@ copyObjectVariableChild(UA_Server *server, UA_Session *session,
 static UA_StatusCode
 copyChild(UA_Server *server, UA_Session *session,
           const UA_NodeId *destinationNodeId,
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
           const UA_ReferenceDescription *rd,
           UA_Boolean copyOptional) {
+#else
+          const UA_ReferenceDescription *rd) {
+#endif
     UA_assert(session);
     UA_LOCK_ASSERT(&server->serviceMutex);
 
@@ -874,8 +896,13 @@ copyChild(UA_Server *server, UA_Session *session,
             retval = beginChildInstantiation(server, session, destinationNodeId,
                                              &rd->nodeId.nodeId);
             if(retval == UA_STATUSCODE_GOOD) {
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
                 retval = copyAllChildren(server, session, &rd->nodeId.nodeId,
                                          &existingChild, false);
+#else
+                retval = copyAllChildren(server, session, &rd->nodeId.nodeId,
+                                         &existingChild);
+#endif
                 endChildInstantiation(server);
             }
         }
@@ -889,7 +916,12 @@ copyChild(UA_Server *server, UA_Session *session,
 
     /* Is the child mandatory? If not, ask callback whether child should be instantiated.
      * If not, skip. */
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    /* copyOptional: copy optional children without asking the callback */
     if(!copyOptional && !isMandatoryChild(server, session, &rd->nodeId.nodeId)) {
+#else
+    if(!isMandatoryChild(server, session, &rd->nodeId.nodeId)) {
+#endif
         if(!server->config.nodeLifecycle ||
            !server->config.nodeLifecycle->createOptionalChild)
             return UA_STATUSCODE_GOOD;
@@ -920,21 +952,31 @@ copyChild(UA_Server *server, UA_Session *session,
                                          &rd->nodeId.nodeId);
         if(retval != UA_STATUSCODE_GOOD)
             return retval;
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
         retval = copyObjectVariableChild(server, session, destinationNodeId, rd,
                                          copyOptional);
+#else
+        retval = copyObjectVariableChild(server, session, destinationNodeId, rd);
+#endif
         endChildInstantiation(server);
     }
 
     return retval;
 }
 
-/* Copy any children of Node sourceNodeId to another node destinationNodeId.
- * If copyOptional is set, optional children are copied without consulting the
+/* Copy any children of Node sourceNodeId to another node destinationNodeId. */
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+/* If copyOptional is set, optional children are copied without consulting the
  * createOptionalChild callback. */
 UA_StatusCode
 copyAllChildren(UA_Server *server, UA_Session *session,
                 const UA_NodeId *source, const UA_NodeId *destination,
                 UA_Boolean copyOptional) {
+#else
+static UA_StatusCode
+copyAllChildren(UA_Server *server, UA_Session *session,
+                const UA_NodeId *source, const UA_NodeId *destination) {
+#endif
     /* Browse to get all children of the source */
     UA_BrowseDescription bd;
     UA_BrowseDescription_init(&bd);
@@ -956,7 +998,11 @@ copyAllChildren(UA_Server *server, UA_Session *session,
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     for(size_t i = 0; i < br.referencesSize; ++i) {
         UA_ReferenceDescription *rd = &br.references[i];
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
         retval = copyChild(server, session, destination, rd, copyOptional);
+#else
+        retval = copyChild(server, session, destination, rd);
+#endif
         if(retval != UA_STATUSCODE_GOOD)
             break;
     }
@@ -979,7 +1025,11 @@ addTypeChildren(UA_Server *server, UA_Session *session,
 
     /* Copy members of the type and supertypes (and instantiate them) */
     for(size_t i = 0; i < hierarchySize; ++i) {
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
         retval = copyAllChildren(server, session, &hierarchy[i], nodeId, false);
+#else
+        retval = copyAllChildren(server, session, &hierarchy[i], nodeId);
+#endif
         if(retval != UA_STATUSCODE_GOOD)
             break;
     }
