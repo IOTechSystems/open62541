@@ -1713,6 +1713,8 @@ UA_Server_setServerOnNetworkCallback(UA_Server *server,
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
+
 typedef UA_StatusCode (*UA_ConditionCallbackFn)(
     UA_Server *server,
     const UA_NodeId *conditionId,
@@ -2339,9 +2341,6 @@ UA_Server_createNonExclusiveRateOfChangeAlarm(
 
 
 
-
-
-#ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS_IOTECH
 
 
 
