@@ -3010,7 +3010,8 @@ refreshLogic(UA_Server *server, UA_Session *session, UA_Subscription *sub,
     };
     ZIP_ITER (UA_ConditionBranchTree, &server->conditionBranches, refreshIterCallback, &ctx);
 
-    /* 3. Trigger RefreshEndEvent */
+    /* 3. Trigger RefreshEndEvent. Reuses the Session, Subscription and
+     * MonitoredItem of the RefreshStartEvent so both reach the same receivers. */
     ed.eventInstance = NULL;
     ed.sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
     ed.eventType = UA_NODEID_NUMERIC(0, UA_NS0ID_REFRESHENDEVENTTYPE);
