@@ -3328,6 +3328,39 @@ removeFromService2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
     return UA_Server_Condition_removeFromService (server, *objectId, comment, NULL);
 }
 
+/* Shelving methods are called on the ShelvingState object, but may also be
+ * called on the condition directly. Returns a copy of the condition id. */
+static UA_StatusCode
+getShelvingConditionId(UA_Server *server, const UA_NodeId *objectId, UA_NodeId *conditionId)
+{
+    lockServer(server);
+    if (getCondition(server, objectId))
+    {
+        unlockServer(server);
+        return UA_NodeId_copy(objectId, conditionId);
+    }
+
+    UA_BrowseDescription bd;
+    UA_BrowseDescription_init(&bd);
+    bd.browseDirection = UA_BROWSEDIRECTION_INVERSE;
+    bd.includeSubtypes = false;
+    bd.referenceTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_HASCOMPONENT);
+    bd.nodeId = *objectId;
+    UA_UInt32 maxRefs = 1;
+    UA_BrowseResult br;
+    UA_BrowseResult_init(&br);
+    Operation_Browse(server, &server->adminSession, &maxRefs, &bd, &br);
+    UA_StatusCode ret = UA_STATUSCODE_BADNODEIDUNKNOWN;
+    if (br.statusCode == UA_STATUSCODE_GOOD && br.referencesSize == 1 &&
+        getCondition(server, &br.references->nodeId.nodeId))
+    {
+        ret = UA_NodeId_copy(&br.references->nodeId.nodeId, conditionId);
+    }
+    UA_BrowseResult_clear(&br);
+    unlockServer(server);
+    return ret;
+}
+
 static UA_StatusCode
 timedShelveMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                                  void *sessionContext, const UA_NodeId *methodId,
@@ -3337,7 +3370,12 @@ timedShelveMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                                  UA_Variant *output)
 {
     UA_Duration *duration = (UA_Duration *)input[0].data;
-    return UA_Server_Condition_timedShelve(server, *objectId, *duration, NULL, NULL);
+    UA_NodeId conditionId;
+    UA_StatusCode ret = getShelvingConditionId(server, objectId, &conditionId);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    ret = UA_Server_Condition_timedShelve(server, conditionId, *duration, NULL, NULL);
+    UA_NodeId_clear(&conditionId);
+    return ret;
 }
 
 static UA_StatusCode
@@ -3350,7 +3388,12 @@ timedShelve2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
 {
     UA_Duration *duration = (UA_Duration *)input[0].data;
     UA_LocalizedText *comment = (UA_LocalizedText *)input[1].data;
-    return UA_Server_Condition_timedShelve(server, *objectId, *duration, comment, NULL);
+    UA_NodeId conditionId;
+    UA_StatusCode ret = getShelvingConditionId(server, objectId, &conditionId);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    ret = UA_Server_Condition_timedShelve(server, conditionId, *duration, comment, NULL);
+    UA_NodeId_clear(&conditionId);
+    return ret;
 }
 
 static UA_StatusCode
@@ -3361,8 +3404,12 @@ oneShotShelveMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                           const UA_Variant *input, size_t outputSize,
                           UA_Variant *output)
 {
-//    assert (false);
-    return UA_Server_Condition_oneShotShelve (server, *objectId, NULL, NULL);
+    UA_NodeId conditionId;
+    UA_StatusCode ret = getShelvingConditionId(server, objectId, &conditionId);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    ret = UA_Server_Condition_oneShotShelve (server, conditionId, NULL, NULL);
+    UA_NodeId_clear(&conditionId);
+    return ret;
 }
 
 static UA_StatusCode
@@ -3374,7 +3421,12 @@ oneShotShelve2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                              UA_Variant *output)
 {
     UA_LocalizedText *comment = (UA_LocalizedText *)input[0].data;
-    return UA_Server_Condition_oneShotShelve (server, *objectId, comment, NULL);
+    UA_NodeId conditionId;
+    UA_StatusCode ret = getShelvingConditionId(server, objectId, &conditionId);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    ret = UA_Server_Condition_oneShotShelve (server, conditionId, comment, NULL);
+    UA_NodeId_clear(&conditionId);
+    return ret;
 }
 
 
@@ -3386,7 +3438,12 @@ unshelveMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                             const UA_Variant *input, size_t outputSize,
                             UA_Variant *output)
 {
-    return UA_Server_Condition_unshelve (server, *objectId, NULL, NULL);
+    UA_NodeId conditionId;
+    UA_StatusCode ret = getShelvingConditionId(server, objectId, &conditionId);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    ret = UA_Server_Condition_unshelve (server, conditionId, NULL, NULL);
+    UA_NodeId_clear(&conditionId);
+    return ret;
 }
 
 
@@ -3399,7 +3456,12 @@ unshelve2MethodCallback(UA_Server *server, const UA_NodeId *sessionId,
                        UA_Variant *output)
 {
     UA_LocalizedText *comment = (UA_LocalizedText *)input[0].data;
-    return UA_Server_Condition_unshelve (server, *objectId, comment, NULL);
+    UA_NodeId conditionId;
+    UA_StatusCode ret = getShelvingConditionId(server, objectId, &conditionId);
+    if (ret != UA_STATUSCODE_GOOD) return ret;
+    ret = UA_Server_Condition_unshelve (server, conditionId, comment, NULL);
+    UA_NodeId_clear(&conditionId);
+    return ret;
 }
 
 
@@ -4468,11 +4530,11 @@ void initNs0ConditionAndAlarms (UA_Server *server)
         {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_REMOVEFROMSERVICE2), .cb = removeFromService2MethodCallback},
 
         {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_UNSHELVE), .cb = unshelveMethodCallback},
-        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_UNSHELVE2), .cb = unshelve2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVE2), .cb = unshelve2MethodCallback},
         {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_TIMEDSHELVE), .cb = timedShelveMethodCallback},
-        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_TIMEDSHELVE2), .cb = timedShelve2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVE2), .cb = timedShelve2MethodCallback},
         {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_ONESHOTSHELVE), .cb = oneShotShelveMethodCallback},
-        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE_SHELVINGSTATE_ONESHOTSHELVE2), .cb = oneShotShelve2MethodCallback},
+        {.id = UA_NODEID_NUMERIC(0, UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVE2), .cb = oneShotShelve2MethodCallback},
     };
 
     for (size_t i=0; i< sizeof(condition_methods)/sizeof(condition_methods[0]); i++)

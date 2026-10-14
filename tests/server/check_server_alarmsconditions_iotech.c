@@ -1417,6 +1417,108 @@ START_TEST(shelveMethodCalledOnCondition) {
     UA_NodeId_clear(&shelvingState);
 } END_TEST
 
+static UA_StatusCode
+callShelvingMethod(const UA_NodeId *shelvingState, char *method,
+                   size_t inputSize, UA_Variant *input) {
+    UA_NodeId methodId;
+    UA_StatusCode status = UA_Server_getNodeIdWithBrowseName(acserver, shelvingState, UA_QUALIFIEDNAME(0, method), &methodId);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_CallMethodRequest request;
+    UA_CallMethodRequest_init(&request);
+    request.objectId = *shelvingState;
+    request.methodId = methodId;
+    request.inputArgumentsSize = inputSize;
+    request.inputArguments = input;
+
+    UA_CallMethodResult result = UA_Server_call(acserver, &request);
+    status = result.statusCode;
+    UA_CallMethodResult_clear(&result);
+    UA_NodeId_clear(&methodId);
+    return status;
+}
+
+static void
+assertShelvingState(const UA_NodeId *shelvingState, UA_UInt32 expectedState) {
+    UA_NodeId currentState;
+    UA_StatusCode status = UA_Server_getNodeIdWithBrowseName(acserver, shelvingState, UA_QUALIFIEDNAME(0, "CurrentState"), &currentState);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_NodeId currentStateId;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &currentState, UA_QUALIFIEDNAME(0, "Id"), &currentStateId);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_Variant value;
+    status = UA_Server_readValue(acserver, currentStateId, &value);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert(UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_NODEID]));
+    UA_NodeId expected = UA_NODEID_NUMERIC(0, expectedState);
+    ck_assert(UA_NodeId_equal((UA_NodeId *) value.data, &expected));
+    UA_Variant_clear(&value);
+    UA_NodeId_clear(&currentStateId);
+    UA_NodeId_clear(&currentState);
+}
+
+/* The ShelvedStateMachine Methods are called with the ShelvingState as the
+ * ObjectId, including the Methods with a Comment argument */
+START_TEST(shelveMethodCalledOnShelvingState) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+    alarmProperties.isShelvable = true;
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode status = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_NodeId shelvingState;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &conditionInstance, UA_QUALIFIEDNAME(0, "ShelvingState"), &shelvingState);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_LocalizedText comment = UA_LOCALIZEDTEXT("en", "test comment");
+    UA_Duration shelvingTime = 10000.0;
+
+    UA_Variant timedShelveInput;
+    UA_Variant_setScalar(&timedShelveInput, &shelvingTime, &UA_TYPES[UA_TYPES_DURATION]);
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "TimedShelve", 1, &timedShelveInput), UA_STATUSCODE_GOOD);
+    assertShelvingState(&shelvingState, UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVED);
+
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "Unshelve", 0, NULL), UA_STATUSCODE_GOOD);
+    assertShelvingState(&shelvingState, UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVED);
+
+    UA_Variant timedShelve2Input[2];
+    UA_Variant_setScalar(&timedShelve2Input[0], &shelvingTime, &UA_TYPES[UA_TYPES_DURATION]);
+    UA_Variant_setScalar(&timedShelve2Input[1], &comment, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "TimedShelve2", 2, timedShelve2Input), UA_STATUSCODE_GOOD);
+    assertShelvingState(&shelvingState, UA_NS0ID_SHELVEDSTATEMACHINETYPE_TIMEDSHELVED);
+
+    UA_Variant commentInput;
+    UA_Variant_setScalar(&commentInput, &comment, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "Unshelve2", 1, &commentInput), UA_STATUSCODE_GOOD);
+    assertShelvingState(&shelvingState, UA_NS0ID_SHELVEDSTATEMACHINETYPE_UNSHELVED);
+
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "OneShotShelve2", 1, &commentInput), UA_STATUSCODE_GOOD);
+    assertShelvingState(&shelvingState, UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVED);
+
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "Unshelve", 0, NULL), UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "OneShotShelve", 0, NULL), UA_STATUSCODE_GOOD);
+    assertShelvingState(&shelvingState, UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVED);
+
+    UA_NodeId_clear(&shelvingState);
+} END_TEST
+
 #endif
 
 int main(void) {
@@ -1432,6 +1534,7 @@ int main(void) {
     tcase_add_test(tc, exclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
+    tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);
 
