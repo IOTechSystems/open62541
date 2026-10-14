@@ -4539,24 +4539,6 @@ void initNs0ConditionAndAlarms (UA_Server *server)
         retval |= setMethodNode_callback(server, condition_methods[i].id, condition_methods[i].cb);
     }
 
-
-    /* change Refresh Events IsAbstract = false
-     * so abstract Events : RefreshStart and RefreshEnd could be created */
-    UA_NodeId refreshStartEventTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_REFRESHSTARTEVENTTYPE);
-    UA_NodeId refreshEndEventTypeNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_REFRESHENDEVENTTYPE);
-
-    UA_Boolean startAbstract = false;
-    UA_Boolean endAbstract = false;
-    readWithReadValue(server, &refreshStartEventTypeNodeId,
-                      UA_ATTRIBUTEID_ISABSTRACT, &startAbstract);
-    readWithReadValue(server, &refreshEndEventTypeNodeId,
-                      UA_ATTRIBUTEID_ISABSTRACT, &endAbstract);
-
-    UA_Boolean inner = (startAbstract == false && endAbstract == false);
-    if(inner) {
-        writeIsAbstractAttribute(server, refreshStartEventTypeNodeId, false);
-        writeIsAbstractAttribute(server, refreshEndEventTypeNodeId, false);
-    }
 }
 
 void
