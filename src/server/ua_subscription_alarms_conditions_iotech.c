@@ -2967,8 +2967,16 @@ static void *refreshIterCallback (void *userdata, UA_ConditionBranch *branch)
     if (UA_ByteString_equal(&branch->eventId, &UA_BYTESTRING_NULL)) return NULL;
     if (!UA_ConditionBranch_State_Retain(branch, server)) return NULL;
 
+    /* Refreshed events carry the EventId of the last state change so that
+     * methods like Acknowledge and Confirm can still be called with it */
+    UA_KeyValuePair eventIdField;
+    eventIdField.key = UA_QUALIFIEDNAME(0, "/EventId");
+    UA_Variant_setScalar(&eventIdField.value, &branch->eventId, &UA_TYPES[UA_TYPES_BYTESTRING]);
+    UA_KeyValueMap eventFields = {1, &eventIdField};
+
     UA_EventDescription ed = {0};
     ed.eventInstance = &branch->id;
+    ed.eventFields = &eventFields;
     ed.sourceNode = branch->condition->sourceId;
     ed.sessionId = &ctx->session->sessionId;
     ed.subscriptionId = &ctx->sub->subscriptionId;
