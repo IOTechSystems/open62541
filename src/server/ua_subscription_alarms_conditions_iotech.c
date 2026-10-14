@@ -2415,24 +2415,20 @@ UA_Server_Condition_getContext(UA_Server *server, UA_NodeId conditionId, void **
 
 static UA_StatusCode UA_ConditionBranch_createBranch (UA_ConditionBranch *branch, UA_Server *server)
 {
-    UA_NodeId sourceId;
-    UA_NodeId_init (&sourceId);
-    UA_ByteString lastEventId;
-    UA_ByteString_init (&lastEventId);
-
+    /* Branches have the same type as the condition */
     UA_NodeId conditionType = getTypeDefinitionId (server, &branch->id);
     if (UA_NodeId_isNull(&conditionType)) return UA_STATUSCODE_BADINTERNALERROR;
-    conditionType = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
 
     UA_ObjectAttributes oa = UA_ObjectAttributes_default;
     oa.displayName = UA_LOCALIZEDTEXT("en", "ConditionBranch");
     const UA_QualifiedName qn = STATIC_QN("ConditionBranch");
-    UA_NodeId branchId;
+    UA_NodeId branchId = UA_NODEID_NULL;
     UA_StatusCode retval = addNode_begin (server, UA_NODECLASS_OBJECT, UA_NODEID_NULL,
                                           UA_NODEID_NULL, UA_NODEID_NULL, qn, conditionType, &oa, &UA_TYPES[UA_TYPES_OBJECTATTRIBUTES],
                                           NULL,
                                           &branchId
     );
+    UA_NodeId_clear(&conditionType);
     CONDITION_ASSERT_GOTOLABEL(retval,"Adding ConditionBranch failed", fail);
 
     /* Copy the state of the condition */
@@ -2447,12 +2443,10 @@ static UA_StatusCode UA_ConditionBranch_createBranch (UA_ConditionBranch *branch
     CONDITION_ASSERT_GOTOLABEL(retval, "Set BranchId Field failed", fail);
 
     retval = newConditionBranchEntry (server, &branchId, &branch->eventId, branch->condition, false);
-    UA_ByteString_clear(&lastEventId);
     CONDITION_ASSERT_GOTOLABEL(retval, "Creating ConditionBranch entry failed", fail);
     return UA_STATUSCODE_GOOD;
 fail:
-    UA_ByteString_clear(&lastEventId);
-    deleteNode(server, branchId, true);
+    if (!UA_NodeId_isNull(&branchId)) deleteNode(server, branchId, true);
     return retval;
 }
 
