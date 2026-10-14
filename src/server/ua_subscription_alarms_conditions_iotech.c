@@ -1311,10 +1311,11 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
 {
     UA_Boolean overwriteRetain = false;
     UA_Boolean triggerEvent = true;
+    UA_StatusCode status = UA_STATUSCODE_GOOD;
     if (server->config.supportsFilteredRetain)
     {
-        UA_StatusCode ret = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
-        if (ret != UA_STATUSCODE_GOOD) return ret;
+        status = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
+        if (status != UA_STATUSCODE_GOOD) goto DONE;
     }
 
     UA_Boolean enabled = UA_Condition_State_Enabled (branch->condition, server);
@@ -1330,10 +1331,10 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
         /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5#:~:text=However%2C%20no%20Event%20Notifications%20will%20be%20generated%20while%20the%20Condition%20instance%20is%20disabled. */
         triggerEvent = false;
     }
-
+DONE:
     *overwriteRetainOut = overwriteRetain;
     *triggerEventOut = triggerEvent;
-    return UA_STATUSCODE_GOOD;
+    return status;
 }
 
 static UA_Boolean
