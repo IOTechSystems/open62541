@@ -1456,7 +1456,8 @@ UA_MonitoredItem_addEvent(UA_MonitoredItem *mon, UA_FilterEvalContext *ctx) {
         if(res != UA_STATUSCODE_GOOD && res != UA_STATUSCODE_BADNOMATCH)
             return res;
         UA_Boolean triggerEvent = true;
-        res = UA_ConditionBranch_filter(ctx->server, branch, mon->monitoredItemId,
+        res = UA_ConditionBranch_filter(ctx->server, branch, mon->subscription->subscriptionId,
+                                        mon->monitoredItemId,
                                         res == UA_STATUSCODE_GOOD,
                                         &overwriteRetain, &triggerEvent);
         if(res != UA_STATUSCODE_GOOD || !triggerEvent)

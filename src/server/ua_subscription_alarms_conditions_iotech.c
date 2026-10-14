@@ -119,6 +119,8 @@ static void UA_ConditionEventInfo_delete (UA_ConditionEventInfo *p)
 typedef struct UA_ConditionBranchFilterEntry
 {
     LIST_ENTRY (UA_ConditionBranchFilterEntry) listEntry;
+    /* MonitoredItemIds are only unique within a Subscription */
+    UA_UInt32 subscriptionId;
     UA_UInt32 monitoredItemId;
 }UA_ConditionBranchFilterEntry;
 
@@ -575,12 +577,12 @@ getConditionBranchFromConditionAndEvent(
 }
 
 static UA_ConditionBranchFilterEntry*
-UA_ConditionBranch_getFailedFilterEntry (UA_ConditionBranch *branch, UA_UInt32 monId)
+UA_ConditionBranch_getFailedFilterEntry (UA_ConditionBranch *branch, UA_UInt32 subId, UA_UInt32 monId)
 {
     UA_ConditionBranchFilterEntry *entry = NULL;
     LIST_FOREACH(entry, &branch->failedLastFilterList, listEntry)
     {
-        if (entry->monitoredItemId == monId) break;
+        if (entry->subscriptionId == subId && entry->monitoredItemId == monId) break;
     }
     return entry;
 }
@@ -1275,13 +1277,13 @@ UA_Condition_State_getMaxTimeShelved (UA_Condition *condition, UA_Server *server
 }
 
 static UA_StatusCode
-evaluateFilteredRetain (UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+evaluateFilteredRetain (UA_ConditionBranch *branch, UA_UInt32 subId, UA_UInt32 monId, UA_Boolean passed,
                         UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
 {
     UA_Boolean overwriteRetain = false;
     UA_Boolean triggerEvent = true;
     /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5.2#_Ref106692035 */
-    UA_ConditionBranchFilterEntry *entry = UA_ConditionBranch_getFailedFilterEntry(branch, monId);
+    UA_ConditionBranchFilterEntry *entry = UA_ConditionBranch_getFailedFilterEntry(branch, subId, monId);
     if (passed)
     {
         if (entry) LIST_REMOVE(entry, listEntry);
@@ -1296,6 +1298,7 @@ evaluateFilteredRetain (UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean 
     }
     entry = (UA_ConditionBranchFilterEntry*) UA_malloc(sizeof (*entry));
     if (!entry) return UA_STATUSCODE_BADOUTOFMEMORY;
+    entry->subscriptionId = subId;
     entry->monitoredItemId = monId;
     LIST_INSERT_HEAD(&branch->failedLastFilterList, entry, listEntry);
     overwriteRetain = true;
@@ -1306,7 +1309,8 @@ done:
 }
 
 UA_StatusCode
-UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 monId, UA_Boolean passed,
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 subId, UA_UInt32 monId,
+                           UA_Boolean passed,
                            UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut)
 {
     UA_Boolean overwriteRetain = false;
@@ -1314,7 +1318,7 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
     UA_StatusCode status = UA_STATUSCODE_GOOD;
     if (server->config.supportsFilteredRetain)
     {
-        status = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
+        status = evaluateFilteredRetain(branch, subId, monId, passed, &overwriteRetain, &triggerEvent);
         if (status != UA_STATUSCODE_GOOD) goto DONE;
     }
     else if (!passed)
