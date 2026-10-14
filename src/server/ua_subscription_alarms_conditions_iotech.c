@@ -1410,13 +1410,13 @@ UA_ConditionBranch_notifyNewBranchState (UA_ConditionBranch *branch, UA_Server *
 
 static UA_StatusCode
 addTimedCallback(UA_Server *server, UA_ServerCallback callback,
-                 void *data, UA_DateTime date, UA_UInt64 *callbackId) {
+                 void *data, UA_Duration delay_ms, UA_UInt64 *callbackId) {
     UA_LOCK_ASSERT(&server->serviceMutex);
-    /* v1.5 one-shot timer: first execution = baseTime + interval. Pass the
-     * absolute fire-time as baseTime with a zero interval. */
+    /* v1.5 one-shot timer: without a baseTime the first execution is the
+     * EventLoop's monotonic now + interval */
     return server->config.eventLoop->
         addTimer(server->config.eventLoop, (UA_Callback)callback,
-                 server, data, 0.0, &date, UA_TIMERPOLICY_ONCE, callbackId);
+                 server, data, delay_ms, NULL, UA_TIMERPOLICY_ONCE, callbackId);
 }
 
 static void
@@ -1874,7 +1874,7 @@ createUnshelveTimedCallback (UA_Server *server, UA_Condition *condition, UA_Dura
         server,
         onShelvedTimeExpireCallback,
         condition,
-        UA_DateTime_nowMonotonic() + ((UA_DateTime) shelveTime * UA_DATETIME_MSEC),
+        shelveTime,
         &condition->unshelveCallbackId
     );
 }
@@ -2651,7 +2651,7 @@ static void UA_Condition_createReAlarmCallback (UA_Condition *condition, UA_Serv
         server,
         reAlarmCallback,
         condition,
-        UA_DateTime_nowMonotonic() + ((UA_DateTime) reAlarmTime * UA_DATETIME_MSEC),
+        reAlarmTime,
         &condition->reAlarmCallbackId
     );
     if (retval != UA_STATUSCODE_GOOD)
@@ -2768,7 +2768,7 @@ alarmEnteringActive (UA_Server *server, UA_Condition *condition, const UA_Condit
             server,
             onDelayExpiredCallback,
             condition,
-            UA_DateTime_nowMonotonic() + ((UA_DateTime) onDelay * UA_DATETIME_MSEC),
+            onDelay,
             &condition->onDelayCallbackId
         );
         if (retval != UA_STATUSCODE_GOOD)
@@ -2848,7 +2848,7 @@ alarmEnteringInactive (UA_Server *server, UA_Condition *condition, const UA_Cond
         retval = UA_Condition_State_getOffDelay(condition, server, &offDelay);
         if (retval != UA_STATUSCODE_GOOD)
         {
-            CONDITION_LOG_ERROR (retval, "Could not get OnDelay");
+            CONDITION_LOG_ERROR (retval, "Could not get OffDelay");
             return retval;
         }
 
@@ -2869,14 +2869,14 @@ alarmEnteringInactive (UA_Server *server, UA_Condition *condition, const UA_Cond
             server,
             offDelayExpiredCallback,
             condition,
-            UA_DateTime_nowMonotonic() + ((UA_DateTime) offDelay * UA_DATETIME_MSEC),
-            &condition->onDelayCallbackId
+            offDelay,
+            &condition->offDelayCallbackId
         );
         if (retval != UA_STATUSCODE_GOOD)
         {
-            condition->_delayCallbackInfo = NULL;
             UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
-            CONDITION_LOG_ERROR (retval, "Could not add timedCallback for onDelay");
+            condition->_delayCallbackInfo = NULL;
+            CONDITION_LOG_ERROR (retval, "Could not add timedCallback for offDelay");
             return UA_STATUSCODE_BADINTERNALERROR;
         }
         return UA_STATUSCODE_GOOD;

@@ -1519,6 +1519,52 @@ START_TEST(shelveMethodCalledOnShelvingState) {
     UA_NodeId_clear(&shelvingState);
 } END_TEST
 
+/* The Alarm only becomes inactive once the OffDelay has expired and can be
+ * activated again afterwards */
+START_TEST(offDelay) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+    alarmProperties.hasOffDelay = true;
+    alarmProperties.offDelay = 1000.0;
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode status = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_QualifiedName activeStateQN = UA_QUALIFIEDNAME(0, "ActiveState");
+
+    status = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert(isConditionTwoStateVariableInTrueState(acserver, conditionInstance, activeStateQN));
+
+    /* Stays active until the OffDelay expires */
+    status = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert(isConditionTwoStateVariableInTrueState(acserver, conditionInstance, activeStateQN));
+
+    UA_fakeSleep(1500);
+    UA_Server_run_iterate(acserver, false);
+    ck_assert(!isConditionTwoStateVariableInTrueState(acserver, conditionInstance, activeStateQN));
+
+    status = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert(isConditionTwoStateVariableInTrueState(acserver, conditionInstance, activeStateQN));
+} END_TEST
+
 #endif
 
 int main(void) {
@@ -1535,6 +1581,7 @@ int main(void) {
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
+    tcase_add_test(tc, offDelay);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);
 
