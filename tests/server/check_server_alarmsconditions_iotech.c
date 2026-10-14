@@ -1519,6 +1519,49 @@ START_TEST(shelveMethodCalledOnShelvingState) {
     UA_NodeId_clear(&shelvingState);
 } END_TEST
 
+/* Unshelving cancels the TimedShelve timer, so it cannot unshelve a later shelve */
+START_TEST(unshelveCancelsTimedShelve) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+    alarmProperties.isShelvable = true;
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode status = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_NodeId shelvingState;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &conditionInstance, UA_QUALIFIEDNAME(0, "ShelvingState"), &shelvingState);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_Duration shelvingTime = 1000.0;
+    UA_Variant timedShelveInput;
+    UA_Variant_setScalar(&timedShelveInput, &shelvingTime, &UA_TYPES[UA_TYPES_DURATION]);
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "TimedShelve", 1, &timedShelveInput), UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "Unshelve", 0, NULL), UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(callShelvingMethod(&shelvingState, "OneShotShelve", 0, NULL), UA_STATUSCODE_GOOD);
+
+    UA_fakeSleep(1500);
+    UA_Server_run_iterate(acserver, false);
+    assertShelvingState(&shelvingState, UA_NS0ID_SHELVEDSTATEMACHINETYPE_ONESHOTSHELVED);
+
+    UA_NodeId_clear(&shelvingState);
+} END_TEST
+
 /* The Alarm only becomes inactive once the OffDelay has expired and can be
  * activated again afterwards */
 START_TEST(offDelay) {
@@ -1582,6 +1625,7 @@ int main(void) {
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_test(tc, offDelay);
+    tcase_add_test(tc, unshelveCancelsTimedShelve);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);
 

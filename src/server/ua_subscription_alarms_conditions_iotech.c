@@ -221,7 +221,7 @@ static UA_ConditionBranch *UA_Condition_GetBranchWithEventId (UA_Condition *cond
 
 static inline void UA_Condition_removeUnshelveCallback (UA_Condition *condition, UA_Server *server)
 {
-    if (condition->unshelveCallbackId != 0) return;
+    if (condition->unshelveCallbackId == 0) return;
     removeCallback(server, condition->unshelveCallbackId);
     condition->unshelveCallbackId = 0;
 }
@@ -1858,6 +1858,7 @@ static void onShelvedTimeExpireCallback (UA_Server *server, void *data)
 {
     UA_Condition *condition = (UA_Condition *) data;
     lockServer(server);
+    condition->unshelveCallbackId = 0;
     UA_Condition_State_setShelvingStateUnshelved(condition, server);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, SHELVEDTIMEEXPIRED_MESSAGE)
