@@ -492,6 +492,10 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
                            UA_Boolean passed,
                            UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut);
 
+/* Removes the filtered retain state of a deleted MonitoredItem */
+void
+UA_ConditionBranches_removeFilterEntries (UA_Server *server, UA_UInt32 subId, UA_UInt32 monId);
+
 void
 UA_ConditionList_delete(UA_Server *server);
 

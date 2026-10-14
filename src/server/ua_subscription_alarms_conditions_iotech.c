@@ -1308,6 +1308,33 @@ done:
     return UA_STATUSCODE_GOOD;
 }
 
+struct removeFilterEntriesCtx {
+    UA_UInt32 subId;
+    UA_UInt32 monId;
+};
+
+static void *
+removeFilterEntriesIterCallback (void *userdata, UA_ConditionBranch *branch)
+{
+    struct removeFilterEntriesCtx *ctx = (struct removeFilterEntriesCtx *) userdata;
+    UA_ConditionBranchFilterEntry *entry = UA_ConditionBranch_getFailedFilterEntry(branch, ctx->subId, ctx->monId);
+    if (entry)
+    {
+        LIST_REMOVE(entry, listEntry);
+        UA_free(entry);
+    }
+    return NULL;
+}
+
+void
+UA_ConditionBranches_removeFilterEntries (UA_Server *server, UA_UInt32 subId, UA_UInt32 monId)
+{
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    if (!server->config.supportsFilteredRetain) return;
+    struct removeFilterEntriesCtx ctx = {.subId = subId, .monId = monId};
+    ZIP_ITER (UA_ConditionBranchTree, &server->conditionBranches, removeFilterEntriesIterCallback, &ctx);
+}
+
 UA_StatusCode
 UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 subId, UA_UInt32 monId,
                            UA_Boolean passed,
