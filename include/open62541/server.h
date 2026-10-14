@@ -1980,7 +1980,7 @@ UA_Server_initAlarmConditionNodes (UA_Server *server, const UA_NodeId *condition
 typedef struct UA_DiscrepancyAlarmProperties
 {
     UA_AlarmConditionProperties alarmConditionProperties;
-    UA_Variant targetValue;
+    UA_NodeId targetValueNode;
     UA_Duration expectedTime;
     UA_Boolean hasTolerance;
     UA_Double tolerance;

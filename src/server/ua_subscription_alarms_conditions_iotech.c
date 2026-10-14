@@ -3779,7 +3779,7 @@ initDiscrepancyAlarmNodes (UA_Server *server, const UA_NodeId *condition,
     ret = writeObjectProperty_scalar(server, *condition, fieldExpectedTimeQN, &properties->expectedTime, &UA_TYPES[UA_TYPES_DURATION]);
     CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting ExpectedTime value failed",);
 
-    ret = writeObjectProperty_scalar(server, *condition, fieldTargetValueNodeQN, &properties->targetValue, &UA_TYPES[UA_TYPES_NODEID]);
+    ret = writeObjectProperty_scalar(server, *condition, fieldTargetValueNodeQN, &properties->targetValueNode, &UA_TYPES[UA_TYPES_NODEID]);
     CONDITION_ASSERT_RETURN_RETVAL(ret, "Setting TargetValueNode value failed",);
 
     if (properties->hasTolerance)
