@@ -2084,7 +2084,7 @@ UA_Server_createTripAlarm(
 }
 
 static inline UA_StatusCode
-UA_Server_createInstrumentDiagnosticalAlarmType(
+UA_Server_createInstrumentDiagnosticAlarmType(
     UA_Server *server,
     UA_NodeId conditionId,
     const UA_CreateConditionProperties *conditionProperties,
