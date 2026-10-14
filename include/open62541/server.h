@@ -1999,7 +1999,7 @@ UA_Server_createDiscrepancyAlarm(
     UA_Server *server,
     UA_NodeId conditionId,
     const UA_CreateConditionProperties *conditionProperties,
-    const UA_AlarmConditionProperties *properties,
+    const UA_DiscrepancyAlarmProperties *properties,
     UA_NodeId* outConditionId
 )
 {
@@ -2040,24 +2040,6 @@ UA_Server_createOffNormalAlarm(
 {
     return __UA_Server_createCondition (
         server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_OFFNORMALALARMTYPE),
-        conditionProperties,
-        (UA_ConditionTypeSetupFn)UA_Server_setupOffNormalAlarmNodes,
-        (UA_ConditionTypeSetupFn)UA_Server_initOffNormalAlarmNodes,
-        properties, outConditionId
-    );
-}
-
-static inline UA_StatusCode
-UA_Server_createInstrumentDiagnosticAlarmType(
-    UA_Server *server,
-    UA_NodeId conditionId,
-    const UA_CreateConditionProperties *conditionProperties,
-    const UA_OffNormalAlarmProperties *properties,
-    UA_NodeId* outConditionId
-)
-{
-    return __UA_Server_createCondition (
-        server, conditionId, UA_NODEID_NUMERIC(0, UA_NS0ID_INSTRUMENTDIAGNOSTICALARMTYPE),
         conditionProperties,
         (UA_ConditionTypeSetupFn)UA_Server_setupOffNormalAlarmNodes,
         (UA_ConditionTypeSetupFn)UA_Server_initOffNormalAlarmNodes,
