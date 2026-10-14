@@ -1496,7 +1496,8 @@ UA_MonitoredItem_addEvent(UA_MonitoredItem *mon, UA_FilterEvalContext *ctx) {
             const UA_SimpleAttributeOperand *sc = &ctx->filter.selectClauses[i];
             if(sc->attributeId != UA_ATTRIBUTEID_VALUE || sc->browsePathSize != 1 ||
                !UA_QualifiedName_equal(&retainQN, sc->browsePath) ||
-               !UA_NodeId_equal(&sc->typeDefinitionId, &conditionTypeId))
+               !isNodeInTree_singleRef(ctx->server, &sc->typeDefinitionId, &conditionTypeId,
+                                       UA_REFERENCETYPEINDEX_HASSUBTYPE))
                 continue;
             UA_Variant_clear(&n->data.event.eventFields[i]);
             res = UA_Variant_setScalarCopy(&n->data.event.eventFields[i], &retain,
