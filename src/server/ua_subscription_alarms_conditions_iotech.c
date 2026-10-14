@@ -1328,19 +1328,12 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
         goto DONE;
     }
 
-    UA_Boolean enabled = UA_Condition_State_Enabled (branch->condition, server);
-    if (enabled)
-    {
-        UA_Boolean eventRetain = UA_ConditionBranch_State_Retain (branch,server);
-        /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
-        * of the Retain field from True to False. */
-        if (branch->lastEventRetainValue == false && eventRetain == false) triggerEvent = false;
-    }
-    else
-    {
-        /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5#:~:text=However%2C%20no%20Event%20Notifications%20will%20be%20generated%20while%20the%20Condition%20instance%20is%20disabled. */
-        triggerEvent = false;
-    }
+    /* Events are only generated for Conditions that have their Retain field set to True and for the initial transition
+     * of the Retain field from True to False. A disabled Condition always has Retain set to False, so only the
+     * transition into the Disabled state is notified.
+     * https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5 */
+    UA_Boolean eventRetain = UA_ConditionBranch_State_Retain (branch,server);
+    if (branch->lastEventRetainValue == false && eventRetain == false) triggerEvent = false;
 DONE:
     *overwriteRetainOut = overwriteRetain;
     *triggerEventOut = triggerEvent;
@@ -1570,6 +1563,9 @@ static UA_Boolean
 UA_ConditionBranch_evaluateRetainState(UA_ConditionBranch *branch, UA_Server *server)
 {
     UA_Boolean retain = false;
+    /* Disabled Conditions are not of interest to Clients */
+    if (!UA_Condition_State_Enabled(branch->condition, server)) goto done;
+
     if (branch->isMainBranch)
     {
         /*Retain for main branch should remain true if there are still branches active*/

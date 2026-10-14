@@ -874,6 +874,92 @@ START_TEST(enableDisable) {
 
 }
 
+static void disableRetainCB (UA_Server *server, UA_UInt32 monId, void *monContext,
+                             const UA_KeyValueMap eventFields)
+{
+    eventCount++;
+    *(UA_Boolean *)monContext = *(UA_Boolean*) eventFields.map[0].value.data;
+}
+
+/* Disabling a retained Condition notifies Clients with Retain set to False.
+ * No further events are generated while the Condition is disabled.
+ * https://reference.opcfoundation.org/Core/Part9/v105/docs/5.5 */
+START_TEST(disableNotifiesRetainFalse) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode status = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    status = UA_Server_Condition_enable (acserver, conditionInstance, UA_TRUE, NULL);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_MonitoredItemCreateRequest req;
+    UA_MonitoredItemCreateRequest_init(&req);
+    req.itemToMonitor.nodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER);
+    req.monitoringMode = UA_MONITORINGMODE_REPORTING;
+    req.itemToMonitor.attributeId = UA_ATTRIBUTEID_EVENTNOTIFIER;
+    req.requestedParameters.samplingInterval = 250;
+    req.requestedParameters.discardOldest = true;
+    req.requestedParameters.queueSize = 10;
+
+    UA_SimpleAttributeOperand select[1];
+    UA_SimpleAttributeOperand_init(&select[0]);
+    select[0].typeDefinitionId = UA_NODEID_NUMERIC(0, UA_NS0ID_CONDITIONTYPE);
+    select[0].browsePathSize = 1;
+    select[0].browsePath = (UA_QualifiedName[]){UA_QUALIFIEDNAME(0, "Retain")};
+    select[0].attributeId = UA_ATTRIBUTEID_VALUE;
+
+    UA_EventFilter filter;
+    UA_EventFilter_init(&filter);
+    filter.selectClausesSize = 1;
+    filter.selectClauses = select;
+
+    req.requestedParameters.filter.content.decoded.type = &UA_TYPES[UA_TYPES_EVENTFILTER];
+    req.requestedParameters.filter.content.decoded.data = &filter;
+    req.requestedParameters.filter.encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
+
+    UA_Boolean lastRetain = false;
+    UA_MonitoredItemCreateResult res = UA_Server_createEventMonitoredItemEx(
+        acserver, req, &lastRetain, disableRetainCB);
+    ck_assert_uint_eq(res.statusCode, UA_STATUSCODE_GOOD);
+
+    status = UA_Server_Condition_updateActive (acserver, conditionInstance, NULL, UA_TRUE);
+    deliverEvents();
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(eventCount, 1);
+    ck_assert(lastRetain == true);
+
+    status = UA_Server_Condition_enable (acserver, conditionInstance, UA_FALSE, NULL);
+    deliverEvents();
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(eventCount, 2);
+    ck_assert(lastRetain == false);
+
+    status = UA_Server_Condition_updateActive (acserver, conditionInstance, NULL, UA_FALSE);
+    deliverEvents();
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    status = UA_Server_Condition_updateActive (acserver, conditionInstance, NULL, UA_TRUE);
+    deliverEvents();
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(eventCount, 2);
+} END_TEST
+
 static void conditionSequence3CB (UA_Server *server, UA_UInt32 monId, void *monContext,
                                   const UA_KeyValueMap eventFields)
 {
@@ -1620,6 +1706,7 @@ int main(void) {
     tcase_add_test(tc, conditionSequence1);
     tcase_add_test(tc, conditionSequence2);
     tcase_add_test(tc, enableDisable);
+    tcase_add_test(tc, disableNotifiesRetainFalse);
     tcase_add_test(tc, exclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
