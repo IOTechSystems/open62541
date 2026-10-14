@@ -1317,6 +1317,12 @@ UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UIn
         status = evaluateFilteredRetain(branch, monId, passed, &overwriteRetain, &triggerEvent);
         if (status != UA_STATUSCODE_GOOD) goto DONE;
     }
+    else if (!passed)
+    {
+        /* Without filtered retain, events failing the where clause are never delivered */
+        triggerEvent = false;
+        goto DONE;
+    }
 
     UA_Boolean enabled = UA_Condition_State_Enabled (branch->condition, server);
     if (enabled)
