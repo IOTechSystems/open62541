@@ -1736,6 +1736,68 @@ START_TEST(enableEvaluatesCondition) {
     ck_assert(isConditionActive(acserver, conditionInstance) == true);
 } END_TEST
 
+static void
+assertExclusiveLimitState (const UA_NodeId *conditionId, UA_Double input,
+                           UA_LimitState expectedState)
+{
+    UA_LimitState currentState = 0;
+    UA_Boolean stateChanged = false;
+    UA_StatusCode retval = UA_Server_ExclusiveLimitAlarmEvaluateLimitState (acserver, conditionId, input,
+                                                                            &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(expectedState, currentState);
+}
+
+/* Leaving HighHigh (LowLow) of an ExclusiveLimitAlarm applies the deadband of
+ * the High (Low) limit, as the value was also above (below) that limit */
+START_TEST(exclusiveDeadbandFromHighHigh) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test")
+    };
+
+    UA_LevelAlarmProperties levelProperties = {
+        .hasHighHighLimit = true,
+        .highHighLimit = 90.0,
+        .hasHighLimit = true,
+        .highLimit = 80.0,
+        .hasHighDeadband = true,
+        .highDeadband = 5.0,
+        .hasLowLimit = true,
+        .lowLimit = 20.0,
+        .hasLowDeadband = true,
+        .lowDeadband = 5.0,
+        .hasLowLowLimit = true,
+        .lowLowLimit = 10.0,
+    };
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode retval = UA_Server_createExclusiveLevelAlarm (
+        acserver,
+        UA_NODEID_NULL,
+        &conditionProperties,
+        &levelProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_LimitState highHigh = 0, high = 0, low = 0, lowLow = 0;
+    UA_LIMITSTATE_SET (highHigh, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
+    UA_LIMITSTATE_SET (high, UA_LIMITSTATE_HIGHSTATEBIT);
+    UA_LIMITSTATE_SET (low, UA_LIMITSTATE_LOWSTATEBIT);
+    UA_LIMITSTATE_SET (lowLow, UA_LIMITSTATE_LOWLOWSTATEBIT);
+
+    assertExclusiveLimitState(&conditionInstance, 95.0, highHigh);
+    /* Below the HighLimit, but within its deadband */
+    assertExclusiveLimitState(&conditionInstance, 78.0, high);
+    assertExclusiveLimitState(&conditionInstance, 50.0, 0);
+
+    assertExclusiveLimitState(&conditionInstance, 5.0, lowLow);
+    /* Above the LowLimit, but within its deadband */
+    assertExclusiveLimitState(&conditionInstance, 22.0, low);
+    assertExclusiveLimitState(&conditionInstance, 50.0, 0);
+} END_TEST
+
 /* The HighHighState of a NonExclusiveLimitAlarm without a HighLimit is read
  * back, so it only changes once and is cleared again */
 START_TEST(nonExclusiveHighHighWithoutHigh) {
@@ -2353,6 +2415,7 @@ int main(void) {
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveHighHighWithoutHigh);
     tcase_add_test(tc, nonExclusiveSingleLimit);
+    tcase_add_test(tc, exclusiveDeadbandFromHighHigh);
     tcase_add_test(tc, enableEvaluatesCondition);
     tcase_add_test(tc, createAcknowledgeableCondition);
     tcase_add_test(tc, commentWithoutLocale);

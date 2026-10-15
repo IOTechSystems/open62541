@@ -4658,8 +4658,11 @@ static UA_StatusCode calculateNewLimitState (
     retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_HIGHLIMIT), &highLimit);
     if (retval == UA_STATUSCODE_GOOD)
     {
-        UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHSTATEBIT) ?
-                          (highLimit - highDeadband) :  highLimit;
+        /* HighHigh is also above the HighLimit. In the exclusive state machine
+         * only the HighHigh bit is set. */
+        UA_Boolean wasHigh = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHSTATEBIT) ||
+                             UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
+        UA_Double limit = wasHigh ? (highLimit - highDeadband) :  highLimit;
         if (inputValue >= limit)
         {
             UA_LIMITSTATE_SET(state, UA_LIMITSTATE_HIGHSTATEBIT);
@@ -4684,8 +4687,11 @@ static UA_StatusCode calculateNewLimitState (
     retval = readObjectPropertyDouble (server, *conditionId, UA_QUALIFIEDNAME(0, CONDITION_FIELD_LOWLIMIT), &lowLimit);
     if (retval == UA_STATUSCODE_GOOD)
     {
-        UA_Double limit = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWSTATEBIT) ?
-                          (lowLimit + lowDeadband) :  lowLimit;
+        /* LowLow is also below the LowLimit. In the exclusive state machine
+         * only the LowLow bit is set. */
+        UA_Boolean wasLow = UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWSTATEBIT) ||
+                            UA_LIMITSTATE_CHECK(prevState, UA_LIMITSTATE_LOWLOWSTATEBIT);
+        UA_Double limit = wasLow ? (lowLimit + lowDeadband) :  lowLimit;
         if (inputValue <= limit)
         {
             UA_LIMITSTATE_SET(state, UA_LIMITSTATE_LOWSTATEBIT);
