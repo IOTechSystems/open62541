@@ -158,40 +158,35 @@ typedef struct UA_Condition {
     const UA_ConditionCallbacks *callbacks;
 } UA_Condition;
 
+/* User callbacks are called with the server lock held, like all callbacks of
+ * the library. The service mutex is recursive, so the callbacks can use the
+ * public UA_Server API. */
 static inline UA_StatusCode UA_Condition_UserCallback_onAcked (UA_Server *server, UA_Condition *condition, const UA_NodeId *id)
 {
-   if (!condition->callbacks || !condition->callbacks->onAcked) return UA_STATUSCODE_GOOD;
-   unlockServer(server);
-   UA_StatusCode ret = condition->callbacks->onAcked (server, id, condition->context);
-   lockServer(server);
-   return ret;
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    if (!condition->callbacks || !condition->callbacks->onAcked) return UA_STATUSCODE_GOOD;
+    return condition->callbacks->onAcked (server, id, condition->context);
 }
 
 static inline UA_StatusCode UA_Condition_UserCallback_onConfirmed (UA_Server *server, UA_Condition *condition, const UA_NodeId *id)
 {
+    UA_LOCK_ASSERT(&server->serviceMutex);
     if (!condition->callbacks || !condition->callbacks->onConfirmed) return UA_STATUSCODE_GOOD;
-    unlockServer(server);
-    UA_StatusCode ret = condition->callbacks->onConfirmed(server, id, condition->context);
-    lockServer(server);
-    return ret;
+    return condition->callbacks->onConfirmed(server, id, condition->context);
 }
 
 static inline UA_StatusCode UA_Condition_UserCallback_onActive(UA_Server *server, UA_Condition *condition, const UA_NodeId *id)
 {
+    UA_LOCK_ASSERT(&server->serviceMutex);
     if (!condition->callbacks || !condition->callbacks->onActive) return UA_STATUSCODE_GOOD;
-    unlockServer(server);
-    UA_StatusCode ret = condition->callbacks->onActive(server, id, condition->context);
-    lockServer(server);
-    return ret;
+    return condition->callbacks->onActive(server, id, condition->context);
 }
 
 static inline UA_StatusCode UA_Condition_UserCallback_onInactive(UA_Server *server, UA_Condition *condition, const UA_NodeId *id)
 {
+    UA_LOCK_ASSERT(&server->serviceMutex);
     if (!condition->callbacks || !condition->callbacks->onInactive) return UA_STATUSCODE_GOOD;
-    unlockServer(server);
-    UA_StatusCode ret = condition->callbacks->onInactive(server, id, condition->context);
-    lockServer(server);
-    return ret;
+    return condition->callbacks->onInactive(server, id, condition->context);
 }
 
 static UA_Condition *UA_Condition_new (void)
@@ -1444,7 +1439,6 @@ enabledEvaluateCondition (UA_Server *server, UA_Condition* condition)
 {
     UA_LOCK_ASSERT(&server->serviceMutex);
     if (!condition->fns.getInput) return;
-    unlockServer(server);
     void *input = condition->fns.getInput(server, &condition->mainBranch->id, condition->context);
     if (input)
     {
@@ -1458,7 +1452,6 @@ enabledEvaluateCondition (UA_Server *server, UA_Condition* condition)
         }
         if (condition->fns.inputFree) condition->fns.inputFree (input, condition->context);
     }
-    lockServer(server);
 }
 
 static UA_StatusCode
@@ -4584,9 +4577,7 @@ UA_Server_Condition_iterBranches (UA_Server *server, UA_NodeId conditionId,
     UA_ConditionBranch *tmp = NULL;
     LIST_FOREACH_SAFE(branch, &cond->branches, listEntry, tmp)
     {
-        unlockServer(server);
         iterFn (server, &branch->id, cond->context, iterCtx);
-        lockServer(server);
     }
     unlockServer(server);
 }

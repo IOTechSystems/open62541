@@ -1516,6 +1516,57 @@ START_TEST(nonExclusiveLimitEvaluateFn) {
 
 } END_TEST
 
+static UA_Double evaluateInput = 20.0;
+
+static void *
+getEvaluateInput (UA_Server *server, const UA_NodeId *conditionId, void *conditionCtx)
+{
+    return &evaluateInput;
+}
+
+/* Enabling a Condition evaluates it with the user functions. They are called
+ * with the server lock held and can use the public API. */
+START_TEST(enableEvaluatesCondition) {
+    UA_StatusCode retval;
+
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test")
+    };
+
+    UA_LevelAlarmProperties levelProperties = {
+        .hasHighLimit = true,
+        .highLimit = 10.0,
+    };
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    retval = UA_Server_createExclusiveLevelAlarm (
+        acserver,
+        UA_NODEID_NULL,
+        &conditionProperties,
+        &levelProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_ConditionEvaluateFns fns = {
+        .getInput = getEvaluateInput,
+        .evaluate = (UA_ConditionEvaluateFn) UA_Server_exclusiveLimitAlarmEvaluate_default
+    };
+    retval = UA_Server_Condition_setEvaluateFns(acserver, conditionInstance, fns);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    ck_assert(isConditionActive(acserver, conditionInstance) == false);
+    if (isConditionEnabled(acserver, conditionInstance))
+    {
+        retval = UA_Server_Condition_enable(acserver, conditionInstance, false, NULL);
+        ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    }
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, true, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert(isConditionActive(acserver, conditionInstance) == true);
+} END_TEST
+
 /* The HighHighState of a NonExclusiveLimitAlarm without a HighLimit is read
  * back, so it only changes once and is cleared again */
 START_TEST(nonExclusiveHighHighWithoutHigh) {
@@ -2056,6 +2107,7 @@ int main(void) {
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveHighHighWithoutHigh);
     tcase_add_test(tc, nonExclusiveSingleLimit);
+    tcase_add_test(tc, enableEvaluatesCondition);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_test(tc, offDelay);
