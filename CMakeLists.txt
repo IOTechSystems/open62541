@@ -151,6 +151,9 @@ set(UA_MULTITHREADING ${MULTITHREADING_DEFAULT} CACHE STRING
 option(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS "Enable the use of A&C. (EXPERIMENTAL)" OFF)
 mark_as_advanced(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
 
+option(UA_ENABLE_IOTECH_MODIFICATIONS "Enable the IOTech modifications to open62541, including the IOTech A&C implementation. (EXPERIMENTAL)" OFF)
+mark_as_advanced(UA_ENABLE_IOTECH_MODIFICATIONS)
+
 option(UA_ENABLE_NODEMANAGEMENT "Enable dynamic addition and removal of nodes at runtime" ON)
 mark_as_advanced(UA_ENABLE_NODEMANAGEMENT)
 
@@ -913,7 +916,6 @@ set(lib_sources ${PROJECT_SOURCE_DIR}/src/ua_types.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_subscription.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_datachange.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_event.c
-                ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_alarms_conditions.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services_view.c
                 ${PROJECT_SOURCE_DIR}/src/server/ua_services_method.c
@@ -935,6 +937,12 @@ set(lib_sources ${PROJECT_SOURCE_DIR}/src/ua_types.c
                 ${PROJECT_SOURCE_DIR}/deps/itoa.c
                 ${PROJECT_SOURCE_DIR}/deps/ziptree.c
                 ${PROJECT_SOURCE_DIR}/deps/parse_num.c)
+
+if(UA_ENABLE_IOTECH_MODIFICATIONS)
+  list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_alarms_conditions_iotech.c)
+else()
+  list(APPEND lib_sources ${PROJECT_SOURCE_DIR}/src/server/ua_subscription_alarms_conditions.c)
+endif()
 
 if(UA_GENERATED_NAMESPACE_ZERO)
     list(APPEND lib_headers ${PROJECT_BINARY_DIR}/src_generated/open62541/namespace0_generated.h)
@@ -1532,6 +1540,14 @@ else()
     add_library(open62541-plugins OBJECT ${plugin_sources} ${plugin_headers})
 endif()
 add_library(open62541 $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+
+if(UA_ENABLE_IOTECH_MODIFICATIONS)
+    # Only export the public API (marked with UA_EXPORT). Internal functions and
+    # bundled dependencies (yxml, ziptree, ...) otherwise clash with identically
+    # named symbols in other libraries loaded into the same process.
+    set_target_properties(open62541-object open62541-plugins open62541 PROPERTIES
+                          C_VISIBILITY_PRESET hidden)
+endif()
 
 add_dependencies(open62541-object open62541-code-generation)
 add_dependencies(open62541-plugins open62541-code-generation)

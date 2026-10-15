@@ -1470,6 +1470,12 @@ deleteMonitoredItem(UA_Server *server, UA_MonitoredItem *mon,
     if(mon->registered)
         unregisterMonitoredItem(server, mon, removeFromIndex);
 
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
+    if(mon->itemToMonitor.attributeId == UA_ATTRIBUTEID_EVENTNOTIFIER)
+        UA_ConditionBranches_removeFilterEntries(server, mon->subscription->subscriptionId,
+                                                 mon->monitoredItemId);
+#endif
+
     /* Cancel outstanding async reads. The status code avoids the sample being
      * processed. Call _processReady to ensure that the callbacks have been
      * triggered. */

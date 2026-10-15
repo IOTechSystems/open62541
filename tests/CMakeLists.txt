@@ -431,7 +431,11 @@ if(UA_ENABLE_SUBSCRIPTIONS)
 endif()
 
 if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
-    ua_add_test(server/check_server_alarmsconditions.c)
+    if(UA_ENABLE_IOTECH_MODIFICATIONS)
+      ua_add_test(server/check_server_alarmsconditions_iotech.c)
+    else()
+      ua_add_test(server/check_server_alarmsconditions.c)
+    endif()
 endif()
 
 if(UA_ENABLE_ASYNCOPERATIONS)

@@ -641,6 +641,10 @@ UA_Server_init(UA_Server *server) {
     }
 #endif
 
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
+    initNs0ConditionAndAlarms(server);
+#endif
+
     unlockServer(server);
     return server;
 

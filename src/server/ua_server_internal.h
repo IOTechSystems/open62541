@@ -52,6 +52,12 @@ typedef struct {
 
 #endif /* !UA_ENABLE_SUBSCRIPTIONS */
 
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
+/* Forward Declarations */
+typedef ZIP_HEAD(UA_ConditionTree, UA_Condition) UA_ConditionTree;
+typedef ZIP_HEAD(UA_ConditionBranchTree, UA_ConditionBranch) UA_ConditionBranchTree;
+#endif
+
 /********************/
 /* GDS Transaction  */
 /********************/
@@ -255,7 +261,13 @@ struct UA_Server {
     UA_UInt32 lastSubscriptionId; /* To generate unique SubscriptionIds */
 
 # ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+
+# ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_ConditionTree conditions;
+    UA_ConditionBranchTree conditionBranches;
+# else
     LIST_HEAD(, UA_ConditionSource) conditionSources;
+# endif
 # endif
 #endif
 
@@ -450,7 +462,53 @@ UA_StatusCode
 getAllInterfaces(UA_Server *server, const UA_NodeId *objectNode,
                  UA_NodeId **interfaceNodes, size_t *interfaceNodesSize);
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+/* Recursively copy the aggregated children of source to destination. If
+ * copyOptional is set, optional children are always copied. */
+UA_StatusCode
+copyAllChildren(UA_Server *server, UA_Session *session,
+                const UA_NodeId *source, const UA_NodeId *destination,
+                UA_Boolean copyOptional);
+#endif
+
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
+
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+
+/*Forward Declaration */
+struct UA_ConditionBranch;
+typedef struct UA_ConditionBranch UA_ConditionBranch;
+
+UA_Boolean isCondition (UA_Server *server, const UA_NodeId *id);
+
+UA_ConditionBranch *UA_getConditionBranch (UA_Server *server, const UA_NodeId *conditionBranchId);
+
+UA_StatusCode
+UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
+                  UA_NodeId *outConditionId);
+
+UA_StatusCode
+UA_ConditionBranch_filter (UA_Server *server, UA_ConditionBranch *branch, UA_UInt32 subId, UA_UInt32 monId,
+                           UA_Boolean passed,
+                           UA_Boolean *overwriteRetainOut, UA_Boolean *triggerEventOut);
+
+/* Removes the filtered retain state of a deleted MonitoredItem */
+void
+UA_ConditionBranches_removeFilterEntries (UA_Server *server, UA_UInt32 subId, UA_UInt32 monId);
+
+void
+UA_ConditionList_delete(UA_Server *server);
+
+UA_Boolean
+isConditionOrBranch(UA_Server *server,
+                    const UA_NodeId *condition,
+                    const UA_NodeId *conditionSource,
+                    UA_Boolean *isCallerAC);
+
+void
+initNs0ConditionAndAlarms(UA_Server *server);
+
+#else
 
 UA_StatusCode
 UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
@@ -464,6 +522,7 @@ isConditionOrBranch(UA_Server *server,
                     const UA_NodeId *condition,
                     const UA_NodeId *conditionSource,
                     UA_Boolean *isCallerAC);
+#endif /* UA_ENABLE_IOTECH_MODIFICATIONS */
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 

@@ -1446,6 +1446,24 @@ static UA_StatusCode
 UA_MonitoredItem_addEvent(UA_MonitoredItem *mon, UA_FilterEvalContext *ctx) {
     /* Evaluate the where clause */
     UA_StatusCode res = evaluateWhereClause(ctx);
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
+    /* Condition events are filtered per MonitoredItem by the A&C logic. That
+     * also handles where-clause misses (SupportsFilteredRetain, Part 9 5.5.2). */
+    UA_Boolean overwriteRetain = false;
+    UA_ConditionBranch *branch = ctx->ed.eventInstance ?
+        UA_getConditionBranch(ctx->server, ctx->ed.eventInstance) : NULL;
+    if(branch) {
+        if(res != UA_STATUSCODE_GOOD && res != UA_STATUSCODE_BADNOMATCH)
+            return res;
+        UA_Boolean triggerEvent = true;
+        res = UA_ConditionBranch_filter(ctx->server, branch, mon->subscription->subscriptionId,
+                                        mon->monitoredItemId,
+                                        res == UA_STATUSCODE_GOOD,
+                                        &overwriteRetain, &triggerEvent);
+        if(res != UA_STATUSCODE_GOOD || !triggerEvent)
+            return res;
+    }
+#endif
     if(res != UA_STATUSCODE_GOOD) {
         if(res == UA_STATUSCODE_BADNOMATCH)
             res = UA_STATUSCODE_GOOD;
@@ -1464,6 +1482,34 @@ UA_MonitoredItem_addEvent(UA_MonitoredItem *mon, UA_FilterEvalContext *ctx) {
         UA_free(n);
         return res;
     }
+
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
+    /* The event is sent because the Condition no longer passes the where
+     * clause. Report Retain as false to this MonitoredItem. */
+    if(overwriteRetain) {
+        static const UA_QualifiedName retainQN = {0, UA_STRING_STATIC("Retain")};
+        static const UA_NodeId conditionTypeId =
+            {0, UA_NODEIDTYPE_NUMERIC, {UA_NS0ID_CONDITIONTYPE}};
+        UA_Boolean retain = false;
+        for(size_t i = 0; i < ctx->filter.selectClausesSize &&
+                i < n->data.event.eventFieldsSize; i++) {
+            const UA_SimpleAttributeOperand *sc = &ctx->filter.selectClauses[i];
+            if(sc->attributeId != UA_ATTRIBUTEID_VALUE || sc->browsePathSize != 1 ||
+               !UA_QualifiedName_equal(&retainQN, sc->browsePath) ||
+               !isNodeInTree_singleRef(ctx->server, &sc->typeDefinitionId, &conditionTypeId,
+                                       UA_REFERENCETYPEINDEX_HASSUBTYPE))
+                continue;
+            UA_Variant_clear(&n->data.event.eventFields[i]);
+            res = UA_Variant_setScalarCopy(&n->data.event.eventFields[i], &retain,
+                                           &UA_TYPES[UA_TYPES_BOOLEAN]);
+            if(res != UA_STATUSCODE_GOOD) {
+                UA_EventFieldList_clear(&n->data.event);
+                UA_free(n);
+                return res;
+            }
+        }
+    }
+#endif
 
     /* Finalize and enqueue the notification */
     n->data.event.clientHandle = mon->parameters.clientHandle;
