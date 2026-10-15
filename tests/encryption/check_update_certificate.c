@@ -158,6 +158,57 @@ START_TEST(update_certificate_noKey_invalid) {
 }
 END_TEST
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+START_TEST(update_certificate_none_follows) {
+    UA_ByteString newCertificate = UA_BYTESTRING_NULL;
+    UA_ByteString newPrivateKey = UA_BYTESTRING_NULL;
+
+    generateCertificate(&newCertificate, &newPrivateKey);
+
+    /* The #None SecurityPolicy was configured with the RSA certificate */
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    UA_SecurityPolicy *nonePolicy = NULL;
+    for(size_t i = 0; i < config->securityPoliciesSize; i++) {
+        if(UA_NodeId_isNull(&config->securityPolicies[i].certificateTypeId))
+            nonePolicy = &config->securityPolicies[i];
+    }
+    ck_assert_ptr_ne(nonePolicy, NULL);
+    ck_assert_uint_gt(nonePolicy->localCertificate.length, 0);
+
+    UA_NodeId certTypRsaSha256 = UA_NODEID_NUMERIC(0, UA_NS0ID_RSASHA256APPLICATIONCERTIFICATETYPE);
+    UA_StatusCode retval =
+        UA_Server_updateCertificate(server, UA_NODEID_NULL, certTypRsaSha256,
+                                    newCertificate, &newPrivateKey);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* The RsaSha256 and #None SecurityPolicies have the new certificate. All
+     * other SecurityPolicies keep the certificate they were configured with. */
+    for(size_t i = 0; i < config->securityPoliciesSize; i++) {
+        UA_SecurityPolicy *sp = &config->securityPolicies[i];
+        if(sp == nonePolicy ||
+           UA_NodeId_equal(&sp->certificateTypeId, &certTypRsaSha256)) {
+            ck_assert(UA_ByteString_equal(&sp->localCertificate, &newCertificate));
+        } else {
+            ck_assert(!UA_ByteString_equal(&sp->localCertificate, &newCertificate));
+        }
+    }
+
+    /* The endpoints of the updated SecurityPolicies have the new certificate */
+    for(size_t i = 0; i < config->endpointsSize; i++) {
+        UA_EndpointDescription *ed = &config->endpoints[i];
+        UA_SecurityPolicy *sp = getSecurityPolicyByUri(server, &ed->securityPolicyUri);
+        ck_assert_ptr_ne(sp, NULL);
+        UA_Boolean updated = UA_ByteString_equal(&sp->localCertificate, &newCertificate);
+        ck_assert_uint_eq(UA_ByteString_equal(&ed->serverCertificate, &newCertificate),
+                          updated);
+    }
+
+    UA_ByteString_clear(&newCertificate);
+    UA_ByteString_clear(&newPrivateKey);
+}
+END_TEST
+#endif /* UA_ENABLE_IOTECH_MODIFICATIONS */
+
 static Suite* testSuite_create_certificate(void) {
     Suite *s = suite_create("Update Certificate");
     TCase *tc_cert = tcase_create("Update Certificate");
@@ -167,6 +218,9 @@ static Suite* testSuite_create_certificate(void) {
     tcase_add_test(tc_cert, update_certificate_wrongKey);
     tcase_add_test(tc_cert, update_certificate_noKey);
     tcase_add_test(tc_cert, update_certificate_noKey_invalid);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    tcase_add_test(tc_cert, update_certificate_none_follows);
+#endif
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_cert);
 
@@ -178,6 +232,9 @@ static Suite* testSuite_create_certificate(void) {
     tcase_add_test(tc_cert_filestore, update_certificate_wrongKey);
     tcase_add_test(tc_cert_filestore, update_certificate_noKey);
     tcase_add_test(tc_cert_filestore, update_certificate_noKey_invalid);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    tcase_add_test(tc_cert_filestore, update_certificate_none_follows);
+#endif
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_cert_filestore);
 #endif /* defined(__linux__) || defined(UA_ARCHITECTURE_WIN32) */

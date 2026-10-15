@@ -997,12 +997,45 @@ UA_Server_updateCertificate(UA_Server *server,
 #endif
     }
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    /* The #None SecurityPolicy has no CertificateType. It only carries a
+     * certificate to advertise it on its endpoints. Update it as well if it was
+     * configured with a certificate that is replaced. */
+    for(size_t i = 0; i < server->config.securityPoliciesSize; i++) {
+        UA_SecurityPolicy *sp = &server->config.securityPolicies[i];
+        if(!UA_NodeId_isNull(&sp->certificateTypeId) || sp->localCertificate.length == 0)
+            continue;
+        for(size_t j = 0; j < server->config.securityPoliciesSize; j++) {
+            const UA_SecurityPolicy *typed = &server->config.securityPolicies[j];
+            if(!UA_NodeId_equal(&typed->certificateTypeId, &certificateTypeId) ||
+               !UA_ByteString_equal(&typed->localCertificate, &sp->localCertificate))
+                continue;
+            UA_StatusCode res = sp->updateCertificate(sp, certificate, newPrivateKey);
+            if(res != UA_STATUSCODE_GOOD) {
+                unlockServer(server);
+                return res;
+            }
+            break;
+        }
+    }
+#endif
+
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     for(size_t i = 0; i < server->config.endpointsSize; i++) {
         UA_EndpointDescription *ed = &server->config.endpoints[i];
         UA_SecurityPolicy *sp = getSecurityPolicyByUri(server,
                             &server->config.endpoints[i].securityPolicyUri);
         UA_CHECK_MEM(sp, unlockServer(server); return UA_STATUSCODE_BADINTERNALERROR);
+
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        /* The #None SecurityPolicy was updated above */
+        if(UA_NodeId_isNull(&sp->certificateTypeId) &&
+           UA_ByteString_equal(&sp->localCertificate, &certificate)) {
+            UA_ByteString_clear(&ed->serverCertificate);
+            UA_ByteString_copy(&certificate, &ed->serverCertificate);
+            continue;
+        }
+#endif
 
         if(!UA_NodeId_equal(&sp->certificateTypeId, &certificateTypeId))
             continue;
