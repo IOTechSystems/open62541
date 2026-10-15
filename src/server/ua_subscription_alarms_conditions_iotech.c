@@ -1500,8 +1500,9 @@ conditionEnable (UA_Server *server, UA_Condition *condition, UA_Boolean enable, 
         size_t resent_count = 0;
         UA_ConditionBranch *branch;
         LIST_FOREACH(branch, &condition->branches, listEntry) {
-            //check retain property for each branch
-            if (!UA_ConditionBranch_State_Retain(branch, server))
+            /* Disabling set Retain to false on every branch. Re-evaluate it
+             * from the branch state. */
+            if (!UA_ConditionBranch_evaluateRetainState(branch, server))
                 continue;
 
             retval = UA_ConditionBranch_triggerEvent (branch, server, eventInfo);

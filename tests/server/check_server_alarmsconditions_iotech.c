@@ -499,6 +499,78 @@ static void conditionSequence2CB (UA_Server *server, UA_UInt32 monId, void *monC
     }
 }
 
+static UA_StatusCode
+getNonMainBranch (UA_Server *server, const UA_NodeId *conditionBranchId,
+                  void *conditionContext, void *iterCtx)
+{
+    UA_NodeId *conditionId = ((UA_NodeId **) iterCtx)[0];
+    UA_NodeId *branchOut = ((UA_NodeId **) iterCtx)[1];
+    if (!UA_NodeId_equal(conditionBranchId, conditionId))
+        UA_NodeId_copy(conditionBranchId, branchOut);
+    return UA_STATUSCODE_GOOD;
+}
+
+/* Re-enabling a Condition re-evaluates Retain of all ConditionBranches, so
+ * an active Condition and its unacknowledged branch are retained again */
+START_TEST(enableRestoresBranchRetain) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = true
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode retval = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, true, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* onActive marks the Condition unacknowledged */
+    retval = UA_Server_Condition_setCallbacks(acserver, conditionInstance, &callbacks);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    UA_Boolean autoConfirm = false;
+    retval = UA_Server_Condition_setContext(acserver, conditionInstance, &autoConfirm);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Going inactive while unacknowledged creates a branch. The Condition is
+     * then active again. */
+    ck_assert_uint_eq(UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true), UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, false), UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true), UA_STATUSCODE_GOOD);
+
+    UA_NodeId branch = UA_NODEID_NULL;
+    UA_NodeId *iterCtx[2] = {&conditionInstance, &branch};
+    UA_Server_Condition_iterBranches(acserver, conditionInstance, getNonMainBranch, iterCtx);
+    ck_assert(!UA_NodeId_isNull(&branch));
+    ck_assert(isConditionAcked(acserver, branch) == false);
+    ck_assert(conditionRetain(acserver, branch) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, false, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert(conditionRetain(acserver, branch) == false);
+    ck_assert(conditionRetain(acserver, conditionInstance) == false);
+
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, true, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert(conditionRetain(acserver, branch) == true);
+    ck_assert(conditionRetain(acserver, conditionInstance) == true);
+
+    UA_NodeId_clear(&branch);
+} END_TEST
+
 /* Based on https://reference.opcfoundation.org/Core/Part9/v105/docs/B.1.3 */
 START_TEST(conditionSequence2) {
 
@@ -1937,6 +2009,7 @@ int main(void) {
     tcase_add_test(tc, conditionSequence2);
     tcase_add_test(tc, enableDisable);
     tcase_add_test(tc, disableNotifiesRetainFalse);
+    tcase_add_test(tc, enableRestoresBranchRetain);
     tcase_add_test(tc, exclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveHighHighWithoutHigh);
