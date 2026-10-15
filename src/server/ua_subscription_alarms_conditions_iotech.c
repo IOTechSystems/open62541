@@ -559,16 +559,21 @@ UA_getConditionId(UA_Server *server, const UA_NodeId *conditionNodeId,
 }
 
 /* Get the node id of the condition state */
-static UA_ConditionBranch *
+static UA_StatusCode
 getConditionBranchFromConditionAndEvent(
     UA_Server *server,
     const UA_NodeId *conditionId,
-    const UA_ByteString *eventId
+    const UA_ByteString *eventId,
+    UA_ConditionBranch **branchOut
 )
 {
     UA_Condition *condition = getCondition(server, conditionId);
-    if (!condition) return NULL;
-    return UA_Condition_GetBranchWithEventId(condition, eventId);
+    if (!condition) return UA_STATUSCODE_BADNODEIDUNKNOWN;
+    /* A branch without an event yet has an empty EventId. It cannot be
+     * referenced by the Client. */
+    if (eventId->length == 0) return UA_STATUSCODE_BADEVENTIDUNKNOWN;
+    *branchOut = UA_Condition_GetBranchWithEventId(condition, eventId);
+    return *branchOut ? UA_STATUSCODE_GOOD : UA_STATUSCODE_BADEVENTIDUNKNOWN;
 }
 
 static UA_ConditionBranchFilterEntry*
@@ -1633,6 +1638,8 @@ static UA_StatusCode
 conditionBranchAcknowledge(UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
 {
     UA_LOCK_ASSERT(&server->serviceMutex);
+    if (!UA_Condition_State_Enabled(branch->condition, server))
+        return UA_STATUSCODE_BADCONDITIONDISABLED;
     if(UA_ConditionBranch_State_Acked(branch, server))
         return UA_STATUSCODE_BADCONDITIONBRANCHALREADYACKED;
 
@@ -1666,6 +1673,8 @@ static UA_StatusCode
 conditionBranchConfirm(UA_Server *server, UA_ConditionBranch *branch, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
 {
     UA_LOCK_ASSERT(&server->serviceMutex);
+    if (!UA_Condition_State_Enabled(branch->condition, server))
+        return UA_STATUSCODE_BADCONDITIONDISABLED;
     if (UA_ConditionBranch_State_Confirmed(branch, server))
         return UA_STATUSCODE_BADCONDITIONBRANCHALREADYCONFIRMED;
 
@@ -3076,13 +3085,14 @@ addCommentMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
 {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     lockServer(server);
-    UA_ConditionBranch *branch = getConditionBranchFromConditionAndEvent(
+    UA_ConditionBranch *branch = NULL;
+    retval = getConditionBranchFromConditionAndEvent(
         server,
         objectId,
-        (UA_ByteString *)input[0].data
+        (UA_ByteString *)input[0].data,
+        &branch
     );
-    if (!branch) {
-        retval = UA_STATUSCODE_BADNODEIDUNKNOWN;
+    if (retval != UA_STATUSCODE_GOOD) {
         CONDITION_LOG_ERROR(retval, "ConditionBranch based on EventId not found");
         goto done;
     }
@@ -3190,13 +3200,14 @@ acknowledgeMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
 {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     lockServer(server);
-    UA_ConditionBranch *branch = getConditionBranchFromConditionAndEvent(
+    UA_ConditionBranch *branch = NULL;
+    retval = getConditionBranchFromConditionAndEvent(
         server,
         objectId,
-        (UA_ByteString *)input[0].data
+        (UA_ByteString *)input[0].data,
+        &branch
     );
-    if (!branch) {
-        retval = UA_STATUSCODE_BADNODEIDUNKNOWN;
+    if (retval != UA_STATUSCODE_GOOD) {
         CONDITION_LOG_ERROR(retval, "ConditionBranch based on EventId not found");
         goto done;
     }
@@ -3218,13 +3229,14 @@ confirmMethodCallback(UA_Server *server, const UA_NodeId *sessionId,
 {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     lockServer(server);
-    UA_ConditionBranch *branch = getConditionBranchFromConditionAndEvent(
+    UA_ConditionBranch *branch = NULL;
+    retval = getConditionBranchFromConditionAndEvent(
         server,
         objectId,
-        (UA_ByteString *)input[0].data
+        (UA_ByteString *)input[0].data,
+        &branch
     );
-    if (!branch) {
-        retval = UA_STATUSCODE_BADNODEIDUNKNOWN;
+    if (retval != UA_STATUSCODE_GOOD) {
         CONDITION_LOG_ERROR(retval, "ConditionBranch based on EventId not found");
         goto done;
     }

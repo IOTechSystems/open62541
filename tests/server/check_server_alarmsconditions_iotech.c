@@ -1614,6 +1614,77 @@ START_TEST(commentWithoutLocale) {
     assertConditionLocalizedText(conditionInstance, "Comment", "comment without locale");
 } END_TEST
 
+static UA_StatusCode
+callAcknowledge(const UA_NodeId *conditionId, const UA_ByteString *eventId)
+{
+    UA_LocalizedText comment = UA_LOCALIZEDTEXT("en", "ack");
+    UA_Variant input[2];
+    UA_Variant_setScalar(&input[0], (void *) (uintptr_t) eventId, &UA_TYPES[UA_TYPES_BYTESTRING]);
+    UA_Variant_setScalar(&input[1], &comment, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]);
+
+    UA_CallMethodRequest request;
+    UA_CallMethodRequest_init(&request);
+    request.objectId = *conditionId;
+    request.methodId = UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE_ACKNOWLEDGE);
+    request.inputArgumentsSize = 2;
+    request.inputArguments = input;
+
+    UA_CallMethodResult result = UA_Server_call(acserver, &request);
+    UA_StatusCode status = result.statusCode;
+    UA_CallMethodResult_clear(&result);
+    return status;
+}
+
+/* Acknowledge reports an unknown EventId as such, does not match a Condition
+ * without events by a null EventId, and is rejected for a disabled Condition */
+START_TEST(acknowledgeStatusCodes) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode retval = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* No event was generated yet */
+    UA_ByteString nullEventId = UA_BYTESTRING_NULL;
+    ck_assert_uint_eq(callAcknowledge(&conditionInstance, &nullEventId), UA_STATUSCODE_BADEVENTIDUNKNOWN);
+
+    UA_ByteString unknownEventId = UA_BYTESTRING("unknown");
+    ck_assert_uint_eq(callAcknowledge(&conditionInstance, &unknownEventId), UA_STATUSCODE_BADEVENTIDUNKNOWN);
+
+    /* onActive marks the Condition unacknowledged */
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, true, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Server_Condition_setCallbacks(acserver, conditionInstance, &callbacks);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    UA_Boolean autoConfirm = false;
+    retval = UA_Server_Condition_setContext(acserver, conditionInstance, &autoConfirm);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, false, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Server_Condition_acknowledge(acserver, conditionInstance, NULL, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADCONDITIONDISABLED);
+    ck_assert(isConditionAcked(acserver, conditionInstance) == false);
+} END_TEST
+
 static UA_Double evaluateInput = 20.0;
 
 static void *
@@ -2208,6 +2279,7 @@ int main(void) {
     tcase_add_test(tc, enableEvaluatesCondition);
     tcase_add_test(tc, createAcknowledgeableCondition);
     tcase_add_test(tc, commentWithoutLocale);
+    tcase_add_test(tc, acknowledgeStatusCodes);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_test(tc, offDelay);
