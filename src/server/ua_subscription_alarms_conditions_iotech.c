@@ -1858,6 +1858,7 @@ condition_clearShelve (UA_Server *server, UA_Condition *condition)
 {
     UA_Condition_removeUnshelveCallback(condition, server);
     UA_Condition_State_setShelvingStateUnshelved(condition, server);
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
 }
 
 static UA_StatusCode
@@ -1883,6 +1884,7 @@ static void onShelvedTimeExpireCallback (UA_Server *server, void *data)
     lockServer(server);
     condition->unshelveCallbackId = 0;
     UA_Condition_State_setShelvingStateUnshelved(condition, server);
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
     UA_ConditionEventInfo info = {
         .message = UA_LOCALIZEDTEXT(LOCALE, SHELVEDTIMEEXPIRED_MESSAGE)
     };
@@ -1915,6 +1917,7 @@ condition_timedShelve (UA_Server *server, UA_Condition *condition,
     UA_Condition_removeUnshelveCallback(condition, server);
     status = UA_Condition_State_setShelvingStateTimed(condition, server, shelvingTime);
     if (status != UA_STATUSCODE_GOOD) return status;
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
     status = createUnshelveTimedCallback(server, condition, shelvingTime);
     if (status != UA_STATUSCODE_GOOD) return status;
     UA_ConditionEventInfo info = {
@@ -1942,6 +1945,7 @@ condition_oneShotShelve (UA_Server *server, UA_Condition *condition, const UA_Lo
     );
 
     if (status != UA_STATUSCODE_GOOD) return status;
+    UA_Condition_State_updateSuppressedOrShelved (condition, server);
     UA_Condition_removeUnshelveCallback(condition, server);
     if (timedUnshelve) status = createUnshelveTimedCallback(server, condition, maxTimeShelved);
 
