@@ -1892,6 +1892,48 @@ START_TEST(rejectedTimedShelveKeepsTimer) {
     UA_NodeId_clear(&shelvingState);
 } END_TEST
 
+/* Shelving fails cleanly when the CurrentState of the ShelvingState is
+ * missing */
+START_TEST(shelveWithoutCurrentState) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+    alarmProperties.isShelvable = true;
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode status = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_NodeId shelvingState;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &conditionInstance, UA_QUALIFIEDNAME(0, "ShelvingState"), &shelvingState);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_NodeId currentState;
+    status = UA_Server_getNodeIdWithBrowseName(acserver, &shelvingState, UA_QUALIFIEDNAME(0, "CurrentState"), &currentState);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    status = UA_Server_deleteNode(acserver, currentState, true);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    status = UA_Server_Condition_timedShelve(acserver, conditionInstance, 1000.0, NULL, NULL);
+    ck_assert_uint_ne(status, UA_STATUSCODE_GOOD);
+
+    UA_NodeId_clear(&currentState);
+    UA_NodeId_clear(&shelvingState);
+} END_TEST
+
 /* SuppressedOrShelved follows the ShelvingState, including the expiry of a
  * TimedShelve, and stays set while the Condition is also suppressed */
 START_TEST(shelvingSetsSuppressedOrShelved) {
@@ -2020,6 +2062,7 @@ int main(void) {
     tcase_add_test(tc, unshelveCancelsTimedShelve);
     tcase_add_test(tc, rejectedTimedShelveKeepsTimer);
     tcase_add_test(tc, shelvingSetsSuppressedOrShelved);
+    tcase_add_test(tc, shelveWithoutCurrentState);
     tcase_add_checked_fixture(tc, setup, teardown);
     suite_add_tcase(s, tc);
 

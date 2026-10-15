@@ -739,7 +739,7 @@ updateShelvedStateMachineState (UA_Server *server, const UA_NodeId *shelvedState
     UA_StatusCode retval = writeValueSimplifiedBrowsePath (server, *shelvedStateId, duration_val, 1, path);
     CONDITION_ASSERT_RETURN_RETVAL (retval, "Set UnshelveTime value failed",);
 
-    UA_NodeId currentStateId;
+    UA_NodeId currentStateId = UA_NODEID_NULL;
     UA_Variant value;
     retval = getNodeIdWithBrowseName(server, shelvedStateId, UA_QUALIFIEDNAME(0, FIELD_CURRENT_STATE), &currentStateId);
     CONDITION_ASSERT_GOTOLABEL(retval, "Get CurrentState Id failed", done);
@@ -751,7 +751,7 @@ updateShelvedStateMachineState (UA_Server *server, const UA_NodeId *shelvedState
 
     UA_Variant_setScalar(&value, &currentStateIdValue, &UA_TYPES[UA_TYPES_NODEID]);
     retval = setConditionField (server, currentStateId, &value, stateVariableIdQN);
-    CONDITION_ASSERT_RETURN_RETVAL(retval, "Set CurrentState Id failed",);
+    CONDITION_ASSERT_GOTOLABEL(retval, "Set CurrentState Id failed", done);
 
     //TODO update last transition
 
