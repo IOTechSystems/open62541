@@ -1398,7 +1398,7 @@ START_TEST(nonExclusiveLimitEvaluateFn) {
     };
 
     UA_NodeId conditionInstance = UA_NODEID_NULL;
-    retval = UA_Server_createExclusiveLevelAlarm (
+    retval = UA_Server_createNonExclusiveLevelAlarm (
         acserver,
         UA_NODEID_NULL,
         &conditionProperties,
@@ -1409,7 +1409,7 @@ START_TEST(nonExclusiveLimitEvaluateFn) {
 
     UA_LimitState currentState = 0;
     UA_Boolean stateChanged = false;
-    retval = UA_Server_ExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 20.0f, &currentState, &stateChanged);
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 20.0f, &currentState, &stateChanged);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     UA_LimitState testState = 0;
@@ -1419,13 +1419,118 @@ START_TEST(nonExclusiveLimitEvaluateFn) {
 
     currentState = 0;
     stateChanged = false;
-    retval = UA_Server_ExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 9.0f, &currentState, &stateChanged);
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 9.0f, &currentState, &stateChanged);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
 
     testState = 0;
     ck_assert_uint_eq(testState, currentState);
     ck_assert (stateChanged == true);
 
+} END_TEST
+
+/* The HighHighState of a NonExclusiveLimitAlarm without a HighLimit is read
+ * back, so it only changes once and is cleared again */
+START_TEST(nonExclusiveHighHighWithoutHigh) {
+    UA_StatusCode retval;
+
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test")
+    };
+
+    UA_LevelAlarmProperties levelProperties = {
+        .hasLowLimit = true,
+        .lowLimit = 10.0,
+        .hasHighHighLimit = true,
+        .highHighLimit = 90.0,
+    };
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    retval = UA_Server_createNonExclusiveLevelAlarm (
+        acserver,
+        UA_NODEID_NULL,
+        &conditionProperties,
+        &levelProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    UA_QualifiedName highHighStateQN = UA_QUALIFIEDNAME(0, "HighHighState");
+
+    UA_LimitState highHighState = 0;
+    UA_LIMITSTATE_SET (highHighState, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
+
+    UA_LimitState currentState = 0;
+    UA_Boolean stateChanged = false;
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 95.0, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(highHighState, currentState);
+    ck_assert (stateChanged == true);
+    ck_assert(isConditionTwoStateVariableInTrueState(acserver, conditionInstance, highHighStateQN));
+
+    /* Still above the limit: no change */
+    currentState = 0;
+    stateChanged = true;
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 95.0, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(highHighState, currentState);
+    ck_assert (stateChanged == false);
+
+    /* Back to normal: HighHighState is cleared */
+    currentState = 0;
+    stateChanged = false;
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 50.0, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(0, currentState);
+    ck_assert (stateChanged == true);
+    ck_assert(!isConditionTwoStateVariableInTrueState(acserver, conditionInstance, highHighStateQN));
+} END_TEST
+
+/* A NonExclusiveLimitAlarm needs at least one limit, which can be any of the
+ * four limits */
+START_TEST(nonExclusiveSingleLimit) {
+    UA_StatusCode retval;
+
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test")
+    };
+
+    UA_LevelAlarmProperties noLimits;
+    memset (&noLimits, 0, sizeof(noLimits));
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    retval = UA_Server_createNonExclusiveLevelAlarm (
+        acserver,
+        UA_NODEID_NULL,
+        &conditionProperties,
+        &noLimits,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADCONFIGURATIONERROR);
+
+    UA_LevelAlarmProperties highHighOnly = {
+        .hasHighHighLimit = true,
+        .highHighLimit = 90.0,
+    };
+    conditionInstance = UA_NODEID_NULL;
+    retval = UA_Server_createNonExclusiveLevelAlarm (
+        acserver,
+        UA_NODEID_NULL,
+        &conditionProperties,
+        &highHighOnly,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_LimitState highHighState = 0;
+    UA_LIMITSTATE_SET (highHighState, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
+    UA_LimitState currentState = 0;
+    UA_Boolean stateChanged = false;
+    retval = UA_Server_NonExclusiveLimitAlarmEvaluateLimitState (acserver, &conditionInstance, 95.0, &currentState, &stateChanged);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(highHighState, currentState);
+    ck_assert (stateChanged == true);
+    ck_assert(isConditionTwoStateVariableInTrueState(acserver, conditionInstance,
+                                                     UA_QUALIFIEDNAME(0, "HighHighState")));
 } END_TEST
 
 /* OPC UA Part 9, 5.8.17: the ShelvedStateMachine Methods of the ShelvingState
@@ -1760,6 +1865,8 @@ int main(void) {
     tcase_add_test(tc, disableNotifiesRetainFalse);
     tcase_add_test(tc, exclusiveLimitEvaluateFn);
     tcase_add_test(tc, nonExclusiveLimitEvaluateFn);
+    tcase_add_test(tc, nonExclusiveHighHighWithoutHigh);
+    tcase_add_test(tc, nonExclusiveSingleLimit);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_test(tc, offDelay);

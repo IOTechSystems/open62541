@@ -4206,14 +4206,9 @@ UA_Server_initExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condi
 static UA_StatusCode
 setupNonExclusiveLimitAlarmNodes(UA_Server *server, const UA_NodeId *condition, const UA_LimitAlarmProperties *properties)
 {
+    /* The base setup requires at least one of the four limits */
     UA_StatusCode retval = setupLimitAlarmNodesBase (server, condition, properties);
     if (retval != UA_STATUSCODE_GOOD) return retval;
-
-    if (!properties->hasLowLimit && !properties->hasHighLimit)
-    {
-        CONDITION_LOG_ERROR (retval, "At least LowLimit or HighLimit must be provided");
-        return UA_STATUSCODE_BADCONFIGURATIONERROR;
-    }
 
     UA_NodeId typeId = UA_NODEID_NUMERIC(0, UA_NS0ID_NONEXCLUSIVELIMITALARMTYPE);
     if (properties->hasLowLowLimit)
@@ -4906,30 +4901,18 @@ UA_StatusCode UA_Server_exclusiveLimitAlarmEvaluate_default (
 static UA_StatusCode
 nonExclusiveLimitAlarmGetState (UA_Server *server, const UA_NodeId *conditionId, UA_LimitState *stateOut)
 {
-    /* https://reference.opcfoundation.org/Core/Part9/v105/docs/5.8.20 A value cannot exceed both a HighState value and a LowState value simultaneously. */
+    /* Read every state independently. Each limit is optional, so e.g. the
+     * HighHighState can be set without a HighState
+     * (https://reference.opcfoundation.org/Core/Part9/v105/docs/5.8.20). */
     UA_LimitState state = 0;
-    UA_Boolean inLowState = isTwoStateVariableInTrueState(server, conditionId, &fieldLowStateQN);
-    if (inLowState)
-    {
+    if (isTwoStateVariableInTrueState(server, conditionId, &fieldLowLowStateQN))
+        UA_LIMITSTATE_SET(state, UA_LIMITSTATE_LOWLOWSTATEBIT);
+    if (isTwoStateVariableInTrueState(server, conditionId, &fieldLowStateQN))
         UA_LIMITSTATE_SET(state, UA_LIMITSTATE_LOWSTATEBIT);
-        if (isTwoStateVariableInTrueState(server, conditionId, &fieldLowLowStateQN))
-        {
-            UA_LIMITSTATE_SET(state, UA_LIMITSTATE_LOWLOWSTATEBIT);
-        }
-        goto done;
-    }
-
-    UA_Boolean inHighState = isTwoStateVariableInTrueState(server, conditionId, &fieldHighStateQN);
-    if (inHighState)
-    {
+    if (isTwoStateVariableInTrueState(server, conditionId, &fieldHighStateQN))
         UA_LIMITSTATE_SET(state, UA_LIMITSTATE_HIGHSTATEBIT);
-        if (isTwoStateVariableInTrueState(server, conditionId, &fieldHighHighStateQN))
-        {
-            UA_LIMITSTATE_SET(state, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
-        }
-        goto done;
-    }
-done:
+    if (isTwoStateVariableInTrueState(server, conditionId, &fieldHighHighStateQN))
+        UA_LIMITSTATE_SET(state, UA_LIMITSTATE_HIGHHIGHSTATEBIT);
     *stateOut = state;
     return UA_STATUSCODE_GOOD;
 }
