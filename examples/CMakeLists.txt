@@ -69,7 +69,11 @@ if(UA_ENABLE_METHODCALLS)
 endif()
 
 if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
-    add_example(tutorial_server_alarms_conditions tutorial_server_alarms_conditions.c)
+    if(UA_ENABLE_IOTECH_MODIFICATIONS)
+        add_example(tutorial_server_alarms_conditions tutorial_server_alarms_conditions_iotech.c)
+    else()
+        add_example(tutorial_server_alarms_conditions tutorial_server_alarms_conditions.c)
+    endif()
 endif()
 
 add_example(tutorial_client_firststeps tutorial_client_firststeps.c)
