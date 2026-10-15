@@ -1908,10 +1908,11 @@ condition_timedShelve (UA_Server *server, UA_Condition *condition,
                        UA_Duration shelvingTime, const UA_LocalizedText *comment, const UA_ConditionEventInfo *eventInfo)
 {
     UA_LOCK_ASSERT(&server->serviceMutex);
-    UA_Condition_removeUnshelveCallback(condition, server);
     UA_Duration maxTimeShelved;
     UA_StatusCode status = UA_Condition_State_getMaxTimeShelved(condition, server, &maxTimeShelved);
     if (status == UA_STATUSCODE_GOOD && shelvingTime > maxTimeShelved) return UA_STATUSCODE_BADSHELVINGTIMEOUTOFRANGE;
+    /* Only cancel the timer of a current TimedShelve once the new one is accepted */
+    UA_Condition_removeUnshelveCallback(condition, server);
     status = UA_Condition_State_setShelvingStateTimed(condition, server, shelvingTime);
     if (status != UA_STATUSCODE_GOOD) return status;
     status = createUnshelveTimedCallback(server, condition, shelvingTime);
