@@ -2212,6 +2212,83 @@ START_TEST(shelvingSetsSuppressedOrShelved) {
     UA_NodeId_clear(&shelvingState);
 } END_TEST
 
+static UA_NodeId
+createTimedAlarm (const UA_AlarmConditionProperties *alarmProperties)
+{
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode status = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAlarmConditionNodes,
+        alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    status = UA_Server_Condition_enable(acserver, conditionInstance, true, NULL);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    return conditionInstance;
+}
+
+static UA_Int16
+reAlarmRepeatCount (UA_NodeId condition)
+{
+    UA_NodeId countId;
+    UA_StatusCode status = UA_Server_getNodeIdWithBrowseName(acserver, &condition, UA_QUALIFIEDNAME(0, "ReAlarmRepeatCount"), &countId);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    UA_Variant val;
+    status = UA_Server_readValue(acserver, countId, &val);
+    UA_NodeId_clear(&countId);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert(UA_Variant_hasScalarType(&val, &UA_TYPES[UA_TYPES_INT16]));
+    UA_Int16 count = *(UA_Int16 *) val.data;
+    UA_Variant_clear(&val);
+    return count;
+}
+
+/* Disabling a Condition cancels the OnDelay and ReAlarm timers, so its state
+ * does not change while it is disabled */
+START_TEST(disableCancelsAlarmTimers) {
+    UA_QualifiedName activeStateQN = UA_QUALIFIEDNAME(0, "ActiveState");
+
+    UA_AlarmConditionProperties onDelayProperties;
+    memset (&onDelayProperties, 0, sizeof(onDelayProperties));
+    onDelayProperties.hasOnDelay = true;
+    onDelayProperties.onDelay = 1000.0;
+    UA_NodeId onDelayAlarm = createTimedAlarm(&onDelayProperties);
+
+    UA_AlarmConditionProperties reAlarmProperties;
+    memset (&reAlarmProperties, 0, sizeof(reAlarmProperties));
+    reAlarmProperties.hasReAlarmTime = true;
+    reAlarmProperties.reAlarmTime = 1000.0;
+    UA_NodeId reAlarm = createTimedAlarm(&reAlarmProperties);
+
+    /* The OnDelay is pending, the ReAlarm timer runs */
+    UA_StatusCode status = UA_Server_Condition_updateActive(acserver, onDelayAlarm, NULL, true);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert(!isConditionTwoStateVariableInTrueState(acserver, onDelayAlarm, activeStateQN));
+    status = UA_Server_Condition_updateActive(acserver, reAlarm, NULL, true);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    ck_assert_int_eq(reAlarmRepeatCount(reAlarm), 0);
+
+    status = UA_Server_Condition_enable(acserver, onDelayAlarm, false, NULL);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+    status = UA_Server_Condition_enable(acserver, reAlarm, false, NULL);
+    ck_assert_uint_eq(status, UA_STATUSCODE_GOOD);
+
+    UA_fakeSleep(1500);
+    UA_Server_run_iterate(acserver, false);
+    ck_assert(!isConditionTwoStateVariableInTrueState(acserver, onDelayAlarm, activeStateQN));
+    ck_assert_int_eq(reAlarmRepeatCount(reAlarm), 0);
+} END_TEST
+
 /* The Alarm only becomes inactive once the OffDelay has expired and can be
  * activated again afterwards */
 START_TEST(offDelay) {
@@ -2280,6 +2357,7 @@ int main(void) {
     tcase_add_test(tc, createAcknowledgeableCondition);
     tcase_add_test(tc, commentWithoutLocale);
     tcase_add_test(tc, acknowledgeStatusCodes);
+    tcase_add_test(tc, disableCancelsAlarmTimers);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_test(tc, offDelay);

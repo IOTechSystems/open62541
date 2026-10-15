@@ -221,6 +221,19 @@ static inline void UA_Condition_removeUnshelveCallback (UA_Condition *condition,
     condition->unshelveCallbackId = 0;
 }
 
+/* Cancel the timers that change the Alarm state (OnDelay, OffDelay, ReAlarm) */
+static void UA_Condition_removeStateTimers (UA_Condition *condition, UA_Server *server)
+{
+    if (condition->onDelayCallbackId) removeCallback (server, condition->onDelayCallbackId);
+    if (condition->offDelayCallbackId) removeCallback (server, condition->offDelayCallbackId);
+    if (condition->reAlarmCallbackId) removeCallback (server, condition->reAlarmCallbackId);
+    condition->onDelayCallbackId = 0;
+    condition->offDelayCallbackId = 0;
+    condition->reAlarmCallbackId = 0;
+    UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
+    condition->_delayCallbackInfo = NULL;
+}
+
 static size_t UA_Condition_getBranchCount (const UA_Condition *condition)
 {
     size_t count = 0;
@@ -1484,6 +1497,9 @@ conditionEnable (UA_Server *server, UA_Condition *condition, UA_Boolean enable, 
      */
     if (enable == false)
     {
+        /* The state of a disabled Condition is not evaluated. A TimedShelve
+         * still expires. */
+        UA_Condition_removeStateTimers(condition, server);
         UA_ConditionBranch *branch;
         LIST_FOREACH(branch, &condition->branches, listEntry) {
             UA_ConditionBranch_State_setRetain(branch, server, false);
@@ -2079,11 +2095,8 @@ static UA_StatusCode removeCondition (UA_Server *server, UA_Condition *condition
     {
         ret |= removeConditionBranch (server, branch);
     }
-    if (condition->unshelveCallbackId) removeCallback(server, condition->unshelveCallbackId);
-    if (condition->onDelayCallbackId) removeCallback (server, condition->onDelayCallbackId);
-    if (condition->offDelayCallbackId) removeCallback (server, condition->offDelayCallbackId);
-    UA_ConditionEventInfo_delete(condition->_delayCallbackInfo);
-    if (condition->reAlarmCallbackId) removeCallback (server, condition->reAlarmCallbackId);
+    UA_Condition_removeUnshelveCallback(condition, server);
+    UA_Condition_removeStateTimers(condition, server);
     UA_Condition_delete (condition);
     return ret;
 }
