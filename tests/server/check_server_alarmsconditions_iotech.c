@@ -1545,6 +1545,75 @@ START_TEST(createAcknowledgeableCondition) {
     ck_assert(isConditionConfirmed(acserver, conditionInstance) == true);
 } END_TEST
 
+static void
+assertConditionLocalizedText (UA_NodeId condition, const char *property,
+                              const char *expectedText)
+{
+    UA_NodeId fieldId;
+    UA_StatusCode ret = UA_Server_getNodeIdWithBrowseName(acserver, &condition,
+                                                          UA_QUALIFIEDNAME(0, (char *) (uintptr_t) property), &fieldId);
+    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
+    UA_Variant val;
+    ret = UA_Server_readValue(acserver, fieldId, &val);
+    UA_NodeId_clear(&fieldId);
+    ck_assert_uint_eq(ret, UA_STATUSCODE_GOOD);
+    ck_assert(UA_Variant_hasScalarType(&val, &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]));
+    UA_String expected = UA_STRING((char *) (uintptr_t) expectedText);
+    ck_assert(UA_String_equal(&((UA_LocalizedText *) val.data)->text, &expected));
+    UA_Variant_clear(&val);
+}
+
+/* Comments and Messages without a locale are kept */
+START_TEST(commentWithoutLocale) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AlarmConditionProperties alarmProperties;
+    memset (&alarmProperties, 0, sizeof(alarmProperties));
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode retval = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ALARMCONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn)UA_Server_setupAlarmConditionNodes,
+        (UA_ConditionTypeSetupFn)UA_Server_initAlarmConditionNodes,
+        &alarmProperties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Server_Condition_enable(acserver, conditionInstance, true, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* A LocalizedText decoded without a locale has a null locale */
+    UA_ConditionEventInfo info;
+    memset(&info, 0, sizeof(info));
+    info.message.text = UA_STRING("message without locale");
+    retval = UA_Server_Condition_notifyStateChange(acserver, conditionInstance, &info);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    assertConditionLocalizedText(conditionInstance, "Message", "message without locale");
+
+    /* onActive marks the Condition unacknowledged */
+    retval = UA_Server_Condition_setCallbacks(acserver, conditionInstance, &callbacks);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    UA_Boolean autoConfirm = false;
+    retval = UA_Server_Condition_setContext(acserver, conditionInstance, &autoConfirm);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    retval = UA_Server_Condition_updateActive(acserver, conditionInstance, NULL, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    UA_LocalizedText comment;
+    UA_LocalizedText_init(&comment);
+    comment.text = UA_STRING("comment without locale");
+    retval = UA_Server_Condition_acknowledge(acserver, conditionInstance, &comment, NULL);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    assertConditionLocalizedText(conditionInstance, "Comment", "comment without locale");
+} END_TEST
+
 static UA_Double evaluateInput = 20.0;
 
 static void *
@@ -2138,6 +2207,7 @@ int main(void) {
     tcase_add_test(tc, nonExclusiveSingleLimit);
     tcase_add_test(tc, enableEvaluatesCondition);
     tcase_add_test(tc, createAcknowledgeableCondition);
+    tcase_add_test(tc, commentWithoutLocale);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_test(tc, offDelay);

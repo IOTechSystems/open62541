@@ -1381,8 +1381,8 @@ UA_ConditionBranch_triggerEvent (UA_ConditionBranch *branch, UA_Server *server,
 
     if (info)
     {
-        if (!UA_String_equal(&info->message.locale, &UA_STRING_NULL) &&
-            !UA_String_equal(&info->message.text, &UA_STRING_NULL))
+        /* The locale can be null or empty (invariant) */
+        if (info->message.text.length > 0)
         {
             UA_ConditionBranch_State_setMessage(branch, server, &info->message);
         }
@@ -1560,9 +1560,9 @@ conditionBranch_addComment(UA_Server *server, UA_ConditionBranch *branch, const 
         return UA_STATUSCODE_BADCONDITIONDISABLED;
     }
 
-    /* Set Comment. Check whether comment is empty -> leave the last value as is*/
-    if(!UA_ByteString_equal(&comment->locale, &UA_STRING_NULL) &&
-       !UA_ByteString_equal(&comment->text, &UA_STRING_NULL)) {
+    /* Set Comment. Check whether comment is empty -> leave the last value as is.
+     * The locale can be null or empty (invariant). */
+    if(comment->text.length > 0) {
         retval = UA_ConditionBranch_State_setComment(branch, server, comment);
         CONDITION_ASSERT_RETURN_RETVAL (retval, "Set Condition Comment failed",);
     }
