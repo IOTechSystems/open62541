@@ -3536,6 +3536,16 @@ UA_Server_setupAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId
     return retval;
 }
 
+UA_StatusCode
+UA_Server_initAcknowledgeableConditionNodes (UA_Server *server, const UA_NodeId *conditionId,
+                                             const UA_AcknowledgeableConditionProperties *properties)
+{
+    lockServer(server);
+    UA_StatusCode retval = initAcknowledgeableConditionNodes(server, conditionId, properties);
+    unlockServer(server);
+    return retval;
+}
+
 static UA_StatusCode
 setupAlarmConditionShelvingState(UA_Server *server, const UA_NodeId *condition)
 {

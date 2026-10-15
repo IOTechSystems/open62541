@@ -1516,6 +1516,35 @@ START_TEST(nonExclusiveLimitEvaluateFn) {
 
 } END_TEST
 
+/* An AcknowledgeableCondition can be created with the public setup and init
+ * functions */
+START_TEST(createAcknowledgeableCondition) {
+    UA_CreateConditionProperties conditionProperties = {
+        .sourceNode = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER),
+        .browseName = UA_QUALIFIEDNAME(0, "Test Condition"),
+        .canBranch = false
+    };
+
+    UA_AcknowledgeableConditionProperties properties = {
+        .confirmable = true
+    };
+
+    UA_NodeId conditionInstance = UA_NODEID_NULL;
+    UA_StatusCode retval = __UA_Server_createCondition(
+        acserver,
+        UA_NODEID_NULL,
+        UA_NODEID_NUMERIC(0, UA_NS0ID_ACKNOWLEDGEABLECONDITIONTYPE),
+        &conditionProperties,
+        (UA_ConditionTypeSetupFn) UA_Server_setupAcknowledgeableConditionNodes,
+        (UA_ConditionTypeSetupFn) UA_Server_initAcknowledgeableConditionNodes,
+        &properties,
+        &conditionInstance
+    );
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert(isConditionAcked(acserver, conditionInstance) == true);
+    ck_assert(isConditionConfirmed(acserver, conditionInstance) == true);
+} END_TEST
+
 static UA_Double evaluateInput = 20.0;
 
 static void *
@@ -2108,6 +2137,7 @@ int main(void) {
     tcase_add_test(tc, nonExclusiveHighHighWithoutHigh);
     tcase_add_test(tc, nonExclusiveSingleLimit);
     tcase_add_test(tc, enableEvaluatesCondition);
+    tcase_add_test(tc, createAcknowledgeableCondition);
     tcase_add_test(tc, shelveMethodCalledOnCondition);
     tcase_add_test(tc, shelveMethodCalledOnShelvingState);
     tcase_add_test(tc, offDelay);
