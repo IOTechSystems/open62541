@@ -207,6 +207,151 @@ START_TEST(update_certificate_none_follows) {
     UA_ByteString_clear(&newPrivateKey);
 }
 END_TEST
+
+static UA_SecurityPolicy *
+getPolicy(const char *uriSuffix) {
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    UA_String suffix = UA_STRING((char*)(uintptr_t)uriSuffix);
+    for(size_t i = 0; i < config->securityPoliciesSize; i++) {
+        UA_String *uri = &config->securityPolicies[i].policyUri;
+        if(uri->length >= suffix.length &&
+           memcmp(uri->data + uri->length - suffix.length, suffix.data, suffix.length) == 0)
+            return &config->securityPolicies[i];
+    }
+    return NULL;
+}
+
+/* The endpoints of a SecurityPolicy advertise its certificate */
+static void
+assertEndpointsMatchPolicies(void) {
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    for(size_t i = 0; i < config->endpointsSize; i++) {
+        UA_EndpointDescription *ed = &config->endpoints[i];
+        UA_SecurityPolicy *sp = getSecurityPolicyByUri(server, &ed->securityPolicyUri);
+        ck_assert_ptr_ne(sp, NULL);
+        if(ed->serverCertificate.length > 0)
+            ck_assert(UA_ByteString_equal(&ed->serverCertificate, &sp->localCertificate));
+    }
+}
+
+START_TEST(replace_certificate) {
+    UA_ByteString oldCertificate = {CERT_DER_LENGTH, CERT_DER_DATA};
+    UA_ByteString newCertificate = UA_BYTESTRING_NULL;
+    UA_ByteString newPrivateKey = UA_BYTESTRING_NULL;
+    generateCertificate(&newCertificate, &newPrivateKey);
+
+    UA_StatusCode retval =
+        UA_Server_replaceCertificate(server, &oldCertificate, &newCertificate,
+                                     &newPrivateKey, true, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+
+    /* Every SecurityPolicy with a certificate used the old one, incl. #None */
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    for(size_t i = 0; i < config->securityPoliciesSize; i++) {
+        UA_SecurityPolicy *sp = &config->securityPolicies[i];
+        if(sp->localCertificate.length > 0)
+            ck_assert(UA_ByteString_equal(&sp->localCertificate, &newCertificate));
+    }
+    assertEndpointsMatchPolicies();
+
+    UA_ByteString_clear(&newCertificate);
+    UA_ByteString_clear(&newPrivateKey);
+}
+END_TEST
+
+START_TEST(replace_certificate_unique_per_policy) {
+    UA_ByteString initialCertificate = {CERT_DER_LENGTH, CERT_DER_DATA};
+    UA_ByteString certA = UA_BYTESTRING_NULL, keyA = UA_BYTESTRING_NULL;
+    UA_ByteString certB = UA_BYTESTRING_NULL, keyB = UA_BYTESTRING_NULL;
+    UA_ByteString certC = UA_BYTESTRING_NULL, keyC = UA_BYTESTRING_NULL;
+    generateCertificate(&certA, &keyA);
+    generateCertificate(&certB, &keyB);
+    generateCertificate(&certC, &keyC);
+
+    /* Basic256Sha256 gets its own certificate. Other SecurityPolicies of the
+     * same CertificateType keep the initial certificate. */
+    UA_SecurityPolicy *basic256Sha256 = getPolicy("#Basic256Sha256");
+    UA_SecurityPolicy *aes128 = getPolicy("#Aes128_Sha256_RsaOaep");
+    UA_SecurityPolicy *none = getPolicy("#None");
+    ck_assert_ptr_ne(basic256Sha256, NULL);
+    ck_assert_ptr_ne(aes128, NULL);
+    ck_assert_ptr_ne(none, NULL);
+    ck_assert_uint_gt(none->localCertificate.length, 0);
+    ck_assert_uint_eq(basic256Sha256->updateCertificate(basic256Sha256, certA, keyA),
+                      UA_STATUSCODE_GOOD);
+
+    /* Replacing the initial certificate leaves Basic256Sha256 unchanged */
+    UA_StatusCode retval =
+        UA_Server_replaceCertificate(server, &initialCertificate, &certB, &keyB, true, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert(UA_ByteString_equal(&basic256Sha256->localCertificate, &certA));
+    ck_assert(UA_ByteString_equal(&aes128->localCertificate, &certB));
+    ck_assert(UA_ByteString_equal(&none->localCertificate, &certB));
+    assertEndpointsMatchPolicies();
+
+    /* Replacing the Basic256Sha256 certificate only changes Basic256Sha256 */
+    retval = UA_Server_replaceCertificate(server, &certA, &certC, &keyC, true, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
+    ck_assert(UA_ByteString_equal(&basic256Sha256->localCertificate, &certC));
+    ck_assert(UA_ByteString_equal(&aes128->localCertificate, &certB));
+    ck_assert(UA_ByteString_equal(&none->localCertificate, &certB));
+    assertEndpointsMatchPolicies();
+
+    UA_ByteString_clear(&certA);
+    UA_ByteString_clear(&keyA);
+    UA_ByteString_clear(&certB);
+    UA_ByteString_clear(&keyB);
+    UA_ByteString_clear(&certC);
+    UA_ByteString_clear(&keyC);
+}
+END_TEST
+
+START_TEST(replace_certificate_notFound) {
+    UA_ByteString unknownCertificate = UA_BYTESTRING_NULL;
+    UA_ByteString unknownKey = UA_BYTESTRING_NULL;
+    UA_ByteString newCertificate = UA_BYTESTRING_NULL;
+    UA_ByteString newPrivateKey = UA_BYTESTRING_NULL;
+    generateCertificate(&unknownCertificate, &unknownKey);
+    generateCertificate(&newCertificate, &newPrivateKey);
+
+    UA_StatusCode retval =
+        UA_Server_replaceCertificate(server, &unknownCertificate, &newCertificate,
+                                     &newPrivateKey, true, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADNOTFOUND);
+
+    UA_ByteString initialCertificate = {CERT_DER_LENGTH, CERT_DER_DATA};
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    for(size_t i = 0; i < config->securityPoliciesSize; i++) {
+        UA_SecurityPolicy *sp = &config->securityPolicies[i];
+        if(sp->localCertificate.length > 0)
+            ck_assert(UA_ByteString_equal(&sp->localCertificate, &initialCertificate));
+    }
+
+    UA_ByteString_clear(&unknownCertificate);
+    UA_ByteString_clear(&unknownKey);
+    UA_ByteString_clear(&newCertificate);
+    UA_ByteString_clear(&newPrivateKey);
+}
+END_TEST
+
+START_TEST(replace_certificate_wrongKey) {
+    UA_ByteString oldCertificate = {CERT_DER_LENGTH, CERT_DER_DATA};
+    UA_ByteString newCertificate = UA_BYTESTRING_NULL, newPrivateKey = UA_BYTESTRING_NULL;
+    UA_ByteString otherCertificate = UA_BYTESTRING_NULL, otherKey = UA_BYTESTRING_NULL;
+    generateCertificate(&newCertificate, &newPrivateKey);
+    generateCertificate(&otherCertificate, &otherKey);
+
+    UA_StatusCode retval =
+        UA_Server_replaceCertificate(server, &oldCertificate, &newCertificate,
+                                     &otherKey, true, true);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADNOTSUPPORTED);
+
+    UA_ByteString_clear(&newCertificate);
+    UA_ByteString_clear(&newPrivateKey);
+    UA_ByteString_clear(&otherCertificate);
+    UA_ByteString_clear(&otherKey);
+}
+END_TEST
 #endif /* UA_ENABLE_IOTECH_MODIFICATIONS */
 
 static Suite* testSuite_create_certificate(void) {
@@ -220,6 +365,10 @@ static Suite* testSuite_create_certificate(void) {
     tcase_add_test(tc_cert, update_certificate_noKey_invalid);
 #ifdef UA_ENABLE_IOTECH_MODIFICATIONS
     tcase_add_test(tc_cert, update_certificate_none_follows);
+    tcase_add_test(tc_cert, replace_certificate);
+    tcase_add_test(tc_cert, replace_certificate_unique_per_policy);
+    tcase_add_test(tc_cert, replace_certificate_notFound);
+    tcase_add_test(tc_cert, replace_certificate_wrongKey);
 #endif
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_cert);
@@ -234,6 +383,10 @@ static Suite* testSuite_create_certificate(void) {
     tcase_add_test(tc_cert_filestore, update_certificate_noKey_invalid);
 #ifdef UA_ENABLE_IOTECH_MODIFICATIONS
     tcase_add_test(tc_cert_filestore, update_certificate_none_follows);
+    tcase_add_test(tc_cert_filestore, replace_certificate);
+    tcase_add_test(tc_cert_filestore, replace_certificate_unique_per_policy);
+    tcase_add_test(tc_cert_filestore, replace_certificate_notFound);
+    tcase_add_test(tc_cert_filestore, replace_certificate_wrongKey);
 #endif
 #endif /* UA_ENABLE_ENCRYPTION */
     suite_add_tcase(s,tc_cert_filestore);
