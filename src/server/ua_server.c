@@ -1071,6 +1071,146 @@ UA_Server_updateCertificate(UA_Server *server,
     return UA_STATUSCODE_GOOD;
 }
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+typedef struct ReplaceCertInfo {
+    UA_Server *server;
+    UA_ByteString certificate; /* The certificate of the updated SecurityPolicies */
+} ReplaceCertInfo;
+
+static void
+secureChannel_delayedCloseByCertificate(void *application, void *context) {
+    UA_DelayedCallback *dc = (UA_DelayedCallback*)context;
+    ReplaceCertInfo *info = (ReplaceCertInfo*)application;
+
+    UA_SecureChannel *channel;
+    TAILQ_FOREACH(channel, &info->server->channels, serverEntry) {
+        /* The SecurityPolicy is only set once the OPN handshake is done */
+        const UA_SecurityPolicy *policy = channel->securityPolicy;
+        if(policy && UA_ByteString_equal(&policy->localCertificate, &info->certificate))
+            UA_SecureChannel_shutdown(channel, UA_SHUTDOWNREASON_CLOSE);
+    }
+    UA_ByteString_clear(&info->certificate);
+    UA_free(info);
+    UA_free(dc);
+}
+
+UA_StatusCode
+UA_Server_replaceCertificate(UA_Server *server,
+                             const UA_ByteString *oldCertificate,
+                             const UA_ByteString *newCertificate,
+                             const UA_ByteString *newPrivateKey,
+                             UA_Boolean closeSessions,
+                             UA_Boolean closeSecureChannels) {
+    if(!server || !oldCertificate || !newCertificate)
+        return UA_STATUSCODE_BADINTERNALERROR;
+    if(oldCertificate->length == 0)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+
+    lockServer(server);
+
+    if(server->gdsManager.transaction.state == UA_GDSTRANSACTIONSTATE_PENDING) {
+        unlockServer(server);
+        return UA_STATUSCODE_BADTRANSACTIONPENDING;
+    }
+
+    UA_ByteString newKey = UA_BYTESTRING_NULL;
+    if(newPrivateKey && newPrivateKey->length > 0) {
+        if(UA_CertificateUtils_checkKeyPair(newCertificate, newPrivateKey) != UA_STATUSCODE_GOOD) {
+            unlockServer(server);
+            return UA_STATUSCODE_BADNOTSUPPORTED;
+        }
+        newKey = *newPrivateKey;
+    }
+
+    /* The SecurityPolicies that use the old certificate. This includes the
+     * #None SecurityPolicy if it was configured with that certificate. */
+    UA_Boolean *replace = (UA_Boolean*)
+        UA_calloc(server->config.securityPoliciesSize + 1, sizeof(UA_Boolean));
+    if(!replace) {
+        unlockServer(server);
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    size_t replaceCount = 0;
+    for(size_t i = 0; i < server->config.securityPoliciesSize; i++) {
+        if(UA_ByteString_equal(&server->config.securityPolicies[i].localCertificate,
+                               oldCertificate)) {
+            replace[i] = true;
+            replaceCount++;
+        }
+    }
+    if(replaceCount == 0) {
+        UA_free(replace);
+        unlockServer(server);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    /* Close the Sessions on SecureChannels that use the old certificate */
+    if(closeSessions) {
+        session_list_entry *sentry, *temp;
+        LIST_FOREACH_SAFE(sentry, &server->sessions, pointers, temp) {
+            UA_SecureChannel *channel = sentry->session.channel;
+            if(channel && channel->securityPolicy &&
+               UA_ByteString_equal(&channel->securityPolicy->localCertificate,
+                                   oldCertificate))
+                UA_Session_remove(server, &sentry->session, UA_SHUTDOWNREASON_CLOSE);
+        }
+    }
+
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_SecurityPolicy *updated = NULL;
+    for(size_t i = 0; i < server->config.securityPoliciesSize; i++) {
+        if(!replace[i])
+            continue;
+        UA_SecurityPolicy *sp = &server->config.securityPolicies[i];
+        retval = sp->updateCertificate(sp, *newCertificate, newKey);
+        if(retval != UA_STATUSCODE_GOOD)
+            goto cleanup;
+        updated = sp;
+    }
+
+    /* The endpoints of the updated SecurityPolicies advertise the new
+     * certificate in the format the SecurityPolicy holds it (DER) */
+    for(size_t i = 0; i < server->config.endpointsSize; i++) {
+        UA_EndpointDescription *ed = &server->config.endpoints[i];
+        for(size_t j = 0; j < server->config.securityPoliciesSize; j++) {
+            UA_SecurityPolicy *sp = &server->config.securityPolicies[j];
+            if(!replace[j] || !UA_String_equal(&ed->securityPolicyUri, &sp->policyUri))
+                continue;
+            UA_ByteString_clear(&ed->serverCertificate);
+            retval = UA_ByteString_copy(&sp->localCertificate, &ed->serverCertificate);
+            if(retval != UA_STATUSCODE_GOOD)
+                goto cleanup;
+            break;
+        }
+    }
+
+    /* Close the SecureChannels of the updated SecurityPolicies once the
+     * currently scheduled jobs have completed */
+    if(closeSecureChannels && updated) {
+        UA_DelayedCallback *dc = (UA_DelayedCallback*)UA_calloc(1, sizeof(UA_DelayedCallback));
+        ReplaceCertInfo *info = (ReplaceCertInfo*)UA_calloc(1, sizeof(ReplaceCertInfo));
+        if(!dc || !info ||
+           UA_ByteString_copy(&updated->localCertificate, &info->certificate) != UA_STATUSCODE_GOOD) {
+            UA_free(dc);
+            UA_free(info);
+            retval = UA_STATUSCODE_BADOUTOFMEMORY;
+            goto cleanup;
+        }
+        info->server = server;
+        dc->callback = secureChannel_delayedCloseByCertificate;
+        dc->application = info;
+        dc->context = dc;
+        UA_EventLoop *el = server->config.eventLoop;
+        el->addDelayedCallback(el, dc);
+    }
+
+cleanup:
+    UA_free(replace);
+    unlockServer(server);
+    return retval;
+}
+#endif /* UA_ENABLE_IOTECH_MODIFICATIONS */
+
 UA_StatusCode
 UA_Server_createSigningRequest(UA_Server *server,
                                const UA_NodeId certificateGroupId,

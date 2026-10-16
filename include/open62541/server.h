@@ -3044,6 +3044,32 @@ UA_Server_updateCertificate(UA_Server *server,
                             const UA_ByteString certificate,
                             const UA_ByteString *privateKey);
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+/* Replace the certificate of every SecurityPolicy (including #None) that uses
+ * oldCertificate, and of the endpoints of those SecurityPolicies. Unlike
+ * UA_Server_updateCertificate, SecurityPolicies of the same CertificateType
+ * that use another certificate are left unchanged. This allows a unique
+ * certificate per SecurityPolicy, as in open62541 1.4.
+ *
+ * @param oldCertificate The DER encoded certificate to replace, as held by the
+ *        SecurityPolicies
+ * @param newCertificate The new certificate (DER or PEM)
+ * @param newPrivateKey The new private key. If NULL or empty the existing
+ *        private key is kept
+ * @param closeSessions Close the Sessions on SecureChannels that use the old
+ *        certificate
+ * @param closeSecureChannels Close the SecureChannels of the updated
+ *        SecurityPolicies once the currently scheduled jobs have completed
+ * @return UA_STATUSCODE_BADNOTFOUND if no SecurityPolicy uses oldCertificate */
+UA_StatusCode UA_EXPORT
+UA_Server_replaceCertificate(UA_Server *server,
+                             const UA_ByteString *oldCertificate,
+                             const UA_ByteString *newCertificate,
+                             const UA_ByteString *newPrivateKey,
+                             UA_Boolean closeSessions,
+                             UA_Boolean closeSecureChannels);
+#endif
+
 /* Creates a PKCS #10 DER encoded certificate request signed with the server's
  * private key.
  * If certificateGroupId is null the DefaultApplicationGroup is used.
