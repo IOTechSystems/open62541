@@ -3044,6 +3044,63 @@ UA_Server_updateCertificate(UA_Server *server,
                             const UA_ByteString certificate,
                             const UA_ByteString *privateKey);
 
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && \
+    !defined(UA_ENABLE_GDS_PUSHMANAGEMENT)
+/* Replace the certificate of every SecurityPolicy (including #None) that uses
+ * oldCertificate, and of the endpoints of those SecurityPolicies. Unlike
+ * UA_Server_updateCertificate, SecurityPolicies of the same CertificateType
+ * that use another certificate are left unchanged. This allows a unique
+ * certificate per SecurityPolicy, as in open62541 1.4.
+ *
+ * Only available with mbedTLS (UA_ENABLE_ENCRYPTION_MBEDTLS), and only RSA
+ * certificates are supported. Not available with UA_ENABLE_GDS_PUSHMANAGEMENT,
+ * where the certificates are managed through GDS push management
+ * (UA_Server_updateCertificate).
+ *
+ * The update stops at the first SecurityPolicy that fails, and there is no
+ * rollback. The SecurityPolicies before it keep the new certificate, the
+ * failed SecurityPolicy may be left without a usable certificate and the
+ * remaining ones keep the old certificate. The endpoints always advertise the
+ * current certificate of their SecurityPolicy. The requested Session and
+ * SecureChannel closes are done for the updated SecurityPolicies and for the
+ * failed one.
+ *
+ * @param oldCertificate The DER encoded certificate to replace, as held by the
+ *        SecurityPolicies
+ * @param newCertificate The new certificate (DER or PEM)
+ * @param newPrivateKey The new private key. If NULL or empty the existing
+ *        private key is kept. The new certificate must then have the public
+ *        key of oldCertificate. Ignored if only the #None SecurityPolicy uses
+ *        oldCertificate
+ * @param closeSessions Close the Sessions on SecureChannels of the updated
+ *        SecurityPolicies once the certificate has been replaced
+ * @param closeSecureChannels Close the SecureChannels of the updated
+ *        SecurityPolicies once the currently scheduled jobs have completed
+ * @return UA_STATUSCODE_BADINTERNALERROR if server, oldCertificate or
+ *         newCertificate is NULL,
+ *         UA_STATUSCODE_BADINVALIDARGUMENT if oldCertificate or newCertificate
+ *         is empty,
+ *         UA_STATUSCODE_BADNOTFOUND if no SecurityPolicy uses oldCertificate,
+ *         UA_STATUSCODE_BADCERTIFICATEINVALID if newCertificate is not an RSA
+ *         certificate,
+ *         UA_STATUSCODE_BADNOTSUPPORTED if newCertificate does not pair with
+ *         newPrivateKey or, without newPrivateKey, with the existing private
+ *         key,
+ *         UA_STATUSCODE_BADOUTOFMEMORY if an allocation fails, including when
+ *         the certificates were replaced but the SecureChannels could not be
+ *         scheduled for closing,
+ *         or the StatusCode of the first SecurityPolicy that failed to update.
+ *         If only the #None SecurityPolicy uses oldCertificate,
+ *         newCertificate is not checked, as #None does no crypto. */
+UA_StatusCode UA_EXPORT
+UA_Server_replaceCertificate(UA_Server *server,
+                             const UA_ByteString *oldCertificate,
+                             const UA_ByteString *newCertificate,
+                             const UA_ByteString *newPrivateKey,
+                             UA_Boolean closeSessions,
+                             UA_Boolean closeSecureChannels);
+#endif
+
 /* Creates a PKCS #10 DER encoded certificate request signed with the server's
  * private key.
  * If certificateGroupId is null the DefaultApplicationGroup is used.
