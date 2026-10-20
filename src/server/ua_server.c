@@ -997,45 +997,12 @@ UA_Server_updateCertificate(UA_Server *server,
 #endif
     }
 
-#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
-    /* The #None SecurityPolicy has no CertificateType. It only carries a
-     * certificate to advertise it on its endpoints. Update it as well if it was
-     * configured with a certificate that is replaced. */
-    for(size_t i = 0; i < server->config.securityPoliciesSize; i++) {
-        UA_SecurityPolicy *sp = &server->config.securityPolicies[i];
-        if(!UA_NodeId_isNull(&sp->certificateTypeId) || sp->localCertificate.length == 0)
-            continue;
-        for(size_t j = 0; j < server->config.securityPoliciesSize; j++) {
-            const UA_SecurityPolicy *typed = &server->config.securityPolicies[j];
-            if(!UA_NodeId_equal(&typed->certificateTypeId, &certificateTypeId) ||
-               !UA_ByteString_equal(&typed->localCertificate, &sp->localCertificate))
-                continue;
-            UA_StatusCode res = sp->updateCertificate(sp, certificate, newPrivateKey);
-            if(res != UA_STATUSCODE_GOOD) {
-                unlockServer(server);
-                return res;
-            }
-            break;
-        }
-    }
-#endif
-
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
     for(size_t i = 0; i < server->config.endpointsSize; i++) {
         UA_EndpointDescription *ed = &server->config.endpoints[i];
         UA_SecurityPolicy *sp = getSecurityPolicyByUri(server,
                             &server->config.endpoints[i].securityPolicyUri);
         UA_CHECK_MEM(sp, unlockServer(server); return UA_STATUSCODE_BADINTERNALERROR);
-
-#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
-        /* The #None SecurityPolicy was updated above */
-        if(UA_NodeId_isNull(&sp->certificateTypeId) &&
-           UA_ByteString_equal(&sp->localCertificate, &certificate)) {
-            UA_ByteString_clear(&ed->serverCertificate);
-            UA_ByteString_copy(&certificate, &ed->serverCertificate);
-            continue;
-        }
-#endif
 
         if(!UA_NodeId_equal(&sp->certificateTypeId, &certificateTypeId))
             continue;
@@ -1070,6 +1037,209 @@ UA_Server_updateCertificate(UA_Server *server,
     unlockServer(server);
     return UA_STATUSCODE_GOOD;
 }
+
+#if defined(UA_ENABLE_IOTECH_MODIFICATIONS) && defined(UA_ENABLE_ENCRYPTION_MBEDTLS) && \
+    !defined(UA_ENABLE_GDS_PUSHMANAGEMENT)
+typedef struct ReplaceCertInfo {
+    UA_DelayedCallback dc;
+    UA_Server *server;
+    size_t policiesSize;
+    const UA_SecurityPolicy **policies; /* The updated SecurityPolicies */
+} ReplaceCertInfo;
+
+static void
+secureChannel_delayedCloseByPolicy(void *application, void *context) {
+    ReplaceCertInfo *info = (ReplaceCertInfo*)application;
+
+    UA_SecureChannel *channel;
+    TAILQ_FOREACH(channel, &info->server->channels, serverEntry) {
+        /* The SecurityPolicy is only set once the OPN handshake is done */
+        const UA_SecurityPolicy *policy = channel->securityPolicy;
+        if(!policy)
+            continue;
+        for(size_t i = 0; i < info->policiesSize; i++) {
+            if(policy == info->policies[i]) {
+                UA_SecureChannel_shutdown(channel, UA_SHUTDOWNREASON_CLOSE);
+                break;
+            }
+        }
+    }
+    UA_free(info);
+}
+
+/* Check that the SecurityPolicies with a private key can use the new
+ * certificate */
+static UA_StatusCode
+checkReplacementCertificate(const UA_ByteString *oldCertificate,
+                            const UA_ByteString *newCertificate,
+                            const UA_ByteString *newPrivateKey) {
+    /* Reject non-RSA certificates (getKeySize only accepts RSA with mbedTLS).
+     * The mbedTLS SecurityPolicies do not check the key type when the
+     * certificate is updated. */
+    size_t keySize = 0;
+    if(UA_CertificateUtils_getKeySize((UA_ByteString*)(uintptr_t)newCertificate,
+                                      &keySize) != UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADCERTIFICATEINVALID;
+
+    if(newPrivateKey && newPrivateKey->length > 0) {
+        if(UA_CertificateUtils_checkKeyPair(newCertificate, newPrivateKey) != UA_STATUSCODE_GOOD)
+            return UA_STATUSCODE_BADNOTSUPPORTED;
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* The SecurityPolicies keep their private key. It must pair with the
+     * new certificate. */
+    if(UA_CertificateUtils_comparePublicKeys(newCertificate, oldCertificate) !=
+       UA_STATUSCODE_GOOD)
+        return UA_STATUSCODE_BADNOTSUPPORTED;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_Server_replaceCertificate(UA_Server *server,
+                             const UA_ByteString *oldCertificate,
+                             const UA_ByteString *newCertificate,
+                             const UA_ByteString *newPrivateKey,
+                             UA_Boolean closeSessions,
+                             UA_Boolean closeSecureChannels) {
+    if(!server || !oldCertificate || !newCertificate)
+        return UA_STATUSCODE_BADINTERNALERROR;
+    if(oldCertificate->length == 0 || newCertificate->length == 0)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+
+    lockServer(server);
+
+    /* The SecurityPolicies that use the old certificate. This includes the
+     * #None SecurityPolicy if it was configured with that certificate. */
+    size_t policiesSize = server->config.securityPoliciesSize;
+    /* + 1 to avoid a zero-size allocation */
+    UA_Boolean *replace = (UA_Boolean*)UA_calloc(policiesSize + 1, sizeof(UA_Boolean));
+    if(!replace) {
+        unlockServer(server);
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    }
+    size_t replaceCount = 0;
+    UA_Boolean noneOnly = true;
+    for(size_t i = 0; i < policiesSize; i++) {
+        UA_SecurityPolicy *sp = &server->config.securityPolicies[i];
+        if(UA_ByteString_equal(&sp->localCertificate, oldCertificate)) {
+            replace[i] = true;
+            replaceCount++;
+            if(sp->policyType != UA_SECURITYPOLICYTYPE_NONE)
+                noneOnly = false;
+        }
+    }
+    if(replaceCount == 0) {
+        UA_free(replace);
+        unlockServer(server);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    /* The #None SecurityPolicy has no private key and only advertises the
+     * certificate. So if only #None uses the old certificate, any certificate
+     * is accepted and the private key is ignored, as in open62541 1.4. */
+    UA_ByteString newKey = UA_BYTESTRING_NULL;
+    if(!noneOnly) {
+        UA_StatusCode res =
+            checkReplacementCertificate(oldCertificate, newCertificate, newPrivateKey);
+        if(res != UA_STATUSCODE_GOOD) {
+            UA_free(replace);
+            unlockServer(server);
+            return res;
+        }
+        if(newPrivateKey)
+            newKey = *newPrivateKey;
+    }
+
+    /* Stop at the first failure. A rollback is not possible, as the
+     * SecurityPolicies do not expose their previous private key. The
+     * SecurityPolicies after the failed one keep the old certificate and are
+     * removed from replace. A SecurityPolicy is modified even if its update
+     * fails (the mbedTLS SecurityPolicies clear their certificate and
+     * context), so the failed one stays in replace. */
+    UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    size_t failed = policiesSize;
+    for(size_t i = 0; i < policiesSize; i++) {
+        if(!replace[i])
+            continue;
+        if(failed < policiesSize) {
+            replace[i] = false;
+            replaceCount--;
+            continue;
+        }
+        UA_SecurityPolicy *sp = &server->config.securityPolicies[i];
+        retval = sp->updateCertificate(sp, *newCertificate, newKey);
+        if(retval != UA_STATUSCODE_GOOD) {
+            UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
+                         "Could not replace the certificate of SecurityPolicy %.*s "
+                         "with StatusCode %s", (int)sp->policyUri.length,
+                         sp->policyUri.data, UA_StatusCode_name(retval));
+            failed = i;
+        }
+    }
+
+    /* The endpoints of the modified SecurityPolicies advertise the certificate
+     * the SecurityPolicy now holds (DER). Also after a failure, so that the
+     * endpoints stay consistent with the SecurityPolicies. */
+    for(size_t i = 0; i < server->config.endpointsSize; i++) {
+        UA_EndpointDescription *ed = &server->config.endpoints[i];
+        UA_SecurityPolicy *sp = getSecurityPolicyByUri(server, &ed->securityPolicyUri);
+        if(!sp || !replace[sp - server->config.securityPolicies])
+            continue;
+        UA_ByteString_clear(&ed->serverCertificate);
+        UA_StatusCode res =
+            UA_ByteString_copy(&sp->localCertificate, &ed->serverCertificate);
+        if(retval == UA_STATUSCODE_GOOD)
+            retval = res;
+    }
+
+    /* Close the Sessions on SecureChannels of the updated SecurityPolicies.
+     * This includes the failed SecurityPolicy, which is no longer usable. */
+    if(closeSessions && replaceCount > 0) {
+        session_list_entry *sentry, *temp;
+        LIST_FOREACH_SAFE(sentry, &server->sessions, pointers, temp) {
+            UA_SecureChannel *channel = sentry->session.channel;
+            if(!channel || !channel->securityPolicy)
+                continue;
+            for(size_t i = 0; i < policiesSize; i++) {
+                if(replace[i] && channel->securityPolicy == &server->config.securityPolicies[i]) {
+                    UA_Session_remove(server, &sentry->session, UA_SHUTDOWNREASON_CLOSE);
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Close the SecureChannels of the updated SecurityPolicies once the
+     * currently scheduled jobs have completed */
+    if(closeSecureChannels && replaceCount > 0) {
+        ReplaceCertInfo *info = (ReplaceCertInfo*)
+            UA_calloc(1, sizeof(ReplaceCertInfo) +
+                      replaceCount * sizeof(const UA_SecurityPolicy*));
+        if(info) {
+            info->server = server;
+            info->policies = (const UA_SecurityPolicy**)(info + 1);
+            for(size_t i = 0; i < policiesSize; i++) {
+                if(replace[i])
+                    info->policies[info->policiesSize++] = &server->config.securityPolicies[i];
+            }
+            info->dc.callback = secureChannel_delayedCloseByPolicy;
+            info->dc.application = info;
+            UA_EventLoop *el = server->config.eventLoop;
+            el->addDelayedCallback(el, &info->dc);
+        } else if(retval == UA_STATUSCODE_GOOD) {
+            /* The certificates are replaced, but the SecureChannels that use
+             * the old certificate stay open. Report it to the caller. */
+            retval = UA_STATUSCODE_BADOUTOFMEMORY;
+        }
+    }
+
+    UA_free(replace);
+    unlockServer(server);
+    return retval;
+}
+#endif /* UA_ENABLE_IOTECH_MODIFICATIONS && UA_ENABLE_ENCRYPTION_MBEDTLS &&
+        * !UA_ENABLE_GDS_PUSHMANAGEMENT */
 
 UA_StatusCode
 UA_Server_createSigningRequest(UA_Server *server,
