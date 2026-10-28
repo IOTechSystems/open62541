@@ -259,8 +259,14 @@ UA_MonitoredItem_sample(UA_Server *server, UA_MonitoredItem *mon) {
     /* Read the value possibly asynchronous */
     UA_StatusCode res = UA_STATUSCODE_BADTOOMANYOPERATIONS;
     if(UA_LIKELY(mon->outstandingAsyncReads < UA_MONITOREDITEM_ASYNC_MAX)) {
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_SAMPLE);
+#endif
         res = read_async(server, session, &mon->itemToMonitor, mon->timestampsToReturn,
                          (UA_ServerAsyncReadResultCallback)processMonitoredItemAsyncRead, mon, 0);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        setOperationMode(server, modePrev);
+#endif
     }
     if(res == UA_STATUSCODE_GOOD) {
         mon->outstandingAsyncReads++;

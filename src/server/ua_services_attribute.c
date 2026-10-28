@@ -298,8 +298,18 @@ readValueAttributeComplete(UA_Server *server, UA_Session *session,
 UA_StatusCode
 readValueAttribute(UA_Server *server, UA_Session *session,
                    const UA_VariableNode *vn, UA_DataValue *v) {
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    /* The value is needed right away, also when called within an operation
+     * that can complete asynchronously (e.g. the type checks of a Write) */
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_SYNC);
+    UA_StatusCode res = readValueAttributeComplete(server, session, vn,
+                                                   UA_TIMESTAMPSTORETURN_NEITHER, NULL, v);
+    setOperationMode(server, modePrev);
+    return res;
+#else
     return readValueAttributeComplete(server, session, vn,
                                       UA_TIMESTAMPSTORETURN_NEITHER, NULL, v);
+#endif
 }
 
 static const UA_String binEncoding = {sizeof("Default Binary")-1, (UA_Byte*)"Default Binary"};
@@ -671,7 +681,13 @@ readWithSession(UA_Server *server, UA_Session *session,
         return dv;
     }
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_SYNC);
+#endif
     UA_Boolean done = Operation_Read(server, session, ttr, item, &dv);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    setOperationMode(server, modePrev);
+#endif
     if(!done) {
         if(server->config.asyncOperationCancelCallback)
             server->config.asyncOperationCancelCallback(server, &dv);
@@ -1705,9 +1721,15 @@ triggerImmediateDataChange(UA_Server *server, UA_Session *session,
         /* TODO: Allow async read for datachanges */
         UA_DataValue value;
         UA_DataValue_init(&value);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_SYNC);
+#endif
         UA_Boolean done =
             ReadWithNodeMaybeAsync(node, server, session, mon->timestampsToReturn,
                                    &mon->itemToMonitor, &value);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        setOperationMode(server, modePrev);
+#endif
         if(!done) {
             if(server->config.asyncOperationCancelCallback)
                 server->config.asyncOperationCancelCallback(server, &value);
@@ -1944,7 +1966,13 @@ UA_StatusCode
 UA_Server_write(UA_Server *server, const UA_WriteValue *value) {
     UA_StatusCode res = UA_STATUSCODE_GOOD;
     lockServer(server);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_SYNC);
+#endif
     Operation_Write(server, &server->adminSession, value, &res);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    setOperationMode(server, modePrev);
+#endif
     /* If writing is async, signal that we can no longer receive the statuscode */
     if(res == UA_STATUSCODE_GOODCOMPLETESASYNCHRONOUSLY) {
         if(server->config.asyncOperationCancelCallback)
@@ -1990,7 +2018,13 @@ writeAttribute(UA_Server *server, UA_Session *session,
     }
 
     UA_StatusCode res = UA_STATUSCODE_GOOD;
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_SYNC);
+#endif
     Operation_Write(server, session, &wvalue, &res);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    setOperationMode(server, modePrev);
+#endif
     /* If writing is async, signal that we can no longer receive the statuscode */
     if(res == UA_STATUSCODE_GOODCOMPLETESASYNCHRONOUSLY) {
         if(server->config.asyncOperationCancelCallback)

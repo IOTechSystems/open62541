@@ -198,6 +198,16 @@ typedef struct session_list_entry {
     UA_Session session;
 } session_list_entry;
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+/* How the operation that calls the user callbacks waits for their result, see
+ * UA_Server_isAsyncOperationAllowed and UA_Server_isMonitoredItemSample */
+typedef enum {
+    UA_OPERATIONMODE_SYNC = 0, /* The result is needed right away */
+    UA_OPERATIONMODE_ASYNC,    /* The caller waits for an async result */
+    UA_OPERATIONMODE_SAMPLE    /* Sampling a MonitoredItem, waits for an async result */
+} UA_OperationMode;
+#endif
+
 struct UA_Server {
     /* Config */
     UA_ServerConfig config;
@@ -214,6 +224,11 @@ struct UA_Server {
     UA_ServerComponentTree serverComponents;
 
     UA_AsyncManager asyncManager;
+
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    /* The mode of the current operation. Protected by the serviceMutex. */
+    UA_OperationMode operationMode;
+#endif
 
     /* Custom datatypes that are internally created and cleaned up at the end of
      * the server lifecycle. The next->pointer points to the server config. So
@@ -571,6 +586,20 @@ allocProcessServiceOperations(UA_Server *server, UA_Session *session,
 
 void lockServer(UA_Server *server);
 void unlockServer(UA_Server *server);
+
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+/* Set the mode of the following operation, as seen by its user callbacks
+ * (UA_Server_isAsyncOperationAllowed, UA_Server_isMonitoredItemSample).
+ * Returns the previous mode, which the caller restores once the operation has
+ * returned. */
+static UA_INLINE UA_OperationMode
+setOperationMode(UA_Server *server, UA_OperationMode mode) {
+    UA_LOCK_ASSERT(&server->serviceMutex);
+    UA_OperationMode prev = server->operationMode;
+    server->operationMode = mode;
+    return prev;
+}
+#endif
 
 /******************************************/
 /* Internal function calls, without locks */

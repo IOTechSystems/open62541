@@ -1428,6 +1428,34 @@ UA_EXPORT UA_THREADSAFE UA_StatusCode
 UA_Server_setAsyncWriteResult(UA_Server *server, const UA_DataValue *value,
                               UA_StatusCode result);
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+/* Whether the operation that called the current callback can complete
+ * asynchronously. Only valid inside a CallbackValueSource read or write
+ * callback or a method callback, where the server lock is held.
+ *
+ * True for the Read, Write and Call services and for the local async
+ * operations (UA_Server_read_async, UA_Server_write_async,
+ * UA_Server_call_async), which includes the sampling of MonitoredItems. False
+ * where the result is needed right away, e.g. UA_Server_read,
+ * UA_Server_write, UA_Server_call and the test reads made when creating or
+ * modifying a MonitoredItem. There, returning
+ * UA_STATUSCODE_GOODCOMPLETESASYNCHRONOUSLY cancels the operation at once (the
+ * asyncOperationCancelCallback is called) and the caller gets
+ * UA_STATUSCODE_BADWAITINGFORRESPONSE, so the callback should complete
+ * synchronously instead. */
+UA_EXPORT UA_Boolean
+UA_Server_isAsyncOperationAllowed(const UA_Server *server);
+
+/* Whether the current callback is called to sample a MonitoredItem. Only valid
+ * where UA_Server_isAsyncOperationAllowed is. Sampling can complete
+ * asynchronously, but at most 8 sampling reads of a MonitoredItem are pending
+ * at a time, further samples fail with UA_STATUSCODE_BADTOOMANYOPERATIONS. So a
+ * callback whose value takes longer than the sampling interval to provide can
+ * complete sampling reads synchronously instead (e.g. with a cached value). */
+UA_EXPORT UA_Boolean
+UA_Server_isMonitoredItemSample(const UA_Server *server);
+#endif
+
 /**
  * The server supports asynchronous "local" read/write/call operations. The user
  * supplies a result-callback that gets called either synchronously (if the

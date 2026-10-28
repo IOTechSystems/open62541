@@ -226,6 +226,26 @@ VariableNode_externalDataSource(const UA_VariableNode *vn) {
     }
 }
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+/* The type to check a DataChangeFilter deadband against: the type of the
+ * current value, or the DataType of the variable if no value was read (e.g. the
+ * value is provided asynchronously and the read was cancelled). OPC UA Part 4
+ * allows a deadband for variables with a numeric DataType. */
+static const UA_DataType *
+monitoredItemValueType(UA_Server *server, const UA_ReadValueId *itemToMonitor,
+                       const UA_DataValue *v) {
+    if(v->value.type || itemToMonitor->attributeId != UA_ATTRIBUTEID_VALUE)
+        return v->value.type;
+    UA_NodeId dataType;
+    if(readWithReadValue(server, &itemToMonitor->nodeId, UA_ATTRIBUTEID_DATATYPE,
+                         &dataType) != UA_STATUSCODE_GOOD)
+        return NULL;
+    const UA_DataType *type = UA_Server_findDataType(server, &dataType);
+    UA_NodeId_clear(&dataType);
+    return type;
+}
+#endif
+
 /* Verify and adjust the parameters of a MonitoredItem */
 static UA_StatusCode
 checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
@@ -522,7 +542,12 @@ Operation_CreateMonitoredItem(UA_Server *server, UA_Session *session,
     }
 #endif
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    const UA_DataType *valueType =
+        monitoredItemValueType(server, &request->itemToMonitor, &v);
+#else
     const UA_DataType *valueType = v.value.type;
+#endif
     UA_DataValue_clear(&v);
 
     /* Allocate the MonitoredItem */
@@ -822,8 +847,14 @@ Operation_ModifyMonitoredItem(UA_Server *server, UA_Session *session, UA_Subscri
 
     /* Verify and adjust the new parameters. This still leaves the original
      * MonitoredItem untouched. */
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    const UA_DataType *valueType =
+        monitoredItemValueType(server, &mon->itemToMonitor, &v);
+#else
+    const UA_DataType *valueType = v.value.type;
+#endif
     result->statusCode =
-        checkAdjustMonitoredItemParams(server, session, mon, v.value.type,
+        checkAdjustMonitoredItemParams(server, session, mon, valueType,
                                        &params, &result->filterResult);
     UA_DataValue_clear(&v);
     if(result->statusCode != UA_STATUSCODE_GOOD) {
