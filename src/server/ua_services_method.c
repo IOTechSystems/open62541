@@ -424,7 +424,13 @@ UA_Server_call(UA_Server *server, const UA_CallMethodRequest *request) {
     UA_CallMethodResult result;
     UA_CallMethodResult_init(&result);
     lockServer(server);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_SYNC);
+#endif
     Operation_CallMethod(server, &server->adminSession, request, &result);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    setOperationMode(server, modePrev);
+#endif
     /* Cancel asynchronous responses right away */
     if(result.statusCode == UA_STATUSCODE_GOODCOMPLETESASYNCHRONOUSLY) {
         if(server->config.asyncOperationCancelCallback)

@@ -1317,6 +1317,484 @@ START_TEST(Async_setAsyncMethodResult_null_returnsError) {
 } END_TEST
 #endif
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+
+/* UA_Server_isAsyncOperationAllowed and UA_Server_isMonitoredItemSample, as
+ * seen by the callbacks of the probe nodes. The callbacks complete
+ * synchronously and record the flags. The server is iterated manually (no
+ * server thread). */
+
+#define PROBE_MAX 16
+static UA_Boolean probeAllowed[PROBE_MAX];
+static UA_Boolean probeSample[PROBE_MAX];
+static size_t probeCount;
+
+static void
+probeRecord(UA_Server *s) {
+    ck_assert_uint_lt(probeCount, PROBE_MAX);
+    probeAllowed[probeCount] = UA_Server_isAsyncOperationAllowed(s);
+    probeSample[probeCount++] = UA_Server_isMonitoredItemSample(s);
+}
+
+static void
+probeSetValue(UA_DataValue *value) {
+    UA_UInt32 val = 42;
+    UA_Variant_setScalarCopy(&value->value, &val, &UA_TYPES[UA_TYPES_UINT32]);
+    value->hasValue = true;
+}
+
+static UA_StatusCode
+readCallback_probe(UA_Server *s, const UA_NodeId *sessionId,
+                   void *sessionContext, const UA_NodeId *nodeId,
+                   void *nodeContext, UA_Boolean includeSourceTimeStamp,
+                   const UA_NumericRange *range, UA_DataValue *value) {
+    probeRecord(s);
+    probeSetValue(value);
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+writeCallback_probe(UA_Server *s, const UA_NodeId *sessionId,
+                    void *sessionContext, const UA_NodeId *nodeId,
+                    void *nodeContext, const UA_NumericRange *range,
+                    const UA_DataValue *value) {
+    probeRecord(s);
+    return UA_STATUSCODE_GOOD;
+}
+
+/* Reads the probe variable with UA_Server_readValue from within the read */
+static UA_StatusCode
+readCallback_nested(UA_Server *s, const UA_NodeId *sessionId,
+                    void *sessionContext, const UA_NodeId *nodeId,
+                    void *nodeContext, UA_Boolean includeSourceTimeStamp,
+                    const UA_NumericRange *range, UA_DataValue *value) {
+    probeRecord(s);
+    UA_Variant v;
+    UA_Variant_init(&v);
+    UA_StatusCode res = UA_Server_readValue(s, UA_NODEID_STRING(1, "probeVar"), &v);
+    UA_Variant_clear(&v);
+    probeRecord(s);
+    probeSetValue(value);
+    return res;
+}
+
+#ifdef UA_ENABLE_METHODCALLS
+static UA_StatusCode
+methodCallback_probe(UA_Server *s,
+                     const UA_NodeId *sessionId, void *sessionHandle,
+                     const UA_NodeId *methodId, void *methodContext,
+                     const UA_NodeId *objectId, void *objectContext,
+                     size_t inputSize, const UA_Variant *input,
+                     size_t outputSize, UA_Variant *output) {
+    probeRecord(s);
+    return UA_STATUSCODE_GOOD;
+}
+
+static void
+callResultCallback_probe(UA_Server *s, void *context, const UA_CallMethodResult *result) {
+    *(UA_StatusCode*)context = result->statusCode;
+}
+#endif
+
+static void
+readResultCallback_probe(UA_Server *s, void *context, const UA_DataValue *result) {
+    *(UA_Boolean*)context = result->hasValue;
+}
+
+static void
+writeResultCallback_probe(UA_Server *s, void *context, UA_StatusCode result) {
+    *(UA_StatusCode*)context = result;
+}
+
+static void
+dataChangeCallback_probe(UA_Server *s, UA_UInt32 monitoredItemId,
+                         void *monitoredItemContext, const UA_NodeId *nodeId,
+                         void *nodeContext, UA_UInt32 attributeId,
+                         const UA_DataValue *value) {}
+
+/* Once enabled, provides its value only asynchronously, like a source that
+ * ignores UA_Server_isAsyncOperationAllowed: a local read is then cancelled */
+static UA_Boolean asyncOnlyEnabled;
+
+static UA_StatusCode
+readCallback_asyncOnly(UA_Server *s, const UA_NodeId *sessionId,
+                       void *sessionContext, const UA_NodeId *nodeId,
+                       void *nodeContext, UA_Boolean includeSourceTimeStamp,
+                       const UA_NumericRange *range, UA_DataValue *value) {
+    if(asyncOnlyEnabled && !UA_Server_isAsyncOperationAllowed(s))
+        return UA_STATUSCODE_GOODCOMPLETESASYNCHRONOUSLY;
+    return UA_STATUSCODE_GOOD; /* No value yet */
+}
+
+static void
+addProbeVariableWithType(const char *name, UA_CallbackValueSource source,
+                         UA_NodeId dataType) {
+    UA_VariableAttributes varAttr = UA_VariableAttributes_default;
+    varAttr.accessLevel |= UA_ACCESSLEVELMASK_WRITE;
+    varAttr.writeMask = UA_WRITEMASK_VALUERANK;
+    varAttr.dataType = dataType;
+    UA_StatusCode res =
+        UA_Server_addCallbackValueSourceVariableNode(server, UA_NODEID_STRING(1, (char*)(uintptr_t)name),
+                                                     UA_NS0ID(OBJECTSFOLDER), UA_NS0ID(HASCOMPONENT),
+                                                     UA_QUALIFIEDNAME(1, (char*)(uintptr_t)name),
+                                                     UA_NS0ID(BASEDATAVARIABLETYPE),
+                                                     varAttr, source, NULL, NULL);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+}
+
+static void
+addProbeVariable(const char *name, UA_CallbackValueSource source) {
+    addProbeVariableWithType(name, source, UA_NS0ID(BASEDATATYPE));
+}
+
+static void setupAllowed(void) {
+    probeCount = 0;
+    asyncOnlyEnabled = false;
+    server = UA_Server_newForUnitTest();
+    ck_assert(server != NULL);
+
+    addProbeVariable("probeVar", (UA_CallbackValueSource){readCallback_probe, writeCallback_probe});
+    addProbeVariable("nestedVar", (UA_CallbackValueSource){readCallback_nested, writeCallback_probe});
+    addProbeVariableWithType("asyncUInt32Var",
+                             (UA_CallbackValueSource){readCallback_asyncOnly, writeCallback_probe},
+                             UA_NS0ID(UINT32));
+    addProbeVariableWithType("asyncStringVar",
+                             (UA_CallbackValueSource){readCallback_asyncOnly, writeCallback_probe},
+                             UA_NS0ID(STRING));
+
+#ifdef UA_ENABLE_METHODCALLS
+    UA_MethodAttributes methodAttr = UA_MethodAttributes_default;
+    methodAttr.executable = true;
+    methodAttr.userExecutable = true;
+    UA_StatusCode res =
+        UA_Server_addMethodNode(server, UA_NODEID_STRING(1, "probeMethod"),
+                                UA_NS0ID(OBJECTSFOLDER), UA_NS0ID(HASCOMPONENT),
+                                UA_QUALIFIEDNAME(1, "probeMethod"),
+                                methodAttr, &methodCallback_probe,
+                                0, NULL, 0, NULL, NULL, NULL);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+#endif
+
+    UA_Server_run_startup(server);
+    probeCount = 0; /* Ignore reads made while adding the nodes */
+}
+
+static void teardownAllowed(void) {
+    UA_Server_run_shutdown(server);
+    UA_Server_delete(server);
+}
+
+START_TEST(AsyncAllowed_outsideOperation) {
+    ck_assert(!UA_Server_isAsyncOperationAllowed(server));
+    ck_assert(!UA_Server_isMonitoredItemSample(server));
+} END_TEST
+
+START_TEST(AsyncAllowed_read) {
+    UA_ReadValueId rvid;
+    UA_ReadValueId_init(&rvid);
+    rvid.nodeId = UA_NODEID_STRING(1, "probeVar");
+    rvid.attributeId = UA_ATTRIBUTEID_VALUE;
+
+    /* Read service: allowed */
+    UA_ReadRequest request;
+    UA_ReadRequest_init(&request);
+    request.timestampsToReturn = UA_TIMESTAMPSTORETURN_NEITHER;
+    request.nodesToRead = &rvid;
+    request.nodesToReadSize = 1;
+    UA_ReadResponse response;
+    UA_ReadResponse_init(&response);
+    lockServer(server);
+    UA_Boolean done = Service_Read(server, &server->adminSession, &request, &response);
+    ck_assert(!UA_Server_isAsyncOperationAllowed(server)); /* Restored */
+    unlockServer(server);
+    ck_assert(done);
+    ck_assert_uint_eq(response.resultsSize, 1);
+    ck_assert(response.results[0].hasValue);
+    UA_ReadResponse_clear(&response);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(probeAllowed[0]);
+    ck_assert(!probeSample[0]);
+
+    /* Local read: not allowed */
+    probeCount = 0;
+    UA_Variant v;
+    UA_Variant_init(&v);
+    UA_StatusCode res = UA_Server_readValue(server, rvid.nodeId, &v);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    UA_Variant_clear(&v);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(!probeAllowed[0]);
+
+    /* Local async read: allowed */
+    probeCount = 0;
+    UA_Boolean hasValue = false;
+    res = UA_Server_read_async(server, &rvid, UA_TIMESTAMPSTORETURN_NEITHER,
+                               readResultCallback_probe, &hasValue, 0);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    ck_assert(hasValue);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(probeAllowed[0]);
+    ck_assert(!probeSample[0]); /* Not a MonitoredItem sample */
+} END_TEST
+
+START_TEST(AsyncAllowed_write) {
+    UA_UInt32 val = 7;
+    UA_WriteValue wv;
+    UA_WriteValue_init(&wv);
+    wv.nodeId = UA_NODEID_STRING(1, "probeVar");
+    wv.attributeId = UA_ATTRIBUTEID_VALUE;
+    UA_Variant_setScalar(&wv.value.value, &val, &UA_TYPES[UA_TYPES_UINT32]);
+    wv.value.hasValue = true;
+
+    /* Write service: allowed */
+    UA_WriteRequest request;
+    UA_WriteRequest_init(&request);
+    request.nodesToWrite = &wv;
+    request.nodesToWriteSize = 1;
+    UA_WriteResponse response;
+    UA_WriteResponse_init(&response);
+    lockServer(server);
+    UA_Boolean done = Service_Write(server, &server->adminSession, &request, &response);
+    ck_assert(!UA_Server_isAsyncOperationAllowed(server)); /* Restored */
+    unlockServer(server);
+    ck_assert(done);
+    ck_assert_uint_eq(response.resultsSize, 1);
+    ck_assert_uint_eq(response.results[0], UA_STATUSCODE_GOOD);
+    UA_WriteResponse_clear(&response);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(probeAllowed[0]);
+
+    /* Local write: not allowed */
+    probeCount = 0;
+    UA_StatusCode res = UA_Server_write(server, &wv);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(!probeAllowed[0]);
+
+    /* Local async write: allowed */
+    probeCount = 0;
+    UA_StatusCode writeResult = UA_STATUSCODE_BADINTERNALERROR;
+    res = UA_Server_write_async(server, &wv, writeResultCallback_probe, &writeResult, 0);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(writeResult, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(probeAllowed[0]);
+} END_TEST
+
+/* The current value read by the type checks of a write is needed right away,
+ * also within the Write service */
+START_TEST(AsyncAllowed_writeTypeCheck) {
+    UA_Int32 valueRank = UA_VALUERANK_ANY;
+    UA_WriteValue wv;
+    UA_WriteValue_init(&wv);
+    wv.nodeId = UA_NODEID_STRING(1, "probeVar");
+    wv.attributeId = UA_ATTRIBUTEID_VALUERANK;
+    UA_Variant_setScalar(&wv.value.value, &valueRank, &UA_TYPES[UA_TYPES_INT32]);
+    wv.value.hasValue = true;
+
+    UA_WriteRequest request;
+    UA_WriteRequest_init(&request);
+    request.nodesToWrite = &wv;
+    request.nodesToWriteSize = 1;
+    UA_WriteResponse response;
+    UA_WriteResponse_init(&response);
+    lockServer(server);
+    UA_Boolean done = Service_Write(server, &server->adminSession, &request, &response);
+    unlockServer(server);
+    ck_assert(done);
+    ck_assert_uint_eq(response.resultsSize, 1);
+    ck_assert_uint_eq(response.results[0], UA_STATUSCODE_GOOD);
+    UA_WriteResponse_clear(&response);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(!probeAllowed[0]);
+} END_TEST
+
+/* A local read made within an operation that is allowed to complete
+ * asynchronously is not, and the outer operation is allowed again afterwards */
+START_TEST(AsyncAllowed_nested) {
+    UA_ReadValueId rvid;
+    UA_ReadValueId_init(&rvid);
+    rvid.nodeId = UA_NODEID_STRING(1, "nestedVar");
+    rvid.attributeId = UA_ATTRIBUTEID_VALUE;
+    UA_ReadRequest request;
+    UA_ReadRequest_init(&request);
+    request.timestampsToReturn = UA_TIMESTAMPSTORETURN_NEITHER;
+    request.nodesToRead = &rvid;
+    request.nodesToReadSize = 1;
+    UA_ReadResponse response;
+    UA_ReadResponse_init(&response);
+    lockServer(server);
+    UA_Boolean done = Service_Read(server, &server->adminSession, &request, &response);
+    unlockServer(server);
+    ck_assert(done);
+    ck_assert_uint_eq(response.resultsSize, 1);
+    ck_assert(response.results[0].hasValue);
+    UA_ReadResponse_clear(&response);
+
+    ck_assert_uint_eq(probeCount, 3);
+    ck_assert(probeAllowed[0]);  /* nestedVar, before the local read */
+    ck_assert(!probeAllowed[1]); /* probeVar, local read */
+    ck_assert(probeAllowed[2]);  /* nestedVar, after the local read */
+} END_TEST
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+/* The test read when creating a MonitoredItem is not allowed, the sampling
+ * (UA_MonitoredItem_sample uses read_async) is and is a MonitoredItem sample */
+START_TEST(AsyncAllowed_monitoredItem) {
+    UA_MonitoredItemCreateRequest item;
+    UA_MonitoredItemCreateRequest_init(&item);
+    item.itemToMonitor.nodeId = UA_NODEID_STRING(1, "probeVar");
+    item.itemToMonitor.attributeId = UA_ATTRIBUTEID_VALUE;
+    item.monitoringMode = UA_MONITORINGMODE_REPORTING;
+    item.requestedParameters.samplingInterval = 100.0;
+    item.requestedParameters.queueSize = 1;
+    item.requestedParameters.discardOldest = true;
+    UA_MonitoredItemCreateResult result =
+        UA_Server_createDataChangeMonitoredItem(server, UA_TIMESTAMPSTORETURN_NEITHER,
+                                                item, NULL, dataChangeCallback_probe);
+    ck_assert_uint_eq(result.statusCode, UA_STATUSCODE_GOOD);
+    ck_assert_uint_ge(probeCount, 1);
+    ck_assert(!probeAllowed[0]); /* Test read */
+    ck_assert(!probeSample[0]);
+    for(size_t i = 1; i < probeCount; i++) {
+        ck_assert(probeAllowed[i]); /* Initial sample */
+        ck_assert(probeSample[i]);
+    }
+
+    probeCount = 0;
+    for(size_t i = 0; i < 3; i++) {
+        UA_fakeSleep(100);
+        UA_Server_run_iterate(server, false);
+    }
+    ck_assert_uint_ge(probeCount, 1);
+    for(size_t i = 0; i < probeCount; i++) {
+        ck_assert(probeAllowed[i]);
+        ck_assert(probeSample[i]);
+    }
+    lockServer(server);
+    ck_assert(!UA_Server_isMonitoredItemSample(server)); /* Restored */
+    unlockServer(server);
+
+    UA_Server_deleteMonitoredItem(server, result.monitoredItemId);
+} END_TEST
+
+/* A local read made within the sampling of a MonitoredItem is not a sample, and
+ * the outer callback is again afterwards */
+START_TEST(AsyncAllowed_nestedInSample) {
+    UA_MonitoredItemCreateRequest item;
+    UA_MonitoredItemCreateRequest_init(&item);
+    item.itemToMonitor.nodeId = UA_NODEID_STRING(1, "nestedVar");
+    item.itemToMonitor.attributeId = UA_ATTRIBUTEID_VALUE;
+    item.monitoringMode = UA_MONITORINGMODE_REPORTING;
+    item.requestedParameters.samplingInterval = 100.0;
+    item.requestedParameters.queueSize = 1;
+    item.requestedParameters.discardOldest = true;
+    UA_MonitoredItemCreateResult result =
+        UA_Server_createDataChangeMonitoredItem(server, UA_TIMESTAMPSTORETURN_NEITHER,
+                                                item, NULL, dataChangeCallback_probe);
+    ck_assert_uint_eq(result.statusCode, UA_STATUSCODE_GOOD);
+
+    probeCount = 0;
+    UA_fakeSleep(100);
+    UA_Server_run_iterate(server, false);
+    ck_assert_uint_ge(probeCount, 3);
+    ck_assert_uint_eq(probeCount % 3, 0);
+    for(size_t i = 0; i < probeCount; i += 3) {
+        ck_assert(probeSample[i]);      /* nestedVar, before the local read */
+        ck_assert(!probeAllowed[i+1]);  /* probeVar, local read */
+        ck_assert(!probeSample[i+1]);
+        ck_assert(probeSample[i+2]);    /* nestedVar, after the local read */
+    }
+
+    UA_Server_deleteMonitoredItem(server, result.monitoredItemId);
+} END_TEST
+
+static UA_MonitoredItemCreateResult
+createDeadbandMonitoredItem(const char *name) {
+    UA_DataChangeFilter filter;
+    UA_DataChangeFilter_init(&filter);
+    filter.trigger = UA_DATACHANGETRIGGER_STATUSVALUE;
+    filter.deadbandType = UA_DEADBANDTYPE_ABSOLUTE;
+    filter.deadbandValue = 1.0;
+
+    UA_MonitoredItemCreateRequest item;
+    UA_MonitoredItemCreateRequest_init(&item);
+    item.itemToMonitor.nodeId = UA_NODEID_STRING(1, (char*)(uintptr_t)name);
+    item.itemToMonitor.attributeId = UA_ATTRIBUTEID_VALUE;
+    item.monitoringMode = UA_MONITORINGMODE_REPORTING;
+    item.requestedParameters.samplingInterval = 100.0;
+    item.requestedParameters.queueSize = 1;
+    item.requestedParameters.discardOldest = true;
+    UA_ExtensionObject_setValue(&item.requestedParameters.filter, &filter,
+                                &UA_TYPES[UA_TYPES_DATACHANGEFILTER]);
+    return UA_Server_createDataChangeMonitoredItem(server, UA_TIMESTAMPSTORETURN_NEITHER,
+                                                   item, NULL, dataChangeCallback_probe);
+}
+
+/* The test read when creating a MonitoredItem gets no value. The deadband is
+ * checked against the DataType of the variable instead. */
+START_TEST(AsyncAllowed_deadbandWithoutValue) {
+    asyncOnlyEnabled = true;
+
+    UA_MonitoredItemCreateResult result = createDeadbandMonitoredItem("asyncUInt32Var");
+    ck_assert_uint_eq(result.statusCode, UA_STATUSCODE_GOOD);
+    UA_Server_deleteMonitoredItem(server, result.monitoredItemId);
+
+    /* Not numeric */
+    result = createDeadbandMonitoredItem("asyncStringVar");
+    ck_assert_uint_eq(result.statusCode, UA_STATUSCODE_BADFILTERNOTALLOWED);
+
+    asyncOnlyEnabled = false;
+} END_TEST
+#endif
+
+#ifdef UA_ENABLE_METHODCALLS
+START_TEST(AsyncAllowed_call) {
+    UA_CallMethodRequest cmr;
+    UA_CallMethodRequest_init(&cmr);
+    cmr.objectId = UA_NS0ID(OBJECTSFOLDER);
+    cmr.methodId = UA_NODEID_STRING(1, "probeMethod");
+
+    /* Call service: allowed */
+    UA_CallRequest request;
+    UA_CallRequest_init(&request);
+    request.methodsToCall = &cmr;
+    request.methodsToCallSize = 1;
+    UA_CallResponse response;
+    UA_CallResponse_init(&response);
+    lockServer(server);
+    UA_Boolean done = Service_Call(server, &server->adminSession, &request, &response);
+    ck_assert(!UA_Server_isAsyncOperationAllowed(server)); /* Restored */
+    unlockServer(server);
+    ck_assert(done);
+    ck_assert_uint_eq(response.resultsSize, 1);
+    ck_assert_uint_eq(response.results[0].statusCode, UA_STATUSCODE_GOOD);
+    UA_CallResponse_clear(&response);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(probeAllowed[0]);
+
+    /* Local call: not allowed */
+    probeCount = 0;
+    UA_CallMethodResult cr = UA_Server_call(server, &cmr);
+    ck_assert_uint_eq(cr.statusCode, UA_STATUSCODE_GOOD);
+    UA_CallMethodResult_clear(&cr);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(!probeAllowed[0]);
+
+    /* Local async call: allowed */
+    probeCount = 0;
+    UA_StatusCode callResult = UA_STATUSCODE_BADINTERNALERROR;
+    UA_StatusCode res = UA_Server_call_async(server, &cmr, callResultCallback_probe,
+                                             &callResult, 0);
+    ck_assert_uint_eq(res, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(callResult, UA_STATUSCODE_GOOD);
+    ck_assert_uint_eq(probeCount, 1);
+    ck_assert(probeAllowed[0]);
+} END_TEST
+#endif
+
+#endif /* UA_ENABLE_IOTECH_MODIFICATIONS */
+
 /* --- Suite registration --- */
 
 static Suite* method_async_suite(void) {
@@ -1362,6 +1840,25 @@ static Suite* method_async_suite(void) {
     tcase_add_test(tc_manager, Async_call_error_result);
     tcase_add_test(tc_manager, Async_multiple_parallel_operations);
     suite_add_tcase(s, tc_manager);
+
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    TCase* tc_allowed = tcase_create("AsyncOperationAllowed");
+    tcase_add_checked_fixture(tc_allowed, setupAllowed, teardownAllowed);
+    tcase_add_test(tc_allowed, AsyncAllowed_outsideOperation);
+    tcase_add_test(tc_allowed, AsyncAllowed_read);
+    tcase_add_test(tc_allowed, AsyncAllowed_write);
+    tcase_add_test(tc_allowed, AsyncAllowed_writeTypeCheck);
+    tcase_add_test(tc_allowed, AsyncAllowed_nested);
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+    tcase_add_test(tc_allowed, AsyncAllowed_monitoredItem);
+    tcase_add_test(tc_allowed, AsyncAllowed_nestedInSample);
+    tcase_add_test(tc_allowed, AsyncAllowed_deadbandWithoutValue);
+#endif
+#ifdef UA_ENABLE_METHODCALLS
+    tcase_add_test(tc_allowed, AsyncAllowed_call);
+#endif
+    suite_add_tcase(s, tc_allowed);
+#endif
 
     return s;
 }

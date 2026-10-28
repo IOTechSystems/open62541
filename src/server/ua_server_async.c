@@ -557,6 +557,18 @@ UA_Server_cancelAsync(UA_Server *server, void *context, UA_StatusCode opstatus,
     unlockServer(server);
 }
 
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+UA_Boolean
+UA_Server_isAsyncOperationAllowed(const UA_Server *server) {
+    return server->operationMode != UA_OPERATIONMODE_SYNC;
+}
+
+UA_Boolean
+UA_Server_isMonitoredItemSample(const UA_Server *server) {
+    return server->operationMode == UA_OPERATIONMODE_SAMPLE;
+}
+#endif
+
 /********/
 /* Read */
 /********/
@@ -606,8 +618,14 @@ Service_Read(UA_Server *server, UA_Session *session, const UA_ReadRequest *reque
 
     /* Execute the operations */
     for(size_t i = 0; i < request->nodesToReadSize; i++) {
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_ASYNC);
+#endif
         UA_Boolean done = Operation_Read(server, session, request->timestampsToReturn,
                                          &request->nodesToRead[i], &response->results[i]);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        setOperationMode(server, modePrev);
+#endif
         if(!done)
             persistAsyncResponseOperation(server, &aopArray[i],
                                           UA_ASYNCOPERATIONTYPE_READ_REQUEST,
@@ -647,7 +665,8 @@ read_async(UA_Server *server, UA_Session *session, const UA_ReadValueId *operati
         timeoutDate = tNow + (timeout * UA_DATETIME_MSEC);
     }
 
-    /* Call the operation */
+    /* Call the operation. The caller sets the operation mode (async, or sample
+     * for MonitoredItems). */
     UA_Boolean done = Operation_Read(server, session, ttr, operation, &op->output.directRead);
     if(!done)
         return persistAsyncDirectOperation(server, op, UA_ASYNCOPERATIONTYPE_READ_DIRECT,
@@ -664,8 +683,14 @@ UA_Server_read_async(UA_Server *server, const UA_ReadValueId *operation,
                      UA_TimestampsToReturn ttr, UA_ServerAsyncReadResultCallback callback,
                      void *context, UA_UInt32 timeout) {
     lockServer(server);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_ASYNC);
+#endif
     UA_StatusCode res = read_async(server, &server->adminSession, operation,
                                    ttr, callback, context, timeout);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    setOperationMode(server, modePrev);
+#endif
     unlockServer(server);
     return res;
 }
@@ -727,8 +752,14 @@ Service_Write(UA_Server *server, UA_Session *session,
          * The original writeValue might be _clear'ed before the lookup. */
         UA_AsyncOperation *aop = &aopArray[i];
         aop->context.writeValue = request->nodesToWrite[i];
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_ASYNC);
+#endif
         UA_Boolean done = Operation_Write(server, session, &aop->context.writeValue,
                                           &response->results[i]);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        setOperationMode(server, modePrev);
+#endif
         if(!done)
             persistAsyncResponseOperation(server, aop, UA_ASYNCOPERATIONTYPE_WRITE_REQUEST,
                                           ar, &response->results[i]);
@@ -769,8 +800,14 @@ write_async(UA_Server *server, UA_Session *session, const UA_WriteValue *operati
 
     /* Call the operation */
     op->context.writeValue = *operation; /* Stable pointer */
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_ASYNC);
+#endif
     UA_Boolean done = Operation_Write(server, session, &op->context.writeValue,
                                       &op->output.directWrite);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    setOperationMode(server, modePrev);
+#endif
     if(!done)
         return persistAsyncDirectOperation(server, op, UA_ASYNCOPERATIONTYPE_WRITE_DIRECT,
                                            context, (uintptr_t)callback, timeoutDate);
@@ -849,8 +886,14 @@ Service_Call(UA_Server *server, UA_Session *session,
 
     /* Execute the operations */
     for(size_t i = 0; i < request->methodsToCallSize; i++) {
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_ASYNC);
+#endif
         UA_Boolean done = Operation_CallMethod(server, session, &request->methodsToCall[i],
                                                &response->results[i]);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+        setOperationMode(server, modePrev);
+#endif
         if(!done)
             persistAsyncResponseOperation(server, &aopArray[i],
                                           UA_ASYNCOPERATIONTYPE_CALL_REQUEST,
@@ -891,8 +934,14 @@ call_async(UA_Server *server, UA_Session *session, const UA_CallMethodRequest *o
     }
 
     /* Call the operation */
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    UA_OperationMode modePrev = setOperationMode(server, UA_OPERATIONMODE_ASYNC);
+#endif
     UA_Boolean done = Operation_CallMethod(server, session, operation,
                                            &op->output.directCall);
+#ifdef UA_ENABLE_IOTECH_MODIFICATIONS
+    setOperationMode(server, modePrev);
+#endif
     if(!done)
         return persistAsyncDirectOperation(server, op, UA_ASYNCOPERATIONTYPE_CALL_DIRECT,
                                            context, (uintptr_t)callback, timeoutDate);
